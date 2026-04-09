@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+video/out/
+video/node_modules/

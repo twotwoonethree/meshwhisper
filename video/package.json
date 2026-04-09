@@ -1,0 +1,23 @@
+{
+  "name": "meshwhisper-video",
+  "version": "1.0.0",
+  "description": "MeshWhisper explainer video built with Remotion",
+  "scripts": {
+    "preview": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts MeshWhisperExplainer out/meshwhisper-explainer.mp4",
+    "build": "remotion render src/index.ts MeshWhisperExplainer out/meshwhisper-explainer.mp4 --codec h264 --quality 80"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@remotion/cli": "^4.0.447",
+    "@remotion/renderer": "^4.0.447",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "remotion": "^4.0.447",
+    "typescript": "^6.0.2"
+  }
+}
