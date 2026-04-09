@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeshWhisper Test Console</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ===== Left Sidebar ===== -->
+    <aside id="sidebar">
+      <header id="sidebar-header">
+        <div class="identity">
+          <span id="status-indicator" class="status-dot offline" title="Disconnected"></span>
+          <span id="peer-name" class="peer-name">My Peer</span>
+        </div>
+      </header>
+
+      <!-- Connect to Peer -->
+      <section class="sidebar-section">
+        <h3 class="section-title">Connect to Peer</h3>
+        <div class="input-group">
+          <input
+            type="text"
+            id="connect-address"
+            class="input"
+            placeholder="ws://localhost:3002"
+            spellcheck="false"
+            autocomplete="off"
+          >
+          <button id="connect-btn" class="btn btn-primary">Connect</button>
+        </div>
+      </section>
+
+      <!-- Exchange Contacts -->
+      <section class="sidebar-section">
+        <h3 class="section-title">Exchange Contacts</h3>
+        <button id="generate-contact-btn" class="btn btn-secondary btn-block">
+          <span class="btn-icon">&#9783;</span> Generate QR / Code
+        </button>
+        <div id="contact-data-output" class="contact-output" hidden></div>
+        <div class="input-group mt-sm">
+          <input
+            type="text"
+            id="contact-data-input"
+            class="input"
+            placeholder="Paste contact data..."
+            spellcheck="false"
+            autocomplete="off"
+          >
+          <button id="accept-contact-btn" class="btn btn-primary">Accept</button>
+        </div>
+      </section>
+
+      <!-- Peers List -->
+      <section class="sidebar-section sidebar-section-grow">
+        <h3 class="section-title">Contacts</h3>
+        <ul id="peers-list" class="peers-list">
+          <!-- Populated by app.js -->
+          <!-- Example structure:
+          <li class="peer-item active" data-peer-id="abc123">
+            <span class="status-dot online"></span>
+            <span class="peer-item-name">Bob</span>
+          </li>
+          -->
+        </ul>
+      </section>
+    </aside>
+
+    <!-- ===== Center Chat Area ===== -->
+    <main id="chat-area">
+      <header id="chat-header">
+        <div class="chat-header-left">
+          <h2 id="chat-header-name">Select a contact</h2>
+        </div>
+        <div class="chat-header-right">
+          <button id="debug-toggle" class="btn btn-ghost" title="Toggle debug panel">
+            &#9881; Debug
+          </button>
+        </div>
+      </header>
+
+      <div id="messages-container" class="messages-container">
+        <!-- Populated by app.js -->
+        <!-- Example structures:
+
+        Received message:
+        <div class="message message-received">
+          <div class="message-bubble">
+            <p class="message-text">Hey, how's it going?</p>
+          </div>
+          <span class="message-time">12:34 PM</span>
+        </div>
+
+        Sent message:
+        <div class="message message-sent">
+          <div class="message-bubble">
+            <p class="message-text">All good! The mesh is working.</p>
+          </div>
+          <span class="message-time">12:35 PM</span>
+        </div>
+
+        System message:
+        <div class="message message-system">
+          <span class="message-system-text">Connected to Bob</span>
+        </div>
+        -->
+        <div class="empty-state">
+          <div class="empty-state-icon">&#11042;</div>
+          <p>Select a contact to start messaging</p>
+          <p class="text-muted">or connect to a peer using the sidebar</p>
+        </div>
+      </div>
+
+      <footer id="chat-input-bar">
+        <input
+          type="text"
+          id="message-input"
+          class="input input-message"
+          placeholder="Type a message..."
+          autocomplete="off"
+        >
+        <button id="send-btn" class="btn btn-primary btn-send" disabled>
+          <svg class="send-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </footer>
+    </main>
+
+    <!-- ===== Right Debug Panel ===== -->
+    <aside id="debug-panel" class="debug-panel collapsed">
+      <header class="debug-header">
+        <h3>SDK Internals</h3>
+        <button id="debug-close" class="btn btn-ghost btn-sm" title="Close debug panel">&times;</button>
+      </header>
+      <div id="debug-content" class="debug-content">
+        <pre class="debug-json">{ "status": "waiting for SDK..." }</pre>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- App title bar (overlay at top) -->
+  <header id="title-bar">
+    <span class="title-bar-icon">&#9671;&#9670;&#9671;</span>
+    <span class="title-bar-text">MeshWhisper Test Console</span>
+  </header>
+
+  <script src="app.js"></script>
+</body>
+</html>
