@@ -1,0 +1,22 @@
+{
+  "name": "@meshwhisper/cli",
+  "version": "0.1.0",
+  "description": "MeshWhisper CLI — developer tooling for MeshWhisper projects",
+  "type": "module",
+  "bin": {
+    "meshwhisper": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT"
+}

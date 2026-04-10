@@ -1,0 +1,24 @@
+{
+  "name": "@meshwhisper/push-service",
+  "version": "0.1.0",
+  "description": "MeshWhisper push notification service — dispatches APNs and FCM wake signals",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "meshwhisper-push": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "google-auth-library": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT"
+}

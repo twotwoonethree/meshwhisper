@@ -1,0 +1,227 @@
+#!/usr/bin/env node
+// ============================================================
+// MeshWhisper CLI
+// Developer tooling. Usage:
+//   npx @meshwhisper/cli init
+// ============================================================
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
+import pc from 'picocolors';
+
+// ============================================================
+// Helpers
+// ============================================================
+
+function randomHex(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  globalThis.crypto.getRandomValues(buf);
+  return Buffer.from(buf).toString('hex');
+}
+
+function randomBase64(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  globalThis.crypto.getRandomValues(buf);
+  return Buffer.from(buf).toString('base64');
+}
+
+function printBanner(): void {
+  console.log('');
+  console.log(pc.bold(pc.cyan('  MeshWhisper CLI')));
+  console.log(pc.dim('  Serverless P2P E2EE messaging SDK'));
+  console.log('');
+}
+
+function printStep(n: number, text: string): void {
+  console.log(pc.bold(pc.green(`  ${n}.`)) + ' ' + text);
+}
+
+function printNote(text: string): void {
+  console.log(pc.dim(`     ${text}`));
+}
+
+// ============================================================
+// Commands
+// ============================================================
+
+async function cmdInit(): Promise<void> {
+  printBanner();
+  console.log(pc.bold('  Initializing a new MeshWhisper project\n'));
+
+  const rl = readline.createInterface({ input, output });
+
+  // Detect package.json to guess the bundle ID
+  let detectedBundleId = 'com.example.myapp';
+  try {
+    const pkgRaw = fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8');
+    const pkg = JSON.parse(pkgRaw) as { name?: string };
+    if (pkg.name) {
+      // Convert "my-app" → "com.example.my-app" as a suggestion
+      detectedBundleId = `com.example.${pkg.name.replace(/^@[^/]+\//, '')}`;
+    }
+  } catch { /* no package.json — ignore */ }
+
+  const bundleId = (await rl.question(
+    pc.bold('  App bundle ID') + pc.dim(` (e.g. ${detectedBundleId}): `),
+  )).trim() || detectedBundleId;
+
+  const nodeChoice = (await rl.question(
+    pc.bold('  Node') + pc.dim(' [mesh/self-hosted] (default: mesh): '),
+  )).trim().toLowerCase() || 'mesh';
+
+  let nodeConfig = '"mesh"';
+  let selfHostedUrl = '';
+  if (nodeChoice === 'self-hosted' || nodeChoice === 'self') {
+    selfHostedUrl = (await rl.question(
+      pc.bold('  Node WebSocket URL') + pc.dim(' (e.g. wss://msg.myapp.com): '),
+    )).trim();
+    nodeConfig = selfHostedUrl ? `"${selfHostedUrl}"` : '"mesh"';
+  }
+
+  rl.close();
+
+  const developerKey = randomBase64(32);
+  const salt = randomHex(32);
+
+  console.log('');
+  printStep(1, 'Generated developer key and salt');
+  printNote('Keep these in your environment variables — do not commit them.');
+
+  // Print env block
+  console.log('');
+  console.log(pc.bgBlack(pc.white('  .env  ')));
+  console.log('');
+  console.log(`  MESHWHISPER_DEVELOPER_KEY=${developerKey}`);
+  console.log(`  MESHWHISPER_SALT=${salt}`);
+  if (selfHostedUrl) {
+    console.log(`  MESHWHISPER_NODE_URL=${selfHostedUrl}`);
+  }
+  console.log('');
+
+  // Print SDK init snippet
+  printStep(2, 'Add this to your app entry point');
+  console.log('');
+  console.log(pc.bgBlack(pc.white('  TypeScript / JavaScript  ')));
+  console.log('');
+
+  const snippet = `import { MeshWhisper } from '@meshwhisper/sdk';
+
+const mw = await MeshWhisper.init({
+  namespace: '${bundleId}',
+  node: ${nodeConfig},
+  developerKey: process.env.MESHWHISPER_DEVELOPER_KEY,
+});
+
+// Send a message
+await MeshWhisper.send(recipientId, new TextEncoder().encode('Hello!'));
+
+// Receive messages
+MeshWhisper.onMessage((message) => {
+  const text = new TextDecoder().decode(new Uint8Array(message.payload));
+  console.log('Received:', text);
+});
+`;
+
+  snippet.split('\n').forEach((line) => console.log('  ' + pc.cyan(line)));
+
+  if (nodeChoice === 'self-hosted' || nodeChoice === 'self') {
+    printStep(3, 'Deploy your MeshWhisper Node');
+    console.log('');
+    printNote('Use the provided Dockerfile in the @meshwhisper/node package:');
+    console.log('');
+    console.log(`  docker build -t meshwhisper-node ./node_modules/@meshwhisper/node`);
+    console.log(`  docker run -p 443:8080 \\`);
+    console.log(`    -e PORT=8080 \\`);
+    console.log(`    -e PUSH_WEBHOOK_URL=https://your-push-server/notify \\`);
+    console.log(`    meshwhisper-node`);
+    console.log('');
+    printNote('Or use docker compose up with the generated docker-compose.yml.');
+    writeDockerCompose(selfHostedUrl);
+  }
+
+  console.log('');
+  console.log(pc.bold(pc.green('  Done!')));
+  console.log(pc.dim('  Docs: https://meshwhisper.io/docs'));
+  console.log('');
+}
+
+function writeDockerCompose(nodeUrl: string): void {
+  const compose = `# Generated by meshwhisper init
+# docker compose up
+
+services:
+  node:
+    build:
+      context: .
+      dockerfile: node/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      BLOB_TTL_HOURS: "72"
+      MEDIA_TTL_HOURS: "168"
+      # BASE_URL: https://msg.myapp.com
+      PUSH_WEBHOOK_URL: "http://push:4000/notify"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  push:
+    build:
+      context: .
+      dockerfile: push-service/Dockerfile
+    environment:
+      PUSH_PORT: "4000"
+      # APNs — uncomment and fill in for iOS push support
+      # APNS_KEY_ID: XXXXXXXXXX
+      # APNS_TEAM_ID: YYYYYYYYYY
+      # APNS_KEY_PATH: /run/secrets/apns_key
+      # APNS_BUNDLE_ID: com.example.myapp
+      # FCM — uncomment and fill in for Android push support
+      # FCM_SERVICE_ACCOUNT_PATH: /run/secrets/fcm_service_account
+      # FCM_PROJECT_ID: my-firebase-project
+    restart: unless-stopped
+`;
+
+  const outPath = path.join(process.cwd(), 'docker-compose.yml');
+  if (fs.existsSync(outPath)) {
+    console.log('');
+    printNote(`docker-compose.yml already exists — skipping. Delete it and re-run to regenerate.`);
+  } else {
+    fs.writeFileSync(outPath, compose, 'utf-8');
+    console.log('');
+    printNote(`Wrote docker-compose.yml`);
+  }
+}
+
+// ============================================================
+// Entry point
+// ============================================================
+
+const [,, command, ...args] = process.argv;
+
+switch (command) {
+  case 'init':
+    await cmdInit();
+    break;
+
+  case undefined:
+  case '--help':
+  case '-h':
+    printBanner();
+    console.log('  Usage:');
+    console.log('');
+    console.log('    npx @meshwhisper/cli init    Initialize a new project');
+    console.log('');
+    break;
+
+  default:
+    console.error(pc.red(`  Unknown command: ${command}`));
+    console.error(`  Run ${pc.bold('meshwhisper --help')} for usage.`);
+    process.exit(1);
+}
