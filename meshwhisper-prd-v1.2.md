@@ -1,0 +1,922 @@
+# Product Requirements Document
+## MeshWhisper: Serverless P2P E2EE Messaging SDK
+
+**Version:** 1.2  
+**Authors:** Kevin (Build) / Anton (Concept & Architecture)  
+**Date:** April 2026  
+**Status:** Draft  
+**Foundation:** MeshWhisper Foundation, Ireland  
+**Commercial Entity:** GestureLoop Ltd  
+
+---
+
+## 1. Executive Summary
+
+MeshWhisper is an open-source, serverless Peer-to-Peer (P2P) End-to-End Encrypted (E2EE) messaging protocol, delivered as a plug-and-play SDK for mobile and web developers.
+
+The core proposition: any developer who embeds the SDK into their app gets free, secure, real-time messaging for their users forever, with zero server infrastructure to manage. In return, their users' devices contribute to a global, decentralized relay mesh that makes the network stronger for everyone. The more apps that adopt it, the better it works for all of them.
+
+MeshWhisper is not a consumer app. It is infrastructure — a layer that sits beneath any application, from a fitness tracker to a football coaching tool, and provides messaging as a utility. It handles all transport, routing, encryption, and offline delivery transparently, leaving the developer to focus only on their product.
+
+The protocol's defining principle, articulated by Anton:
+
+> "Relay promiscuously, connect selectively."
+
+Every device running the SDK — regardless of which app embedded it — participates in the global relay mesh. Devices forward encrypted packets they cannot read for other apps, but only decrypt and surface messages belonging to their own application namespace. All other packets are relayed silently and ephemerally, never stored to disk.
+
+**A note on "serverless":** Serverless means the developer provisions nothing and pays nothing. It does not mean no infrastructure exists. The MeshWhisper Foundation operates a small number of relay nodes as public infrastructure to bridge non-connectable devices (most phones on cellular) at launch. As organic mesh density grows through SDK adoption — and through the Phase 4 home relay node — dependence on Foundation infrastructure decreases. This is the BitTorrent tracker model: trackers bootstrap peer discovery, but they don't carry the data, and the network survives without them.
+
+---
+
+## 2. Problem Statement
+
+### 2.1. The Developer Messaging Problem
+
+Adding real-time messaging to an application is disproportionately difficult and expensive. Developers face a trilemma:
+
+**Option A — Build it yourself.** WebSocket servers are painful to build, scale, and maintain. Most small teams simply skip messaging entirely because of this burden.
+
+**Option B — Pay for a managed service.** Sendbird starts at $349/month. PubNub charges from $98/month per 1,000 MAUs. Stream Chat begins at $119/month. These costs scale aggressively and become prohibitive for indie developers and small startups.
+
+**Option C — Use a general-purpose platform.** Firebase Realtime Database is free at small scale but introduces vendor lock-in, complex pricing at scale, and centralizes user data in a way that creates compliance and security liability.
+
+The result is that many apps that *want* messaging simply do not have it, or they push users to WhatsApp — a fragmented, privacy-hostile workaround.
+
+### 2.2. The Opportunity
+
+There is no open, embeddable, serverless messaging protocol that a developer can drop into any app in under 10 lines of code. The closest prior art — Meshtastic, Bitchat, Nostr, Ditto — are either consumer apps, hardware-specific, commercially licensed, or not designed as embeddable SDKs for arbitrary applications. This gap is the opportunity.
+
+---
+
+## 3. Vision & Goals
+
+MeshWhisper's vision: **free, secure, resilient messaging for every app, forever, with no servers for the developer.**
+
+| Goal | Description |
+| :--- | :--- |
+| **Zero Infrastructure for Developers** | No developer should ever need to provision, pay for, or maintain a messaging server. The Foundation operates relay infrastructure as a public good. The developer provisions nothing. |
+| **10-Line Integration** | The SDK must be embeddable in any app with a minimal, clean API. Complexity lives inside the library, not in the developer's code. |
+| **True E2EE** | No relay node, including the developers of this protocol, can ever read a message payload or identify who is communicating with whom. |
+| **Invisible to Users** | A person using a fitness app with MeshWhisper embedded should never know they're on a mesh network. The experience should feel identical to any other in-app chat. |
+| **Offline Resilience** | Messages must be deliverable even when the internet is unavailable, using platform-native P2P transports. |
+| **Network Effects** | Every new app that adopts the SDK makes the relay mesh denser and more reliable for every other app. |
+| **Endpoint Neutrality** | The protocol governs transport only. What happens at the endpoint — logging, moderation, compliance — is the app developer's decision. The protocol has no opinion. |
+| **Open Source** | The protocol specification and SDK are fully open source. The business model is Red Hat-style: open core, paid support and enterprise tooling. |
+
+---
+
+## 4. Core Architecture
+
+### 4.1. The Four-Layer Model
+
+The protocol operates across four distinct, independently replaceable layers:
+
+```
+┌─────────────────────────────────────────────┐
+│  APPLICATION LAYER                          │
+│  App-specific logic, UI, permissions,       │
+│  content moderation, compliance hooks       │
+├─────────────────────────────────────────────┤
+│  SESSION LAYER                              │
+│  Namespace isolation, contact permissioning,│
+│  conversation management, key exchange      │
+├─────────────────────────────────────────────┤
+│  ROUTING LAYER                              │
+│  Social-graph routing, relay selection,     │
+│  store-and-forward, reciprocity engine      │
+├─────────────────────────────────────────────┤
+│  TRANSPORT LAYER                            │
+│  Platform-native P2P, local network,        │
+│  internet (WebSocket/QUIC over port 443)    │
+└─────────────────────────────────────────────┘
+```
+
+Each layer is independent. A developer integrating the SDK interacts only with the Application and Session layers. The Routing and Transport layers are fully autonomous.
+
+### 4.2. Namespace Isolation
+
+Each app integrating the SDK registers a **namespace** — a 256-bit cryptographic identifier derived from:
+
+```
+namespace_id = BLAKE3(app_bundle_id || developer_public_key || salt)
+```
+
+All session-layer operations are scoped to a namespace. A user in Namespace A cannot discover, contact, or receive messages from a user in Namespace B.
+
+**Critical: transport-layer relaying is namespace-blind.** A device relays encrypted blobs without knowing or checking which namespace they belong to. This is what allows the shared mesh to work across apps — namespace blind at the messaging layer, namespace isolated at the application layer.
+
+### 4.3. Destination Hashing
+
+To prevent metadata leakage, recipient addresses are never transmitted in cleartext. Each message carries a **destination hash**:
+
+```
+dest_hash = BLAKE3(recipient_public_key || epoch_hour)
+```
+
+The hash rotates every hour (keyed to the current epoch hour). A device recognises messages intended for it by computing its own destination hash for the current and previous epoch hours and comparing against incoming traffic. External observers cannot correlate destination hashes across time periods.
+
+---
+
+## 5. Transport Layer
+
+### 5.1. Core Philosophy: Stateless and Ephemeral
+
+The protocol is architecturally the opposite of blockchain. There is no ledger, no chain, no accumulating state. A message is an encrypted blob that exists temporarily on relay devices, gets delivered, and disappears. No device permanently stores anything that isn't its own messages. The network is a transient medium — messages flow through it like sound through air. The air doesn't remember what was said.
+
+This is what makes the protocol scale. Bitcoin gets slower as it grows because everyone processes everything. MeshWhisper gets *better* as it grows because mesh density increases, relay paths multiply, and delivery latency drops — while each individual device's workload stays flat. Each device only handles traffic for people near it in the social topology, not for the entire network.
+
+### 5.2. Multi-Bearer Transport
+
+The transport layer is bearer-agnostic. It selects the best available channel automatically, in order of preference:
+
+1. **Direct local connection** — Platform-native P2P (Apple Multipeer Connectivity on iOS, Google Nearby Connections API on Android). These frameworks use BLE for discovery and Wi-Fi for data transfer under the hood, but are fully sanctioned by both platforms. App-store approved, background-capable with proper entitlements, and maintained by the platform vendors themselves. Used when both peers are nearby and running the same app.
+
+2. **Local network** — Standard sockets on the same subnet. Used for device self-clustering (phone to laptop in the same home) and for peers discoverable on the local network.
+
+3. **Internet — WebSocket over HTTPS (port 443)** — The primary transport for most messages. Every NAT, firewall, carrier network, and corporate proxy on earth passes HTTPS on port 443. No NAT traversal, no hole-punching, no STUN, no TURN. The protocol uses the front door, not a side window. Devices that can accept inbound connections (laptops on broadband, desktops, dedicated home relay nodes, Foundation nodes) advertise this capability. Devices that can't (most phones on cellular) maintain outbound WebSocket connections to connectable peers — defaulting to Foundation nodes when no connectable social-graph peer is available.
+
+4. **Hybrid** — Large messages fragment across bearers. A photo might begin transferring over local P2P when devices are proximate and complete over internet when connectivity returns.
+
+### 5.3. Bearer Negotiation
+
+On initialisation, the SDK probes available bearers and registers capabilities:
+
+```
+Device Capability Advertisement:
+  - bearer_platform_p2p: true/false    // Multipeer / Nearby Connections
+  - bearer_local_net: true/false
+  - bearer_internet: true/false
+  - inbound_connectable: true/false    // can accept incoming WebSocket
+  - battery_state: [charging | high | medium | low | critical]
+  - relay_willingness: [eager | willing | reluctant | unavailable]
+```
+
+`relay_willingness` is computed from battery state, current bearer, and the device's reciprocity balance (see §7.3). A device on a charger with Wi-Fi defaults to `eager`. A device at 10% on cellular defaults to `unavailable`.
+
+### 5.4. Platform-Native P2P Specifics
+
+**iOS — Multipeer Connectivity Framework.** Apple's official API for peer-to-peer communication between nearby devices. Uses BLE for discovery and Wi-Fi Direct for data transfer. Works in the background with proper entitlements. AirDrop is built on it. Every app using it sails through App Store review because Apple designed and encourages its use.
+
+**Android — Nearby Connections API.** Google's equivalent, part of Google Play Services. Wraps Wi-Fi Aware (Neighbor Awareness Networking) into a clean interface that works across Bluetooth and Wi-Fi automatically, choosing the best available channel.
+
+**Limitation:** Platform-native P2P is scoped to the same app (or shared service identifier). A fitness app's users cannot relay for a marketplace app's users through these APIs. Cross-app relay only occurs over the internet-based mesh. This means the offline mesh is same-app and local, while the online mesh is cross-app and global.
+
+### 5.5. Connectable vs. Non-Connectable Devices
+
+The internet transport avoids all NAT traversal complexity by using a simple principle: connections flow outward from non-connectable devices toward connectable ones.
+
+**Connectable devices** are those that can accept inbound WebSocket connections on port 443 — typically laptops on home broadband, desktops, dedicated home relay nodes, or any device behind a router with UPnP/NAT-PMP or manual port forwarding. The SDK automatically detects connectability by attempting to open a listening socket and verifying reachability. IPv6 is preferred where available, as most mobile carriers and many broadband providers now support it — on IPv6, every device has a globally routable address and NAT is not a factor.
+
+**Non-connectable devices** (most phones on cellular) maintain persistent outbound WebSocket connections to connectable peers. When the social graph contains no connectable device — the common case for mobile-only consumer apps at early adoption — devices connect outbound to the nearest available Foundation Node (see §5.6). Both phones maintain outbound connections to the relay; the relay bridges them. This mirrors how WhatsApp works, but the "server" is operated as public infrastructure rather than by the app vendor.
+
+**Backbone vs. consumers:** Phones on cellular are principally consumers of the mesh. The backbone is connectable devices: laptops on broadband, desktops, Foundation Nodes, and Phase 4 home relay hardware. Phone relay activity is a bonus when the app is foregrounded, not a dependency.
+
+### 5.6. The MeshWhisper Node
+
+Most consumer apps — fitness trackers, marketplaces, coaching tools — are mobile-only. Their users have no desktop companion. The organic social graph of such apps contains no connectable devices. The MeshWhisper Node fills this gap.
+
+A MeshWhisper Node is a single lightweight binary that bundles four functions into one process, one endpoint, one port:
+
+1. **Relay** — accepts WebSocket connections from SDK devices, forwards encrypted blobs between them, holds blobs temporarily for offline recipients (configurable TTL, default 72 hours).
+2. **Push forwarding** — when a blob arrives for a device with no active WebSocket connection, fires a content-free wake signal to APNs/FCM using push tokens that devices registered on connect. The push contains no message content — it simply tells the recipient's device to wake and pull its messages.
+3. **Media storage** — accepts encrypted file uploads over HTTPS, stores them to local disk, serves them back when requested. Files expire after a configurable TTL (default 7 days). The node never possesses decryption keys — all media is opaque encrypted blobs.
+4. **Prekey directory** — stores public prekey bundles indexed by user public key within a namespace. Enables stranger-to-stranger first contact for apps like marketplaces and social platforms. Functionally equivalent to a DNS server: it tells you how to reach someone, not what to say.
+
+All four functions run on a single port (443), under a single TLS certificate. One Docker image. One deploy. Everything works.
+
+**Deployment tiers:**
+
+| Tier | Who runs it | Best for |
+| :--- | :--- | :--- |
+| **Foundation-hosted** | MeshWhisper Foundation | Indie developers, small apps, getting started. Free tier with usage limits. |
+| **Self-hosted** | The app developer | Companies wanting full control, data sovereignty, or higher throughput. One Docker container on existing infrastructure. |
+| **Hybrid** | Developer node + Foundation mesh | Private reliability plus mesh redundancy as fallback. |
+
+The SDK configuration for each tier:
+
+```typescript
+// Foundation-hosted (zero infrastructure)
+MeshWhisper.init({
+  namespace: "com.example.myapp",
+  node: "mesh"
+});
+
+// Self-hosted (one endpoint, everything included)
+MeshWhisper.init({
+  namespace: "com.example.myapp",
+  node: "wss://msg.myapp.com"
+});
+
+// Hybrid (private node with mesh fallback)
+MeshWhisper.init({
+  namespace: "com.example.myapp",
+  node: ["wss://msg.myapp.com", "mesh"]
+});
+```
+
+**Foundation Node infrastructure:**
+- 5–10 lightweight VPS instances distributed geographically (Europe, North America, Asia-Pacific)
+- Each node accepts inbound WebSocket connections on port 443
+- Nodes are stateless and interchangeable — any node can be replaced by any other
+- The SDK ships with hardcoded Foundation node endpoints and a discovery mechanism for locating alternative or additional node operators
+
+**Self-hosted node requirements:**
+- Any Linux VPS (Hetzner, DigitalOcean, AWS, etc.)
+- Minimum: 1 vCPU, 512MB RAM, 20GB disk
+- APNs/FCM credentials (provided as environment variables)
+- Cost: approximately €4/month on Hetzner for tens of thousands of active users
+
+**Trust model:**
+
+MeshWhisper Nodes — whether Foundation-hosted or self-hosted — occupy the same position in the threat model as an ISP carrying encrypted traffic. A node can observe:
+- That a connection exists (source IP, node IP, timing)
+- Approximate traffic volume
+- Destination hashes (rotating hourly, unlinkable across periods)
+- Push tokens (necessary for push forwarding — this is the strongest metadata the node holds)
+- Whether traffic is real or chaff (indistinguishable by design)
+
+A node cannot observe:
+- Message content (encrypted end-to-end)
+- Sender identity
+- Recipient identity (only a rotating, expiring hash)
+- Which application namespace the traffic belongs to
+- Media content (encrypted before upload, decrypted only at the endpoint)
+
+Push tokens are the most sensitive metadata a node holds. A compromised node could correlate push tokens with destination hashes, potentially linking a device to a messaging identity. This risk is mitigated by: (a) push tokens rotate periodically, (b) the node holds no persistent mapping between tokens and identities, and (c) developers who require stronger metadata protection can handle push forwarding in their own app logic rather than delegating to the node.
+
+This is a weaker privacy guarantee than direct device-to-device communication, and stronger than any centralised messaging service. It is explicitly weaker than Tor. Users who require stronger metadata protection should use a VPN in conjunction with the SDK.
+
+**Failure model:**
+
+If all Foundation nodes are unreachable, the protocol continues to function between devices that can reach each other directly or through organic connectable peers in their social graphs. Foundation nodes are accelerators, not dependencies. A device that was previously routing through a Foundation node will queue messages and retry through alternative paths. The degradation is graceful.
+
+**Honest framing:**
+
+"Serverless for the developer" is accurate. "Serverless, full stop" is not. The Foundation operates node infrastructure as a public good, funded through commercial tiers and enterprise licensing. As adoption grows and more connectable devices join the mesh — particularly Phase 4 home relay nodes — dependence on Foundation infrastructure decreases organically. This is the BitTorrent tracker model: the trackers don't carry the content, and the network functions without them once sufficient peers exist. Unlike BitTorrent, the Foundation nodes are openly documented as part of the architecture rather than treated as a temporary embarrassment.
+
+**Developer control:**
+
+Developers can self-host nodes with full functionality using the open-source node binary. Enterprise customers can run private node fleets with no traffic transiting Foundation infrastructure. The node binary is the same whether Foundation-hosted or self-hosted — there is no "enterprise edition" of the node itself.
+
+### 5.7. Device Self-Clustering
+
+When a user has multiple devices (phone, tablet, laptop), they form a **personal availability cluster**:
+
+1. Devices are linked via a shared cluster key derived from the user's identity key.
+2. Clustered devices maintain persistent connections to each other when on shared networks.
+3. Any device in the cluster can accept messages on behalf of the user.
+4. The device most "available" (best battery, strongest connectivity, relay willingness = eager) becomes the cluster's **primary receiver**.
+5. Messages received by any cluster member are synchronised to all others when connectivity allows.
+
+**Practical effect:** Your laptop plugged in at home acts as your personal always-on relay node. Your phone can sleep. When you pick up your phone, messages sync from the laptop instantly over local network.
+
+### 5.8. Sideloaded Variant for Raw BLE
+
+For specific use cases — protest communications, disaster response, environments with no internet infrastructure — a dedicated sideloaded app can be built on the same protocol with raw BLE mesh enabled. This variant operates outside app store distribution (Android sideloading, EU DMA-mandated sideloading on iOS, alternative ROMs like GrapheneOS/CalyxOS).
+
+The sideloaded variant participates in the same mesh as all mainstream SDK-embedded apps. Messages destined for a sideloaded app user travel through the internet-based relay network — bouncing through fitness apps, marketplace apps, gaming apps — until they reach a device physically near the recipient. The sideloaded app handles the final BLE hop.
+
+The mainstream apps do 99% of the delivery work using sanctioned internet relay. The sideloaded app only needs raw BLE for the last metre. Every commercial app using the SDK unknowingly provides relay infrastructure. This works because relay is namespace-blind and transport-agnostic — relayed blobs are opaque.
+
+---
+
+## 6. Session Layer
+
+### 6.1. Key Generation
+
+Each user generates a long-term identity keypair on first launch using **X25519** (Curve25519). The private key never leaves the device. The public key serves as the user's identity within the protocol.
+
+### 6.2. Key Exchange (X3DH)
+
+Peer-to-peer key exchange uses the **X3DH protocol** (Extended Triple Diffie-Hellman), the same foundation as Signal's key exchange, adapted for decentralised operation.
+
+X3DH provides:
+- **Mutual authentication** — both parties prove they hold their private keys.
+- **Forward secrecy** — compromise of long-term keys does not expose past sessions.
+- **Deniability** — messages cannot be cryptographically attributed to a sender after the fact.
+
+**Prekey distribution within social graphs:** When a user installs an app using the SDK, their device generates a prekey bundle and gossips it to their social graph (contacts, group members). Each contact's device caches prekey bundles for known peers. This is sufficient for apps where users communicate with existing contacts.
+
+**Prekey directory service for stranger-to-stranger contact:** Apps where users need to contact people they haven't met — marketplaces, social discovery, coaching platforms — require a different approach. The MeshWhisper Node includes a built-in **prekey directory** as one of its four core functions (see §5.6). This directory:
+
+- Stores public prekey bundles, indexed by user public key within a namespace
+- Never stores message content, session state, or any private key material
+- Is functionally equivalent to a DNS server: it tells you how to reach someone, not what to say
+- Is namespace-scoped: each app's keyspace is isolated within the directory
+- Runs on the same endpoint as relay, push, and media — no additional infrastructure
+
+The app registers a user's prekey bundle with the node on first launch. When a buyer in a marketplace app initiates contact with a seller for the first time, the SDK fetches the seller's prekey bundle from the node, initiates X3DH, and the conversation proceeds peer-to-peer from that point. The directory is consulted once per new contact; all subsequent communication is direct and the directory is not involved.
+
+Developers using Foundation-hosted nodes get the directory included. Developers self-hosting get the directory as part of the same binary. There is no separate service to deploy.
+
+**First contact between known users:** For apps where users know each other and prefer not to use a directory, first contact can be established via QR code scan, NFC tap, or shared deep link. This is appropriate for friend-to-friend apps but impractical for strangers.
+
+### 6.3. Message Encryption (Double Ratchet)
+
+Once X3DH establishes a shared secret, all subsequent messages use the **Double Ratchet algorithm** for forward secrecy and post-compromise security. Each message uses a unique key derived from the ratchet; compromising one message key reveals nothing about past or future messages.
+
+### 6.4. Contact Permissioning
+
+The SDK exposes a permissioning API that the app developer configures:
+
+```
+PermissionModel:
+  - open: any user in the namespace can initiate contact
+  - mutual: both users must add each other before messaging
+  - introduction: a mutual contact must broker first contact
+  - transactional: contact permitted only after an app-defined 
+    event (purchase, match, group membership, etc.)
+  - custom: developer-defined callback function
+```
+
+The permissioning logic executes at the endpoint. The protocol delivers the message attempt; the receiving device's SDK checks permissions before surfacing it to the app.
+
+---
+
+## 7. Routing Layer
+
+### 7.1. Social Graph Routing
+
+This is the protocol's core routing innovation. Traditional P2P networks use distributed hash tables (DHTs) or flooding for message routing. Both are inefficient and battery-hungry. MeshWhisper uses the social graph as a routing topology.
+
+Each device maintains a **peer proximity table** — not geographic proximity, but social proximity. Your close contacts are "near" in the routing topology. Their contacts are one hop away. The table is built organically as the device observes which peers are frequently reachable through which relay paths. The table is local and ephemeral — no global state is required.
+
+**Routing algorithm:**
+
+When sending a message to a peer who is not directly reachable:
+
+1. Check if any currently-connected peer has a recent relay path to the destination.
+2. If not, gossip a **route request** (containing only the destination hash, not the sender's identity) to socially proximate peers.
+3. Peers who recognise the destination hash (because the recipient is in their contact list) respond with a **route offer**.
+4. The sender selects the shortest/fastest offered route and begins transmission.
+
+**Why this works:** In real social networks, the average path length between any two people is approximately 6 hops (Milgram's small-world property). In a messaging context, most conversations happen between people who are 1–2 hops apart. The social graph is a naturally efficient routing topology. This is analogous to the **Bubble Rap** algorithm from Delay-Tolerant Networking research, adapted for the social graph implicit in a messaging application.
+
+### 7.2. Store-and-Forward
+
+When the destination peer is offline and no relay path exists:
+
+1. The sending device identifies the **nearest available relay** — a device that is socially proximate to the recipient, currently online, and has a positive reciprocity balance. Foundation Nodes are eligible relays and are preferred when no socially proximate relay is available.
+2. The encrypted message blob is deposited with the relay.
+3. The relay holds the blob for a configurable TTL (default: 72 hours).
+4. When the recipient comes online, it announces its presence via its destination hash. Relays holding messages for that hash forward them.
+
+**Multi-hop store-and-forward:** If no single relay has a direct path to the recipient, the message can be stored at intermediate relays, each holding it until a closer relay becomes available. The message "walks" toward the recipient through the social graph over time.
+
+### 7.3. Reciprocity Engine
+
+Every device maintains a local **relay ledger** — a record of how many bytes it has relayed for others and how many bytes others have relayed for it.
+
+```
+Reciprocity Score = bytes_relayed_for_others / bytes_others_relayed_for_me
+```
+
+- Score > 1.0: net contributor. Other devices prioritise your traffic.
+- Score ~ 1.0: balanced. Normal service.
+- Score < 0.5: net consumer. Relay priority decreases.
+- Score < 0.1: free-rider. Only direct connections function; relay service effectively ceases.
+
+The ledger is local and approximate — there is no global accounting. Peers track each other's contribution directly. This is analogous to BitTorrent's tit-for-tat choking algorithm: simple, local, and effective at discouraging free-riding without requiring a central authority.
+
+**New device bootstrapping:** Fresh devices start with a grace period (configurable, default 48 hours) during which they receive normal relay service regardless of score.
+
+---
+
+## 8. Encryption & Security
+
+Security is non-negotiable. The protocol must be designed so that even a malicious relay node — or the protocol developers themselves — cannot read a message or identify participants.
+
+### 8.1. Cryptographic Primitives
+
+| Primitive | Algorithm | Purpose |
+| :--- | :--- | :--- |
+| Key exchange | X25519 (Curve25519) | Identity keypairs, Diffie-Hellman |
+| Session establishment | X3DH | Async key agreement with forward secrecy |
+| Message ratchet | Double Ratchet | Per-message forward secrecy and break-in recovery |
+| Symmetric encryption | AES-256-GCM | Message payload encryption |
+| Hashing / KDF | BLAKE3 | Namespace IDs, destination hashes, key derivation |
+| Group encryption | Sender Keys | Efficient group message encryption |
+
+End-to-end encryption is on by default with no opt-out. There is no plaintext mode. This is a non-negotiable design decision.
+
+### 8.2. Recommended Cryptography Libraries
+
+| Platform | Library | Rationale |
+| :--- | :--- | :--- |
+| JavaScript / TypeScript | `@noble/curves` + `@noble/ciphers` | Audited, zero-dependency, tree-shakeable, minimal bundle size |
+| Rust (core) | `ring` or `dalek-cryptography` | Battle-tested, `no_std` compatible for embedded targets |
+| Swift (iOS) | `CryptoKit` (native) | Hardware-accelerated, no external dependency |
+| Kotlin (Android) | `Tink` (Google) | Audited, straightforward API |
+
+### 8.3. Relay Opacity
+
+Relay nodes handle only opaque encrypted blobs. A relay can see:
+- The destination hash (which rotates hourly and is unlinkable across periods)
+- The blob size
+- Timing metadata (when it received and forwarded the blob)
+
+A relay **cannot** see:
+- Message content
+- Sender identity
+- Recipient identity (only a rotating hash)
+- Which namespace/app the message belongs to
+- Whether the blob is a real message or chaff
+
+### 8.4. Chaff Generation
+
+Every device running the SDK emits a low, constant stream of encrypted chaff — random data indistinguishable from real messages. Chaff is addressed to random destination hashes that don't correspond to real users.
+
+Traffic analysis becomes extremely difficult. An observer monitoring a device's network traffic cannot distinguish real messages from noise. The volume of chaff adapts to the device's relay willingness — eager relays emit more chaff, further obscuring real traffic patterns.
+
+**Cost:** Approximately 1–3 KB/hour of additional data, negligible on any bearer.
+
+### 8.5. Plausible Deniability
+
+Messages are authenticated using **deniable authentication** (as in the OTR protocol). The recipient can verify the sender's identity, but cannot prove to a third party that the sender wrote any particular message. This is achieved by using MAC (message authentication codes) derived from the shared secret rather than digital signatures.
+
+### 8.6. Metadata Protection Summary
+
+- Chaff traffic obscures communication patterns.
+- No plaintext sender/recipient identifiers in packet headers.
+- Ephemeral destination hashes rotate hourly.
+- Ephemeral sender session identifiers rotate regularly.
+
+---
+
+## 9. Packet Format
+
+Each packet transmitted over the network conforms to a compact binary format to minimize overhead, especially on constrained transports.
+
+| Field | Size | Description |
+| :--- | :--- | :--- |
+| `version` | 1 byte | Protocol version |
+| `flags` | 1 byte | Packet type (data, ack, chaff, handshake, route_request, route_offer) |
+| `dest_hash` | 8 bytes | Truncated BLAKE3 destination hash (rotates hourly) |
+| `sender_ephemeral_id` | 16 bytes | Rotating ephemeral sender identifier |
+| `ttl` | 1 byte | Time-to-live hop count (max 7) |
+| `payload_length` | 2 bytes | Length of encrypted payload |
+| `encrypted_payload` | Variable | AES-256-GCM ciphertext + tag |
+
+Total minimum overhead: **29 bytes**. LZ4 compression is applied to the payload before encryption to minimise size.
+
+---
+
+## 10. Group Messaging
+
+### 10.1. Dynamic Relay Trees
+
+Group conversations do not require all-to-all connectivity. The protocol constructs a **dynamic relay tree** optimised for the group's current activity pattern:
+
+1. When a group is created, one member is designated as the initial **tree root** (typically the creator).
+2. As members send messages, the tree restructures so that the most active participants form the trunk, and less active members are leaves.
+3. Active members relay messages to their connected branch of less active members.
+4. The tree topology updates in real-time. If a previously quiet member becomes active, they migrate toward the trunk.
+
+**Practical effect:** In a 20-person group where 3 people are having a rapid conversation and 17 are lurking, only the 3 active members maintain real-time connections. The 17 lurkers receive batched updates through the nearest active participant, with latency proportional to their social proximity in the group.
+
+### 10.2. Group Key Management
+
+Groups use the **Sender Keys** approach:
+- Each group member generates a sender key and distributes it to all other members via pairwise encrypted channels.
+- Messages are encrypted once with the sender key and delivered to all group members.
+- When a member leaves, all sender keys are rotated.
+
+This is the same approach used by Signal for group messaging and provides a good balance between security and efficiency.
+
+---
+
+## 11. Sybil Resistance
+
+### 11.1. The Problem
+
+In any P2P network, a malicious actor can spin up thousands of fake nodes to flood, disrupt, or surveil the network. Traditional solutions require identity verification, which conflicts with privacy goals.
+
+### 11.2. Proof of Physical Device
+
+MeshWhisper uses **hardware entropy challenges.** Periodically, peers challenge each other to produce entropy samples that demonstrate physical embodiment:
+
+```
+Challenge: "Provide 256 bytes of accelerometer data 
+           captured over the next 3 seconds"
+           
+Response:  [raw sensor data]
+
+Verification: Statistical analysis confirms the data exhibits
+              characteristics of a physical device experiencing 
+              gravity, micro-vibrations, and organic movement 
+              patterns consistent with being carried or resting 
+              on a surface.
+```
+
+A cloud VM running thousands of Sybil nodes cannot produce convincing accelerometer data at scale. The entropy patterns of a phone in a pocket, on a desk, or in a hand are statistically distinct from synthetic data.
+
+This is probabilistic, not absolute. A determined attacker with physical devices can pass. But the economics change: attacking the network requires acquiring and operating thousands of physical phones, which is orders of magnitude more expensive than spinning up VMs.
+
+### 11.3. Zero-Knowledge Relay Reputation
+
+Nodes build reputation by proving relay behaviour without revealing identity:
+
+```
+ZK Proof: "I have successfully relayed more than N blobs 
+           in the past M days, and my reciprocity score 
+           exceeds threshold T."
+
+Verification: Cryptographic proof is valid.
+
+Result: Peer is treated as a reliable relay without 
+        knowing who they are or what they relayed.
+```
+
+This uses a simplified zk-SNARK construction. Nodes with higher proven relay history receive routing preference, creating a positive feedback loop that rewards genuine participation.
+
+---
+
+## 12. Push Notifications
+
+### 12.1. The iOS Problem
+
+iOS aggressively kills background processes and WebSocket connections. When a user switches away from an app, the WebSocket connection to the MeshWhisper Node dies within seconds. Without a mechanism to wake the device, messages sit on the node until the user manually reopens the app. That's not messaging — that's email.
+
+### 12.2. How Push Works
+
+The MeshWhisper Node handles push forwarding as part of its unified process:
+
+1. **Registration.** When the SDK connects to a node via WebSocket, it registers the device's APNs (iOS) or FCM (Android) push token alongside its destination hash. The node stores this mapping in memory.
+2. **Wake signal.** When an encrypted blob arrives for a destination hash with no active WebSocket connection, the node fires a content-free push notification to the registered push token. The notification contains no message content, no sender information, no metadata — it is a silent signal that means only "you have a message waiting."
+3. **Pull.** The device wakes briefly, the SDK establishes a WebSocket connection, pulls the waiting encrypted blobs from the node, decrypts them locally, and surfaces them to the app.
+4. **Display.** The app displays the message and may show a local notification to the user.
+
+This is exactly how Signal, WhatsApp, and every other messaging app on iOS works. None of them maintain persistent background connections. They all use APNs as the wake mechanism.
+
+### 14.3. Push Credentials
+
+The node requires APNs/FCM credentials to send push notifications. For Foundation-hosted nodes, the developer provides their push credentials during SDK registration. For self-hosted nodes, credentials are provided as environment variables when deploying the node binary.
+
+The push credentials belong to the app developer, not to the Foundation. The Foundation never holds push credentials for apps using Foundation-hosted nodes — instead, the developer registers a push endpoint (a simple cloud function or webhook) that the Foundation node calls when a wake signal is needed. The developer's endpoint forwards the signal to APNs/FCM using their own credentials. This keeps push credentials entirely under developer control.
+
+For self-hosted nodes, the credentials are local and the node calls APNs/FCM directly.
+
+### 12.4. Privacy Implications
+
+Push tokens are the most sensitive metadata the node holds. See §5.6 Trust Model for a full analysis. Developers who require stronger metadata protection can implement push forwarding in their own app logic using the SDK's callback interface rather than delegating to the node.
+
+---
+
+## 13. Media Handling
+
+### 13.1. The Problem
+
+Text messages are small — a few hundred bytes. Photos, voice notes, and video are megabytes. Relaying a 5MB photo through the mesh the same way as a text message is impractical: it clogs relay paths, exceeds store-and-forward TTL buffers, and wastes bandwidth on every intermediate device.
+
+### 13.2. How Media Works
+
+Media is handled as a two-part flow: the encrypted file goes to storage, the pointer and decryption key go through the messaging channel.
+
+1. **Encrypt locally.** The sending app encrypts the media file on-device using a randomly generated symmetric key (AES-256-GCM).
+2. **Upload.** The encrypted file is uploaded to the MeshWhisper Node's media endpoint over HTTPS. The node stores it to local disk. The node returns a URL.
+3. **Send pointer.** The sending app constructs a message containing the media URL and the decryption key, encrypts it using the Double Ratchet session, and sends it through the normal messaging channel (WebSocket relay).
+4. **Receive and download.** The receiving app decrypts the message, extracts the URL and key, downloads the encrypted media file from the node, and decrypts it locally.
+
+The MeshWhisper Node stores only opaque encrypted blobs. It never possesses the decryption key. Media files expire after a configurable TTL (default: 7 days) and are automatically cleaned up.
+
+### 13.3. Storage Costs
+
+Media is the only function that scales with usage. A Hetzner VPS with 40GB disk handles media storage for tens of thousands of users, with the TTL-based expiry keeping disk usage bounded. For apps with heavy media usage, developers can self-host with larger storage or integrate their own object storage (S3, R2) via the SDK's media callback interface.
+
+### 13.4. SDK Media Callbacks
+
+Developers who want to use their own storage instead of the node's built-in media storage can provide custom upload/download handlers:
+
+```typescript
+MeshWhisper.init({
+  namespace: "com.example.myapp",
+  node: "wss://msg.myapp.com",
+  media: {
+    upload: async (encryptedBlob) => {
+      const url = await myS3.put(encryptedBlob);
+      return url;
+    },
+    download: async (url) => {
+      return await myS3.get(url);
+    }
+  }
+});
+```
+
+When custom media handlers are provided, the node is not involved in media storage at all — it only carries the small pointer-and-key message through the normal relay channel. This is useful for apps with existing cloud storage infrastructure or for very high media volumes.
+
+---
+
+## 14. SDK API Design
+
+The SDK is deliberately simple. A mid-level mobile developer should be able to integrate messaging in under a day.
+
+### 14.1. Initialisation
+
+**Zero-config quickstart (Foundation-hosted):**
+
+```typescript
+import { MeshWhisper } from '@meshwhisper/sdk';
+
+MeshWhisper.init({
+  namespace: "com.example.fitnessapp",
+  node: "mesh",
+  onMessage: (message) => { /* handle incoming */ }
+});
+```
+
+Three lines. The SDK connects to the Foundation Node Network, generates identity keys on first launch, registers push tokens automatically, and uses built-in media storage. Everything uses sensible defaults. The developer has working encrypted messaging immediately.
+
+**Full configuration (self-hosted):**
+
+```typescript
+import { MeshWhisper } from '@meshwhisper/sdk';
+
+MeshWhisper.init({
+  namespace: "com.example.fitnessapp",
+  node: "wss://msg.myapp.com",
+  permissionModel: "mutual",
+  onMessage: (message) => { /* handle incoming */ },
+  onPresence: (peer, status) => { /* handle presence changes */ },
+  push: {
+    onRegisterToken: (token) => { /* store token on your node */ }
+  },
+  media: {
+    upload: async (blob) => myStorage.put(blob),
+    download: async (url) => myStorage.get(url)
+  },
+  config: {
+    relayWillingness: "auto",
+    chaffRate: "normal",
+    storeTTL: 72,
+    clusterEnabled: true
+  }
+});
+```
+
+Every field except `namespace`, `node`, and `onMessage` is optional and has a sensible default. The developer only configures what they need to override.
+
+### 14.2. Core Operations
+
+```typescript
+// Send a message
+MeshWhisper.send(recipientId, payload, {
+  urgency: "normal",            // background | normal | urgent | critical
+  expiry: 3600                  // seconds until message self-destructs
+});
+
+// Create a group
+const group = MeshWhisper.createGroup({
+  name: "Team Chat",
+  members: [id1, id2, id3],
+  permissionModel: "open"       // who can add new members
+});
+
+// Send to group
+group.send(payload);
+
+// Establish first contact
+const contactRequest = MeshWhisper.generateContactQR();
+// or
+MeshWhisper.acceptContact(scannedQRData);
+// or
+MeshWhisper.introduceContacts(peerA, peerB);  // mutual contact brokers
+
+// Presence
+MeshWhisper.getPresence(peerId);
+// returns: online | recently_seen | offline | unknown
+
+// Connection events
+MeshWhisper.onTransportChanged((transport) => {
+  // 'platform_p2p' | 'local_net' | 'internet'
+});
+```
+
+### 14.3. Compliance API
+
+For regulated industries, the SDK provides optional hooks that the app developer can activate. These operate at the endpoint only:
+
+```typescript
+MeshWhisper.compliance({
+  logging: true,               // log plaintext messages locally
+  auditExport: "encrypted",   // export logs encrypted to compliance key
+  retentionDays: 365,         // how long to retain logs
+  contentScanning: (msg) => {
+    // developer-implemented scanning function
+    // e.g., CSAM hash matching, keyword filtering
+    return { approved: true };
+  }
+});
+
+// Middleware hooks
+MeshWhisper.onBeforeSend((message) => {
+  // developer can inspect, log, or block outgoing messages
+  return approve(message);
+});
+
+MeshWhisper.onAfterReceive((message) => {
+  // developer can inspect, log, moderate incoming messages
+  return approve(message);
+});
+```
+
+These hooks are entirely optional and entirely the app developer's responsibility. The protocol itself never has access to plaintext. The developer's app does, and what they do with it is governed by their jurisdiction's laws, not by the protocol.
+
+---
+
+## 15. Threat Model
+
+### 15.1. What the Protocol Protects Against
+
+- **Passive network surveillance:** Encryption + chaff + rotating destination hashes make traffic analysis impractical.
+- **Server compromise:** No application servers exist to compromise. Foundation nodes hold only opaque encrypted blobs and push tokens — no plaintext, no message content, no user identity beyond rotating hashes.
+- **Legal compulsion of node infrastructure:** Foundation nodes cannot produce plaintext or user identity under legal compulsion — they do not possess it. They can produce connection metadata (source IPs, timing, volumes) and push tokens, equivalent to what an ISP or push notification provider produces.
+- **Internet shutdowns:** Platform-native P2P operates independently of internet infrastructure for nearby devices. Sideloaded variant with raw BLE provides additional offline capability.
+- **Sybil attacks:** Hardware entropy challenges raise the cost of fake node deployment.
+- **NAT and firewall restrictions:** WebSocket on port 443 passes through every network on earth. No hole-punching required. IPv6 preferred where available.
+
+### 15.2. What the Protocol Does NOT Protect Against
+
+- **Endpoint compromise:** If a device is physically seized or compromised with malware, messages in memory are accessible. This is true of all messaging systems.
+- **App-layer logging:** If the app developer enables logging, messages are recorded at the endpoint. This is by design — it's how compliance works.
+- **Targeted device surveillance:** A state actor targeting a specific device with spyware (Pegasus-style) can read messages as they're displayed. The protocol cannot defend against OS-level compromise.
+- **Social engineering:** The protocol cannot prevent a user from screenshotting a conversation.
+- **Foundation node metadata:** When messages transit Foundation nodes, the Foundation can observe connection metadata (source IPs, timing, destination hashes) and holds push tokens for offline delivery. Push tokens are the strongest metadata the node possesses — see §12.4 for analysis. This is equivalent to ISP-level metadata and weaker than direct device-to-device communication. Users who require stronger metadata protection should use a VPN. As organic mesh density grows, fewer messages need to transit Foundation nodes.
+
+---
+
+## 16. Performance Targets
+
+| Metric | Target | Notes |
+| :--- | :--- | :--- |
+| Message delivery (both online, internet) | < 500ms | Comparable to existing chat apps |
+| Message delivery (both online, platform P2P) | < 1s | Via Multipeer / Nearby Connections |
+| Message delivery (recipient offline, push wake) | < 3s after push received | Push wake + WebSocket connect + blob pull |
+| Message delivery (recipient offline, no push) | < 5 min after recipient comes online | Dependent on mesh density |
+| Media upload/download | Limited by connection speed | Encrypted blob transfer, no processing overhead |
+| SDK binary size (iOS) | < 5 MB | Must not bloat host app |
+| SDK binary size (Android) | < 3 MB | |
+| Node binary size | < 20 MB | Single static binary, no dependencies |
+| Battery impact (non-relay mode) | < 2% daily | Comparable to background apps |
+| Battery impact (eager relay mode) | < 8% daily | Opt-in only, charging-aware |
+| RAM usage | < 30 MB | |
+| Mesh density for reliable routing | > 100 devices per km² | Urban areas exceed this easily |
+
+---
+
+## 17. Prior Art & Differentiation
+
+| Project | Type | Transport | Embeddable SDK | Namespace Isolation | Social Routing |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Meshtastic** | Consumer App | LoRa | No | No | No |
+| **Bitchat** | Consumer App | BLE + Internet | No | No | No |
+| **Nostr** | Protocol | Internet (Relays) | Partial | No | No |
+| **Ditto SDK** | Commercial SDK | BLE + Wi-Fi + Internet | Yes | No | No |
+| **libp2p** | Networking Library | Internet | Yes (complex) | No | No |
+| **MeshWhisper** | Open SDK | Platform P2P + LAN + WebSocket | **Yes (10 lines)** | **Yes** | **Yes** |
+
+The key differentiators are the combination of: a developer-first embeddable SDK, application-level namespace isolation that enables a shared relay mesh, social graph routing that avoids the scaling problems of broadcast flooding, and a WebSocket transport that works through every firewall on earth without NAT traversal.
+
+---
+
+## 18. Phased Delivery Roadmap
+
+### Phase 1 — Protocol Spec & Reference Implementation (Months 1–6)
+
+- Finalise protocol specification
+- Build reference SDK for Android (Kotlin) and iOS (Swift)
+- Platform-native P2P, local network, and WebSocket internet transport
+- X3DH + Double Ratchet encryption
+- Namespace isolation and destination hashing
+- Social graph routing and store-and-forward relay
+- Device self-clustering
+- Reciprocity engine
+- Contact permissioning
+- Basic group messaging
+- **Deploy Foundation Node Network** — initial 5 nodes across Europe, US, Asia-Pacific (relay + push forwarding + media storage + prekey directory in a single binary)
+- Publish spec and SDK as open source
+
+**Deliverables:** Protocol spec v1.0, Android SDK, iOS SDK, TypeScript SDK (web — active-only client), MeshWhisper Node binary (open source), demo app, Foundation Node Network (operational).
+
+### Phase 2 — Hardening & Security (Months 6–12)
+
+- Implement chaff generation
+- Implement zero-knowledge relay reputation
+- Implement hardware entropy challenges (Sybil resistance)
+- Plausible deniability (deniable authentication)
+- Independent security audit
+- Developer documentation and integration guides
+- First partner app integrations
+
+**Deliverables:** Security audit report, developer portal, documentation, npm/pub.dev/CocoaPods/Maven packages.
+
+### Phase 3 — Adoption & Ecosystem (Months 12–18)
+
+- Sideloaded variant with raw BLE for offline/activist use cases
+- LZ4 message compression optimisation
+- Battery optimisation with adaptive relay scheduling
+- Present at DWeb Camp and relevant conferences
+- Developer evangelism and community building
+- Foundation incorporation and governance framework
+- Protocol specification whitepaper
+
+**Deliverables:** Sideloaded BLE app, whitepaper, foundation charter.
+
+### Phase 4 — Commercial Layer (Months 18–24)
+
+- Enterprise SDK with compliance tooling (logging, audit, retention)
+- Hardware relay node (always-on home device, ~€50)
+- Paid support and SLA tier for commercial developers
+- Advanced analytics dashboard for SDK integrators
+
+**Deliverables:** Enterprise SDK, hardware relay node, commercial support tier.
+
+---
+
+## 19. Commercial Model
+
+### 19.1. Revenue Structure
+
+The protocol is free. The SDK is free. The revenue comes from hosted infrastructure and enterprise services.
+
+**Foundation Node Hosting — tiered usage:**
+
+| Tier | Price | Includes |
+| :--- | :--- | :--- |
+| **Free** | €0/month | 10,000 messages/month, 1GB media storage, shared Foundation nodes |
+| **Growth** | €19/month | 100,000 messages/month, 10GB media storage, priority relay |
+| **Scale** | €99/month | 1M messages/month, 100GB media storage, dedicated node region selection |
+| **Enterprise** | Custom | Unlimited, private node fleet, SLA, compliance tooling, support |
+
+**Self-hosted node** — always free. The node binary is open source. Developers who self-host pay nothing to the Foundation. This is intentional: it prevents lock-in and builds trust. Developers who outgrow the free tier can either pay for hosted infrastructure or self-host. Both paths are supported equally.
+
+**Enterprise services:**
+- Compliance SDK with logging, audit export, and retention management
+- Private node fleet deployment and management
+- Custom integration consulting
+- SLA-backed support
+- Security audit coordination
+
+### 19.2. Unit Economics
+
+Foundation node infrastructure costs approximately €4–10/month per VPS. Each VPS handles tens of thousands of active users. The ratio of infrastructure cost to revenue at the Growth tier and above is highly favourable.
+
+Media storage is the primary variable cost. TTL-based expiry keeps disk usage bounded. Cloudflare R2 (zero egress fees) or local disk on Hetzner VPS are the most cost-effective storage backends.
+
+Push forwarding is negligible — APNs and FCM are free up to millions of notifications per month.
+
+### 19.3. Competitive Positioning
+
+| Provider | 100K MAU cost | E2EE | Self-hostable | Open source |
+| :--- | :--- | :--- | :--- | :--- |
+| SendBird | ~$2,000–5,000/month | No | No | No |
+| Stream Chat | ~$1,000–3,000/month | No | No | No |
+| PubNub | ~$1,000–2,000/month | No | No | No |
+| Firebase | ~$500–1,500/month | No | No | No |
+| **MeshWhisper (hosted)** | **€19–99/month** | **Yes** | **Yes** | **Yes** |
+| **MeshWhisper (self-hosted)** | **~€4/month** | **Yes** | **Yes** | **Yes** |
+
+The pricing gap is 10–100x. This is possible because the MeshWhisper Node is dramatically simpler than a traditional messaging backend — it forwards opaque encrypted blobs, stores them temporarily, and sends push wake signals. There is no message processing, no database, no business logic, no scaling complexity.
+
+---
+
+## 20. Open Questions & Risks
+
+| Question / Risk | Current Thinking |
+| :--- | :--- |
+| **Adoption chicken-and-egg** | Foundation Node Network provides reliable delivery from day one for any mobile-only user base. The SDK has standalone value before organic mesh density develops. |
+| **Namespace governance** | Self-assigned (hash-based). Collisions are cryptographically improbable. Namespace squatting is possible but low-impact since namespaces are internal identifiers, not user-facing. |
+| **Relay abuse by apps** | A malicious app developer could configure their SDK to maximise relay consumption and minimise contribution. The reciprocity engine mitigates at the device level, but app-level policy may be needed. |
+| **Legal status** | In jurisdictions with mandatory data retention or lawful intercept requirements, does embedding the SDK create legal liability for the app developer? The endpoint compliance API addresses this, but per-jurisdiction legal analysis is needed. Legal exposure for relay nodes is analogous to an ISP carrying encrypted traffic — relay nodes hold no plaintext and no user-identifying metadata. |
+| **Key discovery without servers** | Addressed by the prekey directory built into the MeshWhisper Node (§6.2). Stranger-to-stranger contact works through the same node the app already connects to for relay. No additional infrastructure required. |
+| **Connectable device density** | Addressed by the Foundation Node Network (§5.6), which provides reliable phone-to-phone bridging from launch regardless of organic connectable device count. Foundation node dependence decreases as mesh density grows. |
+| **iOS background relay** | The SDK does not depend on iOS background relay. Phones relay when foregrounded; BGTaskScheduler enables brief sync bursts (30s) for message delivery. Offline message delivery uses APNs push wake signals fired by the MeshWhisper Node (§12). The relay backbone is connectable devices (laptops, Foundation nodes, Phase 4 hardware), not phones. |
+| **Platform-native P2P limitations** | Apple Multipeer Connectivity and Google Nearby Connections are scoped to the same app/service identifier. Cross-app local relay is not possible. Offline mesh is same-app only. |
+| **Battery drain** | Adaptive relay willingness; relay only when plugged in or above battery threshold. Eager relay capped at < 8% daily battery impact. |
+| **Key management UX** | SDK handles key generation and storage internally. Developers and users never see raw keys. |
+| **Push token metadata** | Push tokens are the most sensitive metadata the MeshWhisper Node holds. A compromised node could correlate push tokens with destination hashes. Mitigated by token rotation and the option for developers to handle push forwarding in their own app logic. Per-jurisdiction analysis needed on whether push token storage constitutes personal data under GDPR. |
+| **Apple App Store compliance** | Relay behavior uses sanctioned platform APIs (Multipeer Connectivity, BGTaskScheduler). The SDK does not use prohibited background execution modes. Internet relay uses standard WebSocket connections indistinguishable from normal app networking. App Store guidelines §2.5.4 battery concern is addressed by the <2% daily non-relay battery target. This should be confirmed with Apple's developer relations team early in Phase 2. |
+| **Regulatory communication** | The protocol's aggregate implications — making E2EE P2P messaging default infrastructure for any app — become apparent only at scale. The open spec ensures transparency, but proactive communication to regulators and platform vendors requires careful thought. |
+| **Foundation node governance** | The Foundation Node Network requires a governance framework: which legal jurisdictions the nodes operate in, what the policy is if a government demands connection metadata, and how relay operators beyond the Foundation are vetted. This should be addressed in the foundation charter (Phase 3). |
+
+---
+
+## 21. References
+
+[1] Sendbird Chat Pricing. https://sendbird.com/pricing/chat  
+[2] PubNub Pricing Review. https://www.cometchat.com/blog/pubnub-pricing-plan-review  
+[3] Stream Chat Pricing. https://getstream.io/blog/product-comparison-stream-vs-pubnub/  
+[4] Understanding Firebase Realtime Database Pricing. https://airbyte.com/data-engineering-resources/firebase-database-pricing  
+[5] Hui, P. et al. "Bubble Rap: Social-based Forwarding in Delay-Tolerant Networks." https://www.cl.cam.ac.uk/~jac22/camhor/bubble_tmc-sub.pdf  
+[6] The X3DH Key Agreement Protocol. https://signal.org/docs/specifications/x3dh/  
+[7] The Double Ratchet Algorithm. https://signal.org/docs/specifications/doubleratchet/  
+[8] Noble Cryptography. https://paulmillr.com/noble/  
+[9] Bitchat: Decentralized P2P Communication using Bluetooth. https://soln.tech/blog/bitchat  
+
+---
+
+*This document is a living specification. Version 1.2 incorporates the unified MeshWhisper Node architecture (relay + push + media + directory in a single binary), push notification handling, media storage, and the commercial model. All technical decisions are subject to revision through community review, formal security analysis, and implementation experience.*
+
+*Protocol & Foundation: MeshWhisper Foundation, Ireland*  
+*Commercial Services: GestureLoop Ltd*  
+*Contact: Anton Mannering*
