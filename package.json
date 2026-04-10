@@ -27,7 +27,10 @@
       "default": "./dist/persistence/node-storage.js"
     }
   },
+  "files": ["dist", "src"],
+  "publishConfig": { "access": "public" },
   "scripts": {
+    "prepublishOnly": "npm run build",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "description": "MeshWhisper service worker — handles Web Push wake events for PWAs",
   "type": "module",
-  "main": "src/index.js",
+  "main": "dist/meshwhisper-sw.js",
+  "files": ["dist", "src"],
+  "publishConfig": { "access": "public" },
   "scripts": {
+    "prepublishOnly": "npm run build",
     "build": "esbuild src/index.ts --bundle --platform=browser --outfile=dist/meshwhisper-sw.js --format=iife"
   },
   "devDependencies": {

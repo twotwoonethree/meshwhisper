@@ -1,0 +1,13 @@
+tests/
+demo/
+*.test.ts
+*.test.js
+docs/
+.github/
+meshwhisper-prd-v1.2.md
+newprd_v2.md
+newprd.md
+node/
+cli/
+push-service/
+service-worker/
