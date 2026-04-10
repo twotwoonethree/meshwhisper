@@ -1,12 +1,10 @@
 // ============================================================
-// MeshWhisper SDK — Node Transport
-// Connects the SDK to a MeshWhisper Node (relay + directory).
-// All traffic flows through the Node WebSocket endpoint; the
-// Node routes packets by destination hash and buffers blobs
-// for offline recipients.
+// MeshWhisper SDK — Browser Transport
+// Connects the SDK to a MeshWhisper Node using the native
+// browser WebSocket API. Drop-in replacement for NodeTransport
+// when running in a browser or PWA context.
 // ============================================================
 
-import { WebSocket, type RawData } from 'ws';
 import type { Transport, Packet, PushConfig } from '../../types.js';
 import {
   serializePacket,
@@ -18,27 +16,21 @@ import {
 
 /** Foundation-hosted relay nodes. Used when node config is "mesh". */
 export const FOUNDATION_RELAY_NODES = [
-  'wss://relay.meshwhisper.io', // TODO: deploy actual Foundation nodes
+  'wss://relay.meshwhisper.io',
 ];
 
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
-// ---- NodeTransport ----
+// ---- BrowserTransport ----
 
 /**
- * Transport that connects to a MeshWhisper Node for relay and
- * store-and-forward delivery.
- *
- * Sends a `hello` control message on connect to register the device's
- * current destination hashes. The Node then routes incoming packets
- * to the registered hashes and delivers any queued blobs.
- *
- * All outbound packets are forwarded to the Node regardless of the
- * `destination` argument — the packet's destHash header field is what
- * the Node uses for routing.
+ * Transport that connects to a MeshWhisper Node using the native browser
+ * WebSocket API. Functionally identical to NodeTransport but uses
+ * `globalThis.WebSocket` instead of the `ws` npm package, so it bundles
+ * cleanly for browsers and PWAs.
  */
-export class NodeTransport implements Transport {
+export class BrowserTransport implements Transport {
   readonly type = 'internet' as const;
 
   private ws: WebSocket | null = null;
@@ -47,14 +39,6 @@ export class NodeTransport implements Transport {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /**
-   * @param nodeUrl - The WebSocket URL of the Node, or "mesh" for Foundation nodes.
-   * @param getDestHashes - Callback returning the device's current dest hashes
-   *   as hex strings. Called on every (re)connect so the Node always has
-   *   up-to-date hashes.
-   * @param pushConfig - Optional push token to register with the Node so it can
-   *   wake the device via APNs/FCM when a message arrives while offline.
-   */
   constructor(
     private readonly nodeUrl: string,
     private readonly getDestHashes: () => string[],
@@ -86,15 +70,10 @@ export class NodeTransport implements Transport {
 
   async send(packet: Packet, _destination: string): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('NodeTransport: not connected to Node');
+      throw new Error('BrowserTransport: not connected to Node');
     }
     const binary = serializePacket(packet);
-    return new Promise<void>((resolve, reject) => {
-      this.ws!.send(binary, { binary: true }, (err) => {
-        if (err) reject(new Error(`NodeTransport send failed: ${err.message}`));
-        else resolve();
-      });
-    });
+    this.ws.send(binary);
   }
 
   onReceive(callback: (packet: Packet, source: string) => void): void {
@@ -119,30 +98,27 @@ export class NodeTransport implements Transport {
       const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
 
-      ws.on('open', () => {
+      ws.addEventListener('open', () => {
         this.ws = ws;
         this.reconnectAttempt = 0;
         resolved = true;
-
-        // Register dest hashes (and optional push token) with the Node
         ws.send(JSON.stringify(this.buildHello()));
-
         resolve();
       });
 
-      ws.on('message', (raw: RawData) => {
-        this.handleMessage(raw);
+      ws.addEventListener('message', (event: MessageEvent) => {
+        this.handleMessage(event.data);
       });
 
-      ws.on('close', () => {
+      ws.addEventListener('close', () => {
         this.ws = null;
         if (this.running) this.scheduleReconnect();
       });
 
-      ws.on('error', (err: Error) => {
+      ws.addEventListener('error', () => {
         if (!resolved) {
           resolved = true;
-          reject(new Error(`NodeTransport: failed to connect to ${url}: ${err.message}`));
+          reject(new Error(`BrowserTransport: failed to connect to ${url}`));
         }
       });
     });
@@ -167,11 +143,10 @@ export class NodeTransport implements Transport {
 
   // ---- Message handling ----
 
-  private handleMessage(raw: RawData): void {
-    // Binary messages are relay packets
-    if (raw instanceof ArrayBuffer && raw.byteLength >= HEADER_SIZE) {
+  private handleMessage(data: unknown): void {
+    if (data instanceof ArrayBuffer && data.byteLength >= HEADER_SIZE) {
       try {
-        const packet = deserializePacket(new Uint8Array(raw));
+        const packet = deserializePacket(new Uint8Array(data));
         const source = this.resolveUrl();
         for (const cb of this.receiveCallbacks) {
           try { cb(packet, source); } catch { /* swallow */ }
@@ -182,30 +157,21 @@ export class NodeTransport implements Transport {
       return;
     }
 
-    // JSON messages from the Node (informational; no action needed in v1)
-    if (typeof raw === 'string' || raw instanceof Buffer) {
+    if (typeof data === 'string') {
       try {
-        JSON.parse(raw.toString());
+        JSON.parse(data);
         // Reserved for future Node→client control messages
       } catch { /* not JSON */ }
     }
   }
 
-  // ---- Dest hash refresh ----
+  // ---- Dest hash / push token refresh ----
 
-  /**
-   * Re-registers the device's destination hashes with the Node.
-   * Call this when the epoch hour rolls over and hashes rotate.
-   */
   refreshDestHashes(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(this.buildHello()));
   }
 
-  /**
-   * Update the push token (e.g. after APNs/FCM issues a new token).
-   * Re-registers with the Node immediately if connected.
-   */
   setPushConfig(pushConfig: PushConfig | undefined): void {
     this.pushConfig = pushConfig;
     this.refreshDestHashes();
@@ -219,12 +185,13 @@ export class NodeTransport implements Transport {
       destHashes: this.getDestHashes(),
     };
     if (this.pushConfig) {
-      msg['pushPlatform'] = this.pushConfig.platform;
       if (this.pushConfig.platform === 'webpush') {
         msg['pushSubscription'] = JSON.stringify(this.pushConfig.subscription);
+        msg['pushPlatform'] = 'webpush';
       } else {
         msg['pushToken'] = this.pushConfig.token;
-        if (this.pushConfig.platform === 'apns' && this.pushConfig.topic) {
+        msg['pushPlatform'] = this.pushConfig.platform;
+        if ('topic' in this.pushConfig && this.pushConfig.topic) {
           msg['pushTopic'] = this.pushConfig.topic;
         }
       }

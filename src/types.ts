@@ -209,14 +209,20 @@ export type MessageHook = (message: Message) => boolean | Promise<boolean>;
 // Re-export persistence types so callers only need one import
 export type { StorageBackend, StoredMessage } from './persistence/types.js';
 
-export interface PushConfig {
-  /** Device push token from APNs or FCM. */
-  token: string;
-  /** The push platform this token is for. */
-  platform: 'apns' | 'fcm';
-  /** Optional topic (APNs bundle ID / FCM sender ID). */
-  topic?: string;
+/** Web Push subscription object (serialisable form of PushSubscription). */
+export interface WebPushSubscription {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
 }
+
+export type PushConfig =
+  | { platform: 'apns'; token: string; topic?: string }
+  | { platform: 'fcm'; token: string }
+  | { platform: 'webpush'; subscription: WebPushSubscription };
 
 export interface MeshWhisperConfig {
   namespace: string;

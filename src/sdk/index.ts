@@ -21,6 +21,7 @@ import type {
   RelayWillingness,
   StorageBackend,
   StoredMessage,
+  Transport as MWTransport,
 } from '../types.js';
 import { PacketFlags } from '../types.js';
 import {
@@ -63,14 +64,11 @@ import {
   decompressPayload,
   PROTOCOL_VERSION,
 } from '../packet/index.js';
-import { WebSocketTransport } from '../transport/websocket/index.js';
-import { LocalTransport } from '../transport/local/index.js';
 import {
   PlatformP2PTransport,
   registerPlatformBridge,
 } from '../transport/p2p/index.js';
 import type { PlatformP2PBridge } from '../transport/p2p/index.js';
-import { NodeTransport } from '../transport/node/index.js';
 import { BearerNegotiator } from '../transport/negotiator/index.js';
 import {
   SocialGraphRouter,
@@ -266,12 +264,12 @@ export class MeshWhisper {
   private cluster: DeviceCluster | null = null;
 
   // --- Transports ---
-  private readonly wsTransport: WebSocketTransport;
-  private readonly localTransport: LocalTransport;
+  private readonly wsTransport: MWTransport;
+  private readonly localTransport: MWTransport;
   private readonly p2pTransport: PlatformP2PTransport;
 
-  // --- Node transport (optional) ---
-  private nodeTransport: NodeTransport | null = null;
+  // --- Node/relay transport ---
+  private nodeTransport: MWTransport | null = null;
 
   // --- Pre-key pair storage (required for X3DH responder side) ---
   private signedPreKeyPair: KeyPair | null = null;
@@ -308,6 +306,9 @@ export class MeshWhisper {
     config: MeshWhisperConfig,
     identity: LocalIdentity,
     storage: StorageBackend | null,
+    wsTransport: MWTransport,
+    localTransport: MWTransport,
+    nodeTransport: MWTransport,
   ) {
     this.config = config;
     this.storage = storage;
@@ -329,20 +330,10 @@ export class MeshWhisper {
     this.permissionManager = new PermissionManager(config.permissionModel ?? 'open');
 
     // --- Transports ---
-    const deviceId = randomBytes(16);
-    this.wsTransport = new WebSocketTransport();
-    this.localTransport = new LocalTransport(deviceId);
+    this.wsTransport = wsTransport;
+    this.localTransport = localTransport;
+    this.nodeTransport = nodeTransport;
     this.p2pTransport = new PlatformP2PTransport(config.namespace);
-
-    // Build transport list; NodeTransport is prepended if a node is configured
-    const nodeConfig = config.node ?? 'mesh';
-    const nodeUrls = Array.isArray(nodeConfig) ? nodeConfig : [nodeConfig];
-    const primaryNodeUrl = nodeUrls[0];
-    this.nodeTransport = new NodeTransport(
-      primaryNodeUrl,
-      () => this.getCurrentDestHashes(),
-      config.push,
-    );
 
     this.negotiator = new BearerNegotiator([
       this.p2pTransport,
@@ -417,26 +408,84 @@ export class MeshWhisper {
       await MeshWhisper._instance.shutdown();
     }
 
-    const storage = config.storage ?? null;
+    // ---- Environment detection ----
+    const isBrowser =
+      typeof window !== 'undefined' && typeof indexedDB !== 'undefined';
 
-    // Load or create the identity key. If storage is available, the same
-    // key is reused across restarts so the peer ID (public key) stays stable.
+    // ---- Storage ----
+    let storage: StorageBackend | null = config.storage ?? null;
+    if (!storage && isBrowser) {
+      const { IDBStorage } = await import('../persistence/idb-storage.js');
+      storage = new IDBStorage(config.namespace);
+    }
+
+    // ---- Identity ----
+    // Loaded from storage so the peer ID stays stable across page reloads /
+    // process restarts. Falls back to a fresh ephemeral identity when storage
+    // is unavailable (development / anonymous use).
     let identity: LocalIdentity;
     if (storage) {
       const savedKey = await storage.get('identity');
       if (savedKey) {
         identity = LocalIdentity.fromPrivateKey(
-          new Uint8Array(Buffer.from(savedKey, 'hex')),
+          hexToUint8Array(savedKey),
         );
       } else {
         identity = LocalIdentity.create();
-        await storage.set('identity', Buffer.from(identity.getEdPrivateKey()).toString('hex'));
+        await storage.set('identity', uint8ArrayToHex(identity.getEdPrivateKey()));
       }
     } else {
       identity = LocalIdentity.create();
     }
 
-    const instance = new MeshWhisper(config, identity, storage);
+    // ---- Relay URL ----
+    const nodeConfig = config.node ?? 'mesh';
+    const nodeUrls = Array.isArray(nodeConfig) ? nodeConfig : [nodeConfig];
+    const primaryNodeUrl = nodeUrls[0];
+
+    // ---- Transports (platform-appropriate) ----
+    let wsTransport: MWTransport;
+    let localTransport: MWTransport;
+    let nodeTransport: MWTransport;
+
+    // Declare instance early so the transport closures can capture it by
+    // reference. The getDestHashes callback is only ever invoked after
+    // instance.start() is awaited below, so the assignment is safe.
+    let instance!: MeshWhisper;
+    const getDestHashes = (): string[] => instance.getCurrentDestHashes();
+
+    if (isBrowser) {
+      // In a browser/PWA: relay via BrowserTransport, stub out Node.js-only
+      // transports (WebSocketTransport for P2P, LocalTransport for LAN).
+      const [{ NoOpTransport }, { BrowserTransport }] = await Promise.all([
+        import('../transport/noop/index.js'),
+        import('../transport/browser/index.js'),
+      ]);
+      wsTransport = new NoOpTransport('internet');
+      localTransport = new NoOpTransport('local_net');
+      nodeTransport = new BrowserTransport(primaryNodeUrl, getDestHashes, config.push);
+    } else {
+      // In Node.js: full transport stack.
+      const [{ WebSocketTransport }, { LocalTransport }, { NodeTransport }] =
+        await Promise.all([
+          import('../transport/websocket/index.js'),
+          import('../transport/local/index.js'),
+          import('../transport/node/index.js'),
+        ]);
+      const deviceId = randomBytes(16);
+      wsTransport = new WebSocketTransport();
+      localTransport = new LocalTransport(deviceId);
+      nodeTransport = new NodeTransport(primaryNodeUrl, getDestHashes, config.push);
+    }
+
+    instance = new MeshWhisper(
+      config,
+      identity,
+      storage,
+      wsTransport,
+      localTransport,
+      nodeTransport,
+    );
     MeshWhisper._instance = instance;
     await instance.start();
     return instance;
@@ -738,7 +787,7 @@ export class MeshWhisper {
     // 3. Send pointer message through normal encrypted channel
     const mediaMsg: MediaMessage = {
       url,
-      key: Buffer.from(mediaKey).toString('base64'),
+      key: uint8ArrayToBase64(mediaKey),
       ...(options?.mimeType ? { mimeType: options.mimeType } : {}),
     };
     const pointer = new TextEncoder().encode(
@@ -769,7 +818,7 @@ export class MeshWhisper {
     }
     if (!parsed.__mw_media || !parsed.url || !parsed.key) return null;
 
-    const mediaKey = Uint8Array.from(Buffer.from(parsed.key, 'base64'));
+    const mediaKey = base64ToUint8Array(parsed.key);
 
     // Fetch encrypted blob
     const response = await fetch(parsed.url);
@@ -795,7 +844,7 @@ export class MeshWhisper {
     const response = await fetch(httpUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
-      body: encryptedBlob,
+      body: encryptedBlob.buffer as ArrayBuffer,
     });
     if (!response.ok) {
       throw new Error(`Media upload failed: ${response.status}`);
@@ -1481,7 +1530,7 @@ export class MeshWhisper {
     this.peerCache.addPeer(envelope.senderId, new Uint8Array(envelope.identityKey));
     this.storage?.set(
       `peers/${envelope.senderId}`,
-      Buffer.from(new Uint8Array(envelope.identityKey)).toString('hex'),
+      uint8ArrayToHex(new Uint8Array(envelope.identityKey)),
     ).catch(() => {});
 
     // Register the peer as a contact
@@ -1664,7 +1713,7 @@ export class MeshWhisper {
       const hex = await this.storage.get(key);
       if (!hex) continue;
       const peerId = key.replace(/^peers\//, '');
-      this.peerCache.addPeer(peerId, new Uint8Array(Buffer.from(hex, 'hex')));
+      this.peerCache.addPeer(peerId, hexToUint8Array(hex));
     }
 
     // Peer prekey bundles (needed for session re-establishment)
@@ -1674,7 +1723,7 @@ export class MeshWhisper {
       if (!b64) continue;
       const peerId = key.replace(/^prekeys\//, '');
       try {
-        const bundle = deserializePreKeyBundle(new Uint8Array(Buffer.from(b64, 'base64')));
+        const bundle = deserializePreKeyBundle(base64ToUint8Array(b64));
         this.peerPreKeyBundles.set(peerId, bundle);
       } catch {
         // Corrupted bundle — skip
@@ -1723,7 +1772,7 @@ export class MeshWhisper {
   private async persistPreKeyBundle(peerId: string, bundle: PreKeyBundle): Promise<void> {
     await this.storage?.set(
       `prekeys/${peerId}`,
-      Buffer.from(serializePreKeyBundle(bundle)).toString('base64'),
+      uint8ArrayToBase64(serializePreKeyBundle(bundle)),
     );
   }
 
@@ -1736,7 +1785,7 @@ export class MeshWhisper {
     // Save any peers not yet written (incremental saves happen in completeIncomingHandshake)
     // This is a belt-and-suspenders flush on shutdown
     for (const [peerId, pubKey] of (this.peerCache as any).peers as Map<string, Uint8Array>) {
-      await this.storage.set(`peers/${peerId}`, Buffer.from(pubKey).toString('hex'));
+      await this.storage.set(`peers/${peerId}`, uint8ArrayToHex(pubKey));
     }
   }
 
@@ -1864,6 +1913,15 @@ function uint8ArrayToHex(arr: Uint8Array): string {
     hex += arr[i].toString(16).padStart(2, '0');
   }
   return hex;
+}
+
+function hexToUint8Array(hex: string): Uint8Array {
+  const len = hex.length >>> 1;
+  const arr = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    arr[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return arr;
 }
 
 function uint8ArrayToBase64(arr: Uint8Array): string {

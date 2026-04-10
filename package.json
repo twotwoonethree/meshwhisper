@@ -5,6 +5,28 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "default": "./dist/browser/index.js"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "default": "./dist/node/index.js"
+    },
+    "./persistence/idb": {
+      "types": "./dist/persistence/idb-storage.d.ts",
+      "default": "./dist/persistence/idb-storage.js"
+    },
+    "./persistence/node": {
+      "types": "./dist/persistence/node-storage.d.ts",
+      "default": "./dist/persistence/node-storage.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -18,7 +40,9 @@
     "@noble/ciphers": "^1.2.0",
     "@noble/curves": "^1.8.0",
     "@noble/hashes": "^1.7.0",
-    "lz4js": "^0.2.0",
+    "lz4js": "^0.2.0"
+  },
+  "optionalDependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {

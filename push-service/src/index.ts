@@ -25,6 +25,7 @@ import * as http from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { loadApnsConfig, sendApns } from './apns.js';
 import { loadFcmConfig, sendFcm } from './fcm.js';
+import { loadWebPushConfig, sendWebPush, type WebPushSubscription } from './webpush.js';
 
 // ============================================================
 // Configuration
@@ -32,12 +33,13 @@ import { loadFcmConfig, sendFcm } from './fcm.js';
 
 const PORT = parseInt(process.env.PUSH_PORT ?? '4000', 10);
 
-const apnsConfig = loadApnsConfig();
-const fcmConfig  = loadFcmConfig();
+const apnsConfig    = loadApnsConfig();
+const fcmConfig     = loadFcmConfig();
+const webPushConfig = loadWebPushConfig();
 
-if (!apnsConfig && !fcmConfig) {
-  console.warn('[push-service] WARNING: Neither APNs nor FCM is configured.');
-  console.warn('[push-service] Set APNS_* or FCM_* environment variables to enable push delivery.');
+if (!apnsConfig && !fcmConfig && !webPushConfig) {
+  console.warn('[push-service] WARNING: No push provider configured.');
+  console.warn('[push-service] Set APNS_*, FCM_*, or VAPID_* environment variables to enable push delivery.');
 }
 
 // ============================================================
@@ -45,10 +47,13 @@ if (!apnsConfig && !fcmConfig) {
 // ============================================================
 
 interface WebhookPayload {
+  /** APNs / FCM device token, or for webpush a JSON-serialised PushSubscription. */
   token: string;
-  platform: 'apns' | 'fcm';
+  platform: 'apns' | 'fcm' | 'webpush';
   topic?: string;
   destHash: string;
+  /** Pre-parsed Web Push subscription (sent by Node when platform=webpush). */
+  pushSubscription?: WebPushSubscription;
 }
 
 async function handleNotify(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -91,6 +96,22 @@ async function handleNotify(req: IncomingMessage, res: ServerResponse): Promise<
         await sendFcm(fcmConfig, token);
         console.log(`[push-service] FCM sent for destHash=${destHash}`);
       }
+    } else if (platform === 'webpush') {
+      if (!webPushConfig) {
+        console.warn(`[push-service] Web Push not configured — dropping push for ${destHash}`);
+      } else {
+        // Subscription may arrive as a pre-parsed object or as a JSON string in token
+        let subscription: WebPushSubscription | null = payload.pushSubscription ?? null;
+        if (!subscription && token) {
+          try { subscription = JSON.parse(token) as WebPushSubscription; } catch { /* bad token */ }
+        }
+        if (!subscription) {
+          console.warn(`[push-service] webpush: no valid subscription for ${destHash}`);
+        } else {
+          await sendWebPush(webPushConfig, subscription, destHash);
+          console.log(`[push-service] Web Push sent for destHash=${destHash}`);
+        }
+      }
     } else {
       console.warn(`[push-service] Unknown platform: ${platform}`);
     }
@@ -122,6 +143,7 @@ const server = http.createServer((req, res) => {
       status: 'ok',
       apns: !!apnsConfig,
       fcm: !!fcmConfig,
+      webpush: !!webPushConfig,
     }));
     return;
   }
@@ -131,8 +153,9 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`MeshWhisper Push Service listening on port ${PORT}`);
-  console.log(`  APNs: ${apnsConfig ? `enabled (${apnsConfig.production ? 'production' : 'sandbox'})` : 'disabled'}`);
-  console.log(`  FCM:  ${fcmConfig  ? `enabled (project: ${fcmConfig.projectId})` : 'disabled'}`);
+  console.log(`  APNs:     ${apnsConfig    ? `enabled (${apnsConfig.production ? 'production' : 'sandbox'})` : 'disabled'}`);
+  console.log(`  FCM:      ${fcmConfig     ? `enabled (project: ${fcmConfig.projectId})` : 'disabled'}`);
+  console.log(`  Web Push: ${webPushConfig ? 'enabled' : 'disabled (set VAPID_* to enable)'}`);
   console.log(`  Webhook endpoint: POST http://localhost:${PORT}/notify`);
 });
 

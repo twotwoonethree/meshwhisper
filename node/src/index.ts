@@ -169,8 +169,10 @@ function pruneExpiredBlobs(): void {
 
 interface PushRegistration {
   token: string;
-  platform: 'apns' | 'fcm';
+  platform: 'apns' | 'fcm' | 'webpush';
   topic?: string;
+  /** Serialised Web Push subscription JSON (platform=webpush only). */
+  pushSubscription?: string;
 }
 
 /** Map from destHash (hex) → push registration for offline wake signals. */
@@ -200,6 +202,7 @@ function notifyPush(destHash: string, reg: PushRegistration): void {
     token: reg.token,
     platform: reg.platform,
     ...(reg.topic ? { topic: reg.topic } : {}),
+    ...(reg.pushSubscription ? { pushSubscription: JSON.parse(reg.pushSubscription) } : {}),
     destHash,
   });
 
@@ -378,6 +381,7 @@ function handleWebSocketConnection(ws: WebSocket): void {
         pushToken?: string;
         pushPlatform?: string;
         pushTopic?: string;
+        pushSubscription?: string; // Web Push: JSON-serialised PushSubscription
       };
 
       if (msg.type === 'hello' && Array.isArray(msg.destHashes)) {
@@ -386,8 +390,15 @@ function handleWebSocketConnection(ws: WebSocket): void {
         );
         registerClient(ws, hashes);
 
-        // Register push token if provided
-        if (
+        // Register push token/subscription if provided
+        if (msg.pushPlatform === 'webpush' && typeof msg.pushSubscription === 'string') {
+          const reg: PushRegistration = {
+            token: msg.pushSubscription, // subscription JSON stored in token field
+            platform: 'webpush',
+            pushSubscription: msg.pushSubscription,
+          };
+          registerPushTokens(hashes, reg);
+        } else if (
           typeof msg.pushToken === 'string' && msg.pushToken &&
           (msg.pushPlatform === 'apns' || msg.pushPlatform === 'fcm')
         ) {
