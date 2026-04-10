@@ -174,6 +174,13 @@ export class LocalIdentity {
   }
 
   /**
+   * Returns the Ed25519 private key (32 bytes). Used only for identity persistence.
+   */
+  getEdPrivateKey(): Uint8Array {
+    return this.edPrivateKey;
+  }
+
+  /**
    * Returns the X25519 private key (32 bytes) used for key exchange.
    */
   getPrivateKey(): Uint8Array {

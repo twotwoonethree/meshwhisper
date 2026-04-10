@@ -206,12 +206,44 @@ export type MessageHook = (message: Message) => boolean | Promise<boolean>;
 
 // --- SDK Config Types ---
 
+// Re-export persistence types so callers only need one import
+export type { StorageBackend, StoredMessage } from './persistence/types.js';
+
+export interface PushConfig {
+  /** Device push token from APNs or FCM. */
+  token: string;
+  /** The push platform this token is for. */
+  platform: 'apns' | 'fcm';
+  /** Optional topic (APNs bundle ID / FCM sender ID). */
+  topic?: string;
+}
+
 export interface MeshWhisperConfig {
   namespace: string;
-  developerKey: string;
-  permissionModel: PermissionModel;
+  /** MeshWhisper Node endpoint(s). Use "mesh" for Foundation-hosted nodes,
+   *  a wss:// URL for self-hosted, or an array for hybrid mode. Defaults to "mesh". */
+  node?: string | string[];
+  /** Optional developer key (base64 public key). If omitted a random key is used,
+   *  which is fine for development and single-tenant deployments. */
+  developerKey?: string;
+  /** Default: "open". */
+  permissionModel?: PermissionModel;
+  /** Push notification token. When set the Node stores the token alongside
+   *  the device's destination hashes and sends a wake signal via the configured
+   *  push webhook when a message arrives while the device is offline. */
+  push?: PushConfig;
+  /**
+   * Persistent storage backend. Provide this to survive process restarts:
+   * sessions, message history, identity, and contacts are all persisted.
+   *
+   * For Node.js: `import { NodeStorage } from '@meshwhisper/sdk/persistence/node'`
+   * For React Native: wrap AsyncStorage or SQLCipher.
+   */
+  storage?: import('./persistence/types.js').StorageBackend;
   onMessage?: (message: Message) => void;
   onPresence?: (peerId: string, status: PresenceStatus) => void;
+  /** Called when the delivery status of an outbound message changes. */
+  onMessageStatus?: (messageId: string, status: import('./persistence/types.js').StoredMessage['status']) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

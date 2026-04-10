@@ -141,6 +141,10 @@ export class PermissionManager {
     return Array.from(this.contacts);
   }
 
+  loadContacts(contacts: string[]): void {
+    for (const id of contacts) this.contacts.add(id);
+  }
+
   blockPeer(peerId: string): void {
     this.blocked.add(peerId);
   }
