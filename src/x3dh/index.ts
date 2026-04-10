@@ -21,6 +21,20 @@ const SIGNATURE_LENGTH = 64;
 // --- Key Generation ---
 
 /**
+ * The result of generating a pre-key bundle. The bundle is the public
+ * portion distributed to peers; the key pairs must be stored locally
+ * so that X3DH can be completed on the responder side.
+ */
+export interface GeneratedPreKeyBundle {
+  /** The public bundle to distribute (gossip or directory). */
+  bundle: PreKeyBundle;
+  /** The X25519 signed pre-key pair. Store the private key. */
+  signedPreKeyPair: KeyPair;
+  /** The X25519 one-time pre-key pair. Store the private key. */
+  oneTimePreKeyPair: KeyPair;
+}
+
+/**
  * Generates a full PreKeyBundle for distribution to peers.
  *
  * The bundle contains:
@@ -28,10 +42,14 @@ const SIGNATURE_LENGTH = 64;
  * - Signed pre-key (X25519, signed by the identity key)
  * - One-time pre-key (X25519, single-use)
  *
+ * The returned `signedPreKeyPair` and `oneTimePreKeyPair` private keys
+ * must be stored by the caller — they are required to complete X3DH on
+ * the responder side when a handshake arrives.
+ *
  * @param identityKeyPair - Ed25519 identity key pair
- * @returns A complete PreKeyBundle ready for gossip distribution
+ * @returns Bundle (public) plus the key pairs (private keys must be stored)
  */
-export function generatePreKeyBundle(identityKeyPair: KeyPair): PreKeyBundle {
+export function generatePreKeyBundle(identityKeyPair: KeyPair): GeneratedPreKeyBundle {
   // Generate signed pre-key (X25519)
   const signedPreKeyPrivate = x25519.utils.randomSecretKey();
   const signedPreKeyPublic = x25519.getPublicKey(signedPreKeyPrivate);
@@ -44,36 +62,46 @@ export function generatePreKeyBundle(identityKeyPair: KeyPair): PreKeyBundle {
   const oneTimePreKeyPublic = x25519.getPublicKey(oneTimePreKeyPrivate);
 
   return {
-    identityKey: identityKeyPair.publicKey,
-    signedPreKey: signedPreKeyPublic,
-    signedPreKeySignature: signature,
-    oneTimePreKey: oneTimePreKeyPublic,
+    bundle: {
+      identityKey: identityKeyPair.publicKey,
+      signedPreKey: signedPreKeyPublic,
+      signedPreKeySignature: signature,
+      oneTimePreKey: oneTimePreKeyPublic,
+    },
+    signedPreKeyPair: {
+      publicKey: signedPreKeyPublic,
+      privateKey: signedPreKeyPrivate,
+    },
+    oneTimePreKeyPair: {
+      publicKey: oneTimePreKeyPublic,
+      privateKey: oneTimePreKeyPrivate,
+    },
   };
 }
 
 /**
  * Generates a batch of one-time pre-keys for replenishment.
  *
- * Each returned Uint8Array is an X25519 public key. The caller is responsible
- * for storing the corresponding private keys (derivable from the returned
- * key material via x25519.getPublicKey).
+ * Returns full KeyPairs — the caller must store the private keys.
+ * Only public keys are distributed in the prekey bundle; private keys
+ * are required locally to complete X3DH when a matching handshake arrives.
  *
- * @param identityKeyPair - Ed25519 identity key pair (unused but kept for API consistency)
+ * @param _identityKeyPair - Unused; kept for API consistency
  * @param count - Number of one-time pre-keys to generate
- * @returns Array of X25519 public keys
+ * @returns Array of X25519 key pairs
  */
 export function generateOneTimePreKeys(
   _identityKeyPair: KeyPair,
   count: number,
-): Uint8Array[] {
+): KeyPair[] {
   if (count < 0 || !Number.isInteger(count)) {
     throw new Error('count must be a non-negative integer');
   }
 
-  const keys: Uint8Array[] = [];
+  const keys: KeyPair[] = [];
   for (let i = 0; i < count; i++) {
     const privateKey = x25519.utils.randomSecretKey();
-    keys.push(x25519.getPublicKey(privateKey));
+    keys.push({ privateKey, publicKey: x25519.getPublicKey(privateKey) });
   }
   return keys;
 }

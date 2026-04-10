@@ -570,14 +570,8 @@ export class SocialGraphRouter {
   /** Generate a random 16-byte request ID. */
   private generateRequestId(): Uint8Array {
     const id = new Uint8Array(16);
-    if (typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.getRandomValues === 'function') {
-      globalThis.crypto.getRandomValues(id);
-    } else {
-      // Fallback for environments without Web Crypto.
-      for (let i = 0; i < 16; i++) {
-        id[i] = Math.floor(Math.random() * 256);
-      }
-    }
+    // globalThis.crypto is available in Node.js 19+ and all modern browsers.
+    globalThis.crypto.getRandomValues(id);
     return id;
   }
 }

@@ -234,7 +234,7 @@ export function createAckPacket(
  */
 export function createChaffPacket(senderEphId: Uint8Array): Packet {
   const destHash = randomUint8Array(8);
-  const payloadLen = 32 + Math.floor(Math.random() * 225); // 32..256
+  const payloadLen = 32 + (randomUint8Array(1)[0] % 225); // 32..256
   const payload = randomUint8Array(payloadLen);
   return buildPacket(PacketFlags.CHAFF, destHash, senderEphId, payload, 0);
 }
