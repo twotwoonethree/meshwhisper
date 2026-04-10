@@ -80,6 +80,10 @@ const mw = await MeshWhisper.init({
 
 ---
 
+## New to MeshWhisper?
+
+See **[docs/getting-started.md](docs/getting-started.md)** — a complete step-by-step walkthrough from zero to a working PWA with push notifications.
+
 ## Self-hosting in 5 minutes
 
 See **[docs/self-hosting.md](docs/self-hosting.md)** for the full guide.
