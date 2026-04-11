@@ -534,7 +534,7 @@ export class MeshWhisper {
     // when an X3DH handshake arrives. Store the signed pre-key pair here.
     const edKeyPair = {
       publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity['edPrivateKey'] as Uint8Array,
+      privateKey: this.identity.getEdPrivateKey(),
     };
     const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
     this.signedPreKeyPair = signedPreKeyPair;
@@ -950,7 +950,7 @@ export class MeshWhisper {
 
     const edKeyPair = {
       publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity['edPrivateKey'] as Uint8Array,
+      privateKey: this.identity.getEdPrivateKey(),
     };
     const { bundle, signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
     this.signedPreKeyPair = signedPreKeyPair;
@@ -1465,7 +1465,7 @@ export class MeshWhisper {
     // Perform X3DH as the initiator
     const aliceIdentity = {
       publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity['edPrivateKey'] as Uint8Array,
+      privateKey: this.identity.getEdPrivateKey(),
     };
 
     const result = initiateKeyExchange(aliceIdentity, bundle);
@@ -1510,7 +1510,7 @@ export class MeshWhisper {
 
     const bobIdentity = {
       publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity['edPrivateKey'] as Uint8Array,
+      privateKey: this.identity.getEdPrivateKey(),
     };
 
     const sharedSecret = completeKeyExchange(

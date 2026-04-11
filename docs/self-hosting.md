@@ -46,8 +46,11 @@ services:
       PORT: "8080"
       BASE_URL: "https://relay.myapp.com"   # ← your public HTTPS URL (no trailing slash)
       PUSH_WEBHOOK_URL: "http://push:4000/notify"
+      DB_PATH: "/data/meshwhisper.db"       # persist data across restarts
       BLOB_TTL_HOURS: "72"                  # how long to queue messages for offline devices
       MEDIA_TTL_HOURS: "168"               # how long to keep uploaded media (7 days)
+    volumes:
+      - node_data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
@@ -86,6 +89,9 @@ services:
 #     file: ./AuthKey_XXXXXXXXXX.p8
 #   fcm:
 #     file: ./firebase-service-account.json
+
+volumes:
+  node_data:   # SQLite database — survives container restarts and upgrades
 ```
 
 Store secrets in a `.env` file (do not commit it):

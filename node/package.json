@@ -7,8 +7,12 @@
   "bin": {
     "meshwhisper-node": "dist/index.js"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prepublishOnly": "npm run build",
     "build": "tsc",
@@ -16,9 +20,11 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
+    "better-sqlite3": "^12.8.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "tsx": "^4.21.0",

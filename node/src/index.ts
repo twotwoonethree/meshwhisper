@@ -21,6 +21,11 @@
 //   The webhook is responsible for sending the actual APNs/FCM notification.
 //   The Node only sends a silent wake signal — no message content is included.
 //
+// Persistence:
+//   Data is stored in a SQLite database (default: ./meshwhisper.db).
+//   Set DB_PATH to change the location. For Docker, mount a volume at /data
+//   and set DB_PATH=/data/meshwhisper.db so data survives container restarts.
+//
 // Self-hosted: one Docker container, one VPS, everything included.
 // Foundation-hosted: same binary, run by the Foundation as public infra.
 // ============================================================
@@ -29,6 +34,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import Database from 'better-sqlite3';
 
 // ============================================================
 // Configuration
@@ -42,6 +48,7 @@ const MEDIA_TTL_HOURS = parseInt(process.env.MEDIA_TTL_HOURS ?? String(7 * 24), 
 const MAX_MEDIA_SIZE = parseInt(process.env.MAX_MEDIA_SIZE ?? String(50 * 1024 * 1024), 10); // 50 MB
 const PRUNE_INTERVAL_MS = 5 * 60 * 1000; // prune expired blobs every 5 minutes
 const PUSH_WEBHOOK_URL = process.env.PUSH_WEBHOOK_URL ?? null;
+const DB_PATH = process.env.DB_PATH ?? './meshwhisper.db';
 // Rate limiting (per IP, sliding window)
 const RATE_WINDOW_MS = 60_000; // 1 minute window
 const RATE_LIMIT_MEDIA = parseInt(process.env.RATE_LIMIT_MEDIA ?? '20', 10);   // uploads/min
@@ -53,7 +60,124 @@ const RATE_LIMIT_DIR   = parseInt(process.env.RATE_LIMIT_DIR   ?? '60', 10);   /
 const BASE_URL = (process.env.BASE_URL ?? '').replace(/\/$/, '');
 
 // ============================================================
-// Rate limiter — sliding window counter per IP
+// SQLite database setup
+// ============================================================
+
+const db = new Database(DB_PATH);
+
+// Enable WAL mode for better concurrent read performance
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS blobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    dest_hash   TEXT    NOT NULL,
+    data        BLOB    NOT NULL,
+    received_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS blobs_dest_hash ON blobs (dest_hash);
+
+  CREATE TABLE IF NOT EXISTS push_registrations (
+    dest_hash         TEXT PRIMARY KEY,
+    token             TEXT NOT NULL,
+    platform          TEXT NOT NULL,
+    topic             TEXT,
+    push_subscription TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS prekey_bundles (
+    key    TEXT PRIMARY KEY,
+    bundle TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS media (
+    id        TEXT PRIMARY KEY,
+    data      BLOB    NOT NULL,
+    stored_at INTEGER NOT NULL
+  );
+`);
+
+// Prepared statements
+const stmts = {
+  // blobs
+  insertBlob: db.prepare(
+    'INSERT INTO blobs (dest_hash, data, received_at) VALUES (?, ?, ?)',
+  ),
+  countBlobsForHash: db.prepare<[string]>(
+    'SELECT COUNT(*) AS cnt FROM blobs WHERE dest_hash = ?',
+  ),
+  oldestBlobIdForHash: db.prepare<[string]>(
+    'SELECT id FROM blobs WHERE dest_hash = ? ORDER BY id ASC LIMIT 1',
+  ),
+  deleteBlob: db.prepare<[number]>(
+    'DELETE FROM blobs WHERE id = ?',
+  ),
+  pullBlobs: db.prepare<[string]>(
+    'SELECT id, data FROM blobs WHERE dest_hash = ? ORDER BY id ASC',
+  ),
+  deleteBlobsByHash: db.prepare<[string]>(
+    'DELETE FROM blobs WHERE dest_hash = ?',
+  ),
+  pruneBlobs: db.prepare<[number]>(
+    'DELETE FROM blobs WHERE received_at < ?',
+  ),
+  countBlobs: db.prepare(
+    'SELECT COUNT(*) AS cnt FROM blobs',
+  ),
+
+  // push registrations
+  upsertPush: db.prepare(
+    `INSERT INTO push_registrations (dest_hash, token, platform, topic, push_subscription)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(dest_hash) DO UPDATE SET
+       token = excluded.token,
+       platform = excluded.platform,
+       topic = excluded.topic,
+       push_subscription = excluded.push_subscription`,
+  ),
+  getPush: db.prepare<[string]>(
+    'SELECT token, platform, topic, push_subscription FROM push_registrations WHERE dest_hash = ?',
+  ),
+  deletePush: db.prepare<[string]>(
+    'DELETE FROM push_registrations WHERE dest_hash = ?',
+  ),
+  countPush: db.prepare(
+    'SELECT COUNT(*) AS cnt FROM push_registrations',
+  ),
+
+  // prekey bundles
+  upsertPrekey: db.prepare(
+    `INSERT INTO prekey_bundles (key, bundle) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET bundle = excluded.bundle`,
+  ),
+  getPrekey: db.prepare<[string]>(
+    'SELECT bundle FROM prekey_bundles WHERE key = ?',
+  ),
+  countPrekeys: db.prepare(
+    'SELECT COUNT(*) AS cnt FROM prekey_bundles',
+  ),
+
+  // media
+  insertMedia: db.prepare(
+    'INSERT INTO media (id, data, stored_at) VALUES (?, ?, ?)',
+  ),
+  getMedia: db.prepare<[string]>(
+    'SELECT data, stored_at FROM media WHERE id = ?',
+  ),
+  deleteMedia: db.prepare<[string]>(
+    'DELETE FROM media WHERE id = ?',
+  ),
+  pruneMedia: db.prepare<[number]>(
+    'DELETE FROM media WHERE stored_at < ?',
+  ),
+  countMedia: db.prepare(
+    'SELECT COUNT(*) AS cnt FROM media',
+  ),
+};
+
+// ============================================================
+// Rate limiter — sliding window counter per IP (in-memory, intentionally)
 // ============================================================
 
 interface RateWindow {
@@ -85,7 +209,6 @@ function getClientIp(req: IncomingMessage): string {
   return req.socket.remoteAddress ?? 'unknown';
 }
 
-// Prune stale rate limit entries alongside blobs
 function pruneRateLimitState(): void {
   const cutoff = Date.now() - RATE_WINDOW_MS;
   for (const [key, entry] of rateLimitState.entries()) {
@@ -117,77 +240,68 @@ function readDestHash(buf: Uint8Array): string | null {
 }
 
 // ============================================================
-// Blob store — in-memory, TTL-based
+// Blob store — SQLite-backed, TTL-based
 // ============================================================
 
-interface StoredBlob {
-  data: Uint8Array;
-  receivedAt: number;
-}
-
-/** Map from destHash (hex) → list of queued blobs. */
-const blobStore = new Map<string, StoredBlob[]>();
-
 function storeBlob(destHash: string, data: Uint8Array): void {
-  let queue = blobStore.get(destHash);
-  if (!queue) {
-    queue = [];
-    blobStore.set(destHash, queue);
+  // Enforce per-hash cap: drop oldest if full
+  const row = stmts.countBlobsForHash.get(destHash) as { cnt: number };
+  if (row.cnt >= MAX_BLOBS_PER_HASH) {
+    const oldest = stmts.oldestBlobIdForHash.get(destHash) as { id: number } | undefined;
+    if (oldest) stmts.deleteBlob.run(oldest.id);
   }
-  if (queue.length >= MAX_BLOBS_PER_HASH) {
-    queue.shift(); // drop oldest when full
-  }
-  queue.push({ data, receivedAt: Date.now() });
+  stmts.insertBlob.run(destHash, Buffer.from(data), Date.now());
 }
 
 function pullBlobs(destHash: string): Uint8Array[] {
-  const queue = blobStore.get(destHash);
-  if (!queue || queue.length === 0) return [];
-  blobStore.delete(destHash);
-  return queue.map((b) => b.data);
+  const rows = stmts.pullBlobs.all(destHash) as Array<{ id: number; data: Buffer }>;
+  if (rows.length === 0) return [];
+  stmts.deleteBlobsByHash.run(destHash);
+  return rows.map((r) => new Uint8Array(r.data));
 }
 
 function pruneExpiredBlobs(): void {
   const cutoff = Date.now() - BLOB_TTL_HOURS * 60 * 60 * 1000;
-  for (const [hash, queue] of blobStore.entries()) {
-    const fresh = queue.filter((b) => b.receivedAt > cutoff);
-    if (fresh.length === 0) {
-      blobStore.delete(hash);
-      // Also expire the push token for this dest hash — if no blobs have
-      // arrived within the blob TTL window, the device has likely rotated
-      // its dest hashes and the token is stale.
-      pushTokens.delete(hash);
-    } else {
-      blobStore.set(hash, fresh);
-    }
-  }
+  stmts.pruneBlobs.run(cutoff);
 }
 
 // ============================================================
-// Push token store — dest hash → push registration
+// Push token store — SQLite-backed
 // ============================================================
 
 interface PushRegistration {
   token: string;
   platform: 'apns' | 'fcm' | 'webpush';
   topic?: string;
-  /** Serialised Web Push subscription JSON (platform=webpush only). */
   pushSubscription?: string;
 }
 
-/** Map from destHash (hex) → push registration for offline wake signals. */
-const pushTokens = new Map<string, PushRegistration>();
-
 function registerPushTokens(destHashes: string[], reg: PushRegistration): void {
   for (const hash of destHashes) {
-    pushTokens.set(hash, reg);
+    stmts.upsertPush.run(
+      hash,
+      reg.token,
+      reg.platform,
+      reg.topic ?? null,
+      reg.pushSubscription ?? null,
+    );
   }
 }
 
-function deregisterPushTokens(destHashes: Iterable<string>): void {
-  for (const hash of destHashes) {
-    pushTokens.delete(hash);
-  }
+function getPushRegistration(destHash: string): PushRegistration | null {
+  const row = stmts.getPush.get(destHash) as {
+    token: string;
+    platform: string;
+    topic: string | null;
+    push_subscription: string | null;
+  } | undefined;
+  if (!row) return null;
+  return {
+    token: row.token,
+    platform: row.platform as PushRegistration['platform'],
+    ...(row.topic ? { topic: row.topic } : {}),
+    ...(row.push_subscription ? { pushSubscription: row.push_subscription } : {}),
+  };
 }
 
 /**
@@ -225,35 +339,27 @@ function notifyPush(destHash: string, reg: PushRegistration): void {
 }
 
 // ============================================================
-// Prekey directory — in-memory, namespace-scoped
+// Prekey directory — SQLite-backed, namespace-scoped
 // ============================================================
-
-/** Map from `${namespace}:${publicKeyHex}` → serialized bundle (base64). */
-const prekeyDirectory = new Map<string, string>();
 
 function directoryKey(namespace: string, publicKey: string): string {
   return `${namespace}:${publicKey}`;
 }
 
 function registerPrekey(namespace: string, publicKey: string, bundle: string): void {
-  prekeyDirectory.set(directoryKey(namespace, publicKey), bundle);
+  stmts.upsertPrekey.run(directoryKey(namespace, publicKey), bundle);
 }
 
 function lookupPrekey(namespace: string, publicKey: string): string | null {
-  return prekeyDirectory.get(directoryKey(namespace, publicKey)) ?? null;
+  const row = stmts.getPrekey.get(directoryKey(namespace, publicKey)) as
+    | { bundle: string }
+    | undefined;
+  return row?.bundle ?? null;
 }
 
 // ============================================================
-// Media store — in-memory, TTL-based encrypted blob storage
+// Media store — SQLite-backed, TTL-based encrypted blob storage
 // ============================================================
-
-interface MediaEntry {
-  data: Buffer;
-  storedAt: number;
-}
-
-/** Map from random media ID (hex) → encrypted media blob. */
-const mediaStore = new Map<string, MediaEntry>();
 
 function generateMediaId(): string {
   const bytes = new Uint8Array(16);
@@ -264,30 +370,29 @@ function generateMediaId(): string {
 function storeMedia(data: Buffer): { id: string; expiresAt: number } {
   const id = generateMediaId();
   const storedAt = Date.now();
-  mediaStore.set(id, { data, storedAt });
+  stmts.insertMedia.run(id, data, storedAt);
   return { id, expiresAt: storedAt + MEDIA_TTL_HOURS * 60 * 60 * 1000 };
 }
 
 function fetchMedia(id: string): Buffer | null {
-  const entry = mediaStore.get(id);
-  if (!entry) return null;
-  const expiresAt = entry.storedAt + MEDIA_TTL_HOURS * 60 * 60 * 1000;
+  const row = stmts.getMedia.get(id) as { data: Buffer; stored_at: number } | undefined;
+  if (!row) return null;
+  const expiresAt = row.stored_at + MEDIA_TTL_HOURS * 60 * 60 * 1000;
   if (Date.now() > expiresAt) {
-    mediaStore.delete(id);
+    stmts.deleteMedia.run(id);
     return null;
   }
-  return entry.data;
+  return row.data;
 }
 
 function pruneExpiredMedia(): void {
   const cutoff = Date.now() - MEDIA_TTL_HOURS * 60 * 60 * 1000;
-  for (const [id, entry] of mediaStore.entries()) {
-    if (entry.storedAt < cutoff) mediaStore.delete(id);
-  }
+  stmts.pruneMedia.run(cutoff);
 }
 
 // ============================================================
 // Connected clients — map from destHash (hex) → WebSocket
+// (connection state is ephemeral by nature, always in-memory)
 // ============================================================
 
 /** A client may register multiple dest hashes (current + previous epoch). */
@@ -297,7 +402,6 @@ const clientsByHash = new Map<string, WebSocket>();
 const hashesPerClient = new Map<WebSocket, Set<string>>();
 
 function registerClient(ws: WebSocket, destHashes: string[]): void {
-  // Remove any previous registrations for this socket
   const existing = hashesPerClient.get(ws);
   if (existing) {
     for (const h of existing) clientsByHash.delete(h);
@@ -315,9 +419,8 @@ function deregisterClient(ws: WebSocket): void {
   const hashes = hashesPerClient.get(ws);
   if (hashes) {
     for (const h of hashes) clientsByHash.delete(h);
-    // Push tokens are intentionally kept after disconnect — they are needed
-    // to wake the device when it is offline. They expire naturally alongside
-    // the blobs in the prune cycle.
+    // Push registrations are intentionally kept after disconnect — they are
+    // needed to wake the device when it is offline.
     hashesPerClient.delete(ws);
   }
 }
@@ -352,7 +455,7 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
     storeBlob(destHash, data);
 
     // Wake the recipient via push if they have a registered token
-    const pushReg = pushTokens.get(destHash);
+    const pushReg = getPushRegistration(destHash);
     if (pushReg) notifyPush(destHash, pushReg);
   }
 }
@@ -381,7 +484,7 @@ function handleWebSocketConnection(ws: WebSocket): void {
         pushToken?: string;
         pushPlatform?: string;
         pushTopic?: string;
-        pushSubscription?: string; // Web Push: JSON-serialised PushSubscription
+        pushSubscription?: string;
       };
 
       if (msg.type === 'hello' && Array.isArray(msg.destHashes)) {
@@ -390,24 +493,21 @@ function handleWebSocketConnection(ws: WebSocket): void {
         );
         registerClient(ws, hashes);
 
-        // Register push token/subscription if provided
         if (msg.pushPlatform === 'webpush' && typeof msg.pushSubscription === 'string') {
-          const reg: PushRegistration = {
-            token: msg.pushSubscription, // subscription JSON stored in token field
+          registerPushTokens(hashes, {
+            token: msg.pushSubscription,
             platform: 'webpush',
             pushSubscription: msg.pushSubscription,
-          };
-          registerPushTokens(hashes, reg);
+          });
         } else if (
           typeof msg.pushToken === 'string' && msg.pushToken &&
           (msg.pushPlatform === 'apns' || msg.pushPlatform === 'fcm')
         ) {
-          const reg: PushRegistration = {
+          registerPushTokens(hashes, {
             token: msg.pushToken,
             platform: msg.pushPlatform,
             ...(typeof msg.pushTopic === 'string' && msg.pushTopic ? { topic: msg.pushTopic } : {}),
-          };
-          registerPushTokens(hashes, reg);
+          });
         }
 
         deliverQueuedBlobs(ws, hashes);
@@ -424,13 +524,8 @@ function handleWebSocketConnection(ws: WebSocket): void {
     }
   });
 
-  ws.on('close', () => {
-    deregisterClient(ws);
-  });
-
-  ws.on('error', () => {
-    deregisterClient(ws);
-  });
+  ws.on('close', () => deregisterClient(ws));
+  ws.on('error', () => deregisterClient(ws));
 }
 
 // ============================================================
@@ -476,10 +571,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     sendJson(res, 200, {
       status: 'ok',
       clients: clientsByHash.size,
-      storedBlobs: [...blobStore.values()].reduce((n, q) => n + q.length, 0),
-      prekeyEntries: prekeyDirectory.size,
-      pushRegistrations: pushTokens.size,
-      mediaEntries: mediaStore.size,
+      storedBlobs: (stmts.countBlobs.get() as { cnt: number }).cnt,
+      prekeyEntries: (stmts.countPrekeys.get() as { cnt: number }).cnt,
+      pushRegistrations: (stmts.countPush.get() as { cnt: number }).cnt,
+      mediaEntries: (stmts.countMedia.get() as { cnt: number }).cnt,
     });
     return;
   }
@@ -631,7 +726,7 @@ const pruneInterval = setInterval(() => {
   pruneExpiredMedia();
   pruneRateLimitState();
 }, PRUNE_INTERVAL_MS);
-pruneInterval.unref(); // don't keep process alive for pruning alone
+pruneInterval.unref();
 
 httpServer.listen(PORT, () => {
   console.log(`MeshWhisper Node listening on port ${PORT}`);
@@ -639,6 +734,7 @@ httpServer.listen(PORT, () => {
   console.log(`  Directory: http://localhost:${PORT}/directory`);
   console.log(`  Media:     http://localhost:${PORT}/media`);
   console.log(`  Health:    http://localhost:${PORT}/health`);
+  console.log(`  Database:  ${DB_PATH}`);
   console.log(`  Blob TTL:  ${BLOB_TTL_HOURS}h`);
   console.log(`  Media TTL: ${MEDIA_TTL_HOURS}h (max ${MAX_MEDIA_SIZE / (1024 * 1024)}MB per file)`);
   console.log(`  Base URL:  ${BASE_URL || '(inferred from Host header — set BASE_URL in production)'}`);
@@ -654,8 +750,14 @@ function shutdown(): void {
   clearInterval(pruneInterval);
   wss.clients.forEach((ws) => ws.close(1001, 'Node shutting down'));
   wss.close();
-  httpServer.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 3000).unref();
+  httpServer.close(() => {
+    db.close();
+    process.exit(0);
+  });
+  setTimeout(() => {
+    db.close();
+    process.exit(1);
+  }, 3000).unref();
 }
 
 process.on('SIGINT', shutdown);
