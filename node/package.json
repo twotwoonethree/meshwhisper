@@ -1,6 +1,6 @@
 {
   "name": "@meshwhisper/node",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MeshWhisper Node — relay, push forwarding, media storage, and prekey directory in a single binary",
   "type": "module",
   "main": "dist/index.js",
