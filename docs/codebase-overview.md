@@ -159,15 +159,16 @@ The intended use case is a developer who wants to add messaging to their existin
 
 ### Node relay server (`node/src/index.ts`)
 - WebSocket relay: routes binary packets by destination hash
+- SQLite persistence (`better-sqlite3`, WAL mode): blobs, push registrations, prekey bundles, and media all survive container restarts. `DB_PATH` env var controls location (default `./meshwhisper.db`; mount `/data` volume in Docker)
 - Blob store: queues encrypted blobs for offline recipients, TTL 72h, max 500/hash, max 256KB/blob
-- Push token store: survives WebSocket disconnect (tokens needed for offline delivery)
-- Prekey directory: `POST /directory`, `GET /directory` — rate limited
-- Media store: `POST /media`, `GET /media/:id` — TTL 7 days, max 50MB/file
+- Push token store: persisted to SQLite, survives WebSocket disconnect and server restart
+- Prekey directory: `POST /directory`, `GET /directory` — rate limited, persisted to SQLite
+- Media store: `POST /media`, `GET /media/:id` — TTL 7 days, max 50MB/file, persisted to SQLite
 - Push webhook: POSTs to `PUSH_WEBHOOK_URL` when blob arrives for offline device
-- Rate limiting: sliding window per IP, configurable via env vars, `X-Forwarded-For` aware
+- Rate limiting: sliding window per IP, configurable via env vars, `X-Forwarded-For` aware (in-memory, intentionally — ephemeral)
 - CORS: all HTTP endpoints include `Access-Control-Allow-Origin: *` and handle OPTIONS preflight
 - Health check: `GET /health` returns clients, blobs, prekeys, push registrations, media counts
-- Graceful shutdown on SIGINT/SIGTERM
+- Graceful shutdown on SIGINT/SIGTERM — closes SQLite connection cleanly
 
 ### Push service (`push-service/`)
 - APNs: HTTP/2 provider API, JWT auth, `.p8` key, silent background push (`apns-priority: 5`), JWT cached 55 minutes, H2 session pooling
@@ -213,25 +214,17 @@ These modules exist with correct interfaces and reasonable implementations but h
 
 ### Critical for production
 
-1. **Node is in-memory only** — server restart loses all queued blobs, push registrations, and prekey bundles. No database backend. Acceptable for development and low-stakes deployments, not for production at scale.
+1. **No end-to-end integration tests** — 87 unit tests covering crypto, X3DH, ratchet, and packet layers. No test exercises the full stack: SDK → Node → push service → SDK.
 
-2. **No Foundation relay** — `FOUNDATION_RELAY_NODES = ['wss://relay.meshwhisper.io']` — this domain does not exist. `node: 'mesh'` silently fails. Every developer must self-host.
-
-3. **No end-to-end integration tests** — 87 unit tests covering crypto, X3DH, ratchet, and packet layers. No test exercises the full stack: SDK → Node → push service → SDK.
-
-4. **No multi-device support** — the same identity key on two devices is not handled. Device 2 would generate a different identity and appear as a different user.
+2. **No multi-device support** — the same identity key on two devices is not handled. Device 2 would generate a different identity and appear as a different user.
 
 ### Minor
 
-5. **`ws` is an optional dependency** — moved from `dependencies` to `optionalDependencies`. In some environments this may not install automatically for Node.js users who need `NodeTransport`.
+3. **`ws` is an optional dependency** — moved from `dependencies` to `optionalDependencies`. In some environments this may not install automatically for Node.js users who need `NodeTransport`.
 
-6. **Service worker requires manual copy** — `dist/meshwhisper-sw.js` must be copied to the public directory manually. No automated step.
+4. **Service worker requires manual copy** — `dist/meshwhisper-sw.js` must be copied to the public directory manually. No automated step.
 
-7. **Node registry / mesh routing** — `node: 'mesh'` picks `FOUNDATION_RELAY_NODES[0]` blindly. No health checking, no geographic routing, no fallback.
-
-8. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
-
-9. **RatchetState serialization uses private field access** — `identity['edPrivateKey']` accesses a private TypeScript field with bracket notation. Works at runtime but bypasses type safety.
+5. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
 
 ---
 
@@ -239,8 +232,8 @@ These modules exist with correct interfaces and reasonable implementations but h
 
 | Package | npm | Version | Purpose |
 |---|---|---|---|
-| `@meshwhisper/sdk` | published | 0.1.0 | Client library — browser, Node.js, React Native |
-| `@meshwhisper/node` | published | 0.1.0 | Relay server binary |
+| `@meshwhisper/sdk` | published | 0.1.1 | Client library — browser, Node.js, React Native |
+| `@meshwhisper/node` | published | 0.1.1 | Relay server binary |
 | `@meshwhisper/push-service` | published | 0.1.0 | APNs / FCM / Web Push dispatcher |
 | `@meshwhisper/cli` | published | 0.1.0 | `npx @meshwhisper/cli init` scaffolding |
 | `@meshwhisper/service-worker` | published | 0.1.0 | PWA push event handler (1.6KB) |
@@ -254,6 +247,7 @@ These modules exist with correct interfaces and reasonable implementations but h
 | Crypto primitives | `@noble/curves`, `@noble/ciphers`, `@noble/hashes` | Audited, pure JS, browser + Node.js compatible, no WASM |
 | Compression | `lz4js` | Fast, browser-compatible |
 | Node.js WebSocket | `ws` | Mature, widely used |
+| Node persistence | `better-sqlite3` | Embedded, single-file, no external service, survives restarts |
 | FCM auth | `google-auth-library` | Official Google library |
 | Web Push | `web-push` | Standard VAPID implementation |
 | Service worker build | `esbuild` | Fast, produces small IIFE bundle |
@@ -267,7 +261,7 @@ These modules exist with correct interfaces and reasonable implementations but h
 | File | Lines |
 |---|---|
 | `src/sdk/index.ts` | 1994 |
-| `node/src/index.ts` | 662 |
+| `node/src/index.ts` | ~530 (was 662 before SQLite refactor) |
 | `src/transport/websocket/index.ts` | ~620 |
 | `src/transport/local/index.ts` | ~400 |
 | `src/ratchet/index.ts` | ~350 |
