@@ -38,12 +38,16 @@ export class BrowserTransport implements Transport {
   private running = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private onStatusChange?: (status: 'connected' | 'disconnected') => void;
 
   constructor(
     private readonly nodeUrl: string,
     private readonly getDestHashes: () => string[],
     private pushConfig?: PushConfig,
-  ) {}
+    onStatusChange?: (status: 'connected' | 'disconnected') => void,
+  ) {
+    this.onStatusChange = onStatusChange;
+  }
 
   // ---- Transport interface ----
 
@@ -103,6 +107,7 @@ export class BrowserTransport implements Transport {
         this.reconnectAttempt = 0;
         resolved = true;
         ws.send(JSON.stringify(this.buildHello()));
+        this.onStatusChange?.('connected');
         resolve();
       });
 
@@ -112,6 +117,7 @@ export class BrowserTransport implements Transport {
 
       ws.addEventListener('close', () => {
         this.ws = null;
+        this.onStatusChange?.('disconnected');
         if (this.running) this.scheduleReconnect();
       });
 

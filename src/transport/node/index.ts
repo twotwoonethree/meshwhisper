@@ -46,6 +46,7 @@ export class NodeTransport implements Transport {
   private running = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private onStatusChange?: (status: 'connected' | 'disconnected') => void;
 
   /**
    * @param nodeUrl - The WebSocket URL of the Node, or "mesh" for Foundation nodes.
@@ -54,12 +55,16 @@ export class NodeTransport implements Transport {
    *   up-to-date hashes.
    * @param pushConfig - Optional push token to register with the Node so it can
    *   wake the device via APNs/FCM when a message arrives while offline.
+   * @param onStatusChange - Called when connection to the Node changes.
    */
   constructor(
     private readonly nodeUrl: string,
     private readonly getDestHashes: () => string[],
     private pushConfig?: PushConfig,
-  ) {}
+    onStatusChange?: (status: 'connected' | 'disconnected') => void,
+  ) {
+    this.onStatusChange = onStatusChange;
+  }
 
   // ---- Transport interface ----
 
@@ -123,10 +128,8 @@ export class NodeTransport implements Transport {
         this.ws = ws;
         this.reconnectAttempt = 0;
         resolved = true;
-
-        // Register dest hashes (and optional push token) with the Node
         ws.send(JSON.stringify(this.buildHello()));
-
+        this.onStatusChange?.('connected');
         resolve();
       });
 
@@ -136,6 +139,7 @@ export class NodeTransport implements Transport {
 
       ws.on('close', () => {
         this.ws = null;
+        this.onStatusChange?.('disconnected');
         if (this.running) this.scheduleReconnect();
       });
 

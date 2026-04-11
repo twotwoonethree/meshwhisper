@@ -294,6 +294,14 @@ export class MeshWhisper {
   private onPresenceHandler: ((peerId: string, status: PresenceStatus) => void) | null = null;
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
+  // --- Connection state & offline queue ---
+  private nodeConnected = false;
+  private readonly outboundQueue: Array<{
+    recipientId: string;
+    payload: Uint8Array;
+    options?: SendOptions;
+  }> = [];
+
   // --- Lifecycle ---
   private running = false;
   private ephemeralRotationTimer: ReturnType<typeof setInterval> | null = null;
@@ -454,6 +462,15 @@ export class MeshWhisper {
     let instance!: MeshWhisper;
     const getDestHashes = (): string[] => instance.getCurrentDestHashes();
 
+    const onNodeStatus = (status: 'connected' | 'disconnected'): void => {
+      instance.nodeConnected = status === 'connected';
+      config.onConnectionStatus?.(status);
+      if (status === 'connected') {
+        // Flush any messages that were queued while offline
+        instance.flushOutboundQueue().catch(() => { /* best-effort */ });
+      }
+    };
+
     if (isBrowser) {
       // In a browser/PWA: relay via BrowserTransport, stub out Node.js-only
       // transports (WebSocketTransport for P2P, LocalTransport for LAN).
@@ -463,7 +480,7 @@ export class MeshWhisper {
       ]);
       wsTransport = new NoOpTransport('internet');
       localTransport = new NoOpTransport('local_net');
-      nodeTransport = new BrowserTransport(primaryNodeUrl, getDestHashes, config.push);
+      nodeTransport = new BrowserTransport(primaryNodeUrl, getDestHashes, config.push, onNodeStatus);
     } else {
       // In Node.js: full transport stack.
       const [{ WebSocketTransport }, { LocalTransport }, { NodeTransport }] =
@@ -475,7 +492,7 @@ export class MeshWhisper {
       const deviceId = randomBytes(16);
       wsTransport = new WebSocketTransport();
       localTransport = new LocalTransport(deviceId);
-      nodeTransport = new NodeTransport(primaryNodeUrl, getDestHashes, config.push);
+      nodeTransport = new NodeTransport(primaryNodeUrl, getDestHashes, config.push, onNodeStatus);
     }
 
     instance = new MeshWhisper(
@@ -530,14 +547,33 @@ export class MeshWhisper {
       },
     );
 
-    // Generate pre-key bundle on startup so the private keys are available
-    // when an X3DH handshake arrives. Store the signed pre-key pair here.
+    // Generate (or restore) signed pre-key pair. The private key must survive
+    // restarts so incoming X3DH handshakes can be completed with the same key
+    // that was published in the pre-key bundle / contact QR.
     const edKeyPair = {
       publicKey: this.identity.getEdPublicKey(),
       privateKey: this.identity.getEdPrivateKey(),
     };
-    const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
-    this.signedPreKeyPair = signedPreKeyPair;
+    if (this.storage) {
+      const savedSpk = await this.storage.get('signed_pre_key');
+      if (savedSpk) {
+        const [pubHex, privHex] = savedSpk.split(':');
+        this.signedPreKeyPair = {
+          publicKey: hexToUint8Array(pubHex!),
+          privateKey: hexToUint8Array(privHex!),
+        };
+      } else {
+        const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
+        this.signedPreKeyPair = signedPreKeyPair;
+        await this.storage.set(
+          'signed_pre_key',
+          `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
+        );
+      }
+    } else {
+      const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
+      this.signedPreKeyPair = signedPreKeyPair;
+    }
 
     // Start transports (best-effort; some may not be available)
     const startResults = await Promise.allSettled([
@@ -670,6 +706,12 @@ export class MeshWhisper {
     options?: SendOptions,
   ): Promise<void> {
     this.assertRunning();
+
+    // Queue the message if the Node connection is not yet up
+    if (!this.nodeConnected) {
+      this.outboundQueue.push({ recipientId, payload: payload.slice(), options });
+      return;
+    }
 
     // Check permissions
     const canSend = await this.permissionManager.canSendTo(recipientId);
@@ -934,6 +976,121 @@ export class MeshWhisper {
   // Public API — Contacts & Identity
   // ================================================================
 
+  // ================================================================
+  // Identity backup / restore
+  // ================================================================
+
+  /**
+   * Exports the local identity as an encrypted backup string.
+   *
+   * The private key is encrypted with AES-256-GCM using a key derived from
+   * the passphrase via PBKDF2 (100,000 iterations, SHA-256). The result is
+   * a base64-encoded JSON string safe to save to a file or display as a QR code.
+   *
+   * ```ts
+   * const backup = await MeshWhisper.exportIdentity('my-strong-passphrase');
+   * // save backup string to a file
+   * ```
+   */
+  static async exportIdentity(passphrase: string): Promise<string> {
+    return MeshWhisper.instance.exportIdentityInstance(passphrase);
+  }
+
+  async exportIdentityInstance(passphrase: string): Promise<string> {
+    this.assertRunning();
+    const privateKey = this.identity.getEdPrivateKey();
+    const salt = globalThis.crypto.getRandomValues(new Uint8Array(16));
+    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+
+    const baseKey = await globalThis.crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(passphrase),
+      'PBKDF2',
+      false,
+      ['deriveKey'],
+    );
+    const aesKey = await globalThis.crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 100_000, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt'],
+    );
+    const ciphertext = new Uint8Array(
+      await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, privateKey.buffer as ArrayBuffer),
+    );
+
+    const payload = JSON.stringify({
+      v: 1,
+      salt: uint8ArrayToHex(salt),
+      iv: uint8ArrayToHex(iv),
+      ciphertext: uint8ArrayToHex(ciphertext),
+    });
+    return btoa(payload);
+  }
+
+  /**
+   * Imports an identity from a backup string created by `exportIdentity`.
+   * Decrypts with the passphrase and stores the private key in the current
+   * storage backend. Takes effect on the next `MeshWhisper.init()` call.
+   *
+   * ```ts
+   * await MeshWhisper.importIdentity(backupString, 'my-strong-passphrase');
+   * // then re-init to use the restored identity
+   * await MeshWhisper.init({ ... });
+   * ```
+   *
+   * Throws if the passphrase is wrong or the backup is corrupt.
+   */
+  static async importIdentity(data: string, passphrase: string): Promise<void> {
+    let parsed: { v: number; salt: string; iv: string; ciphertext: string };
+    try {
+      parsed = JSON.parse(atob(data));
+    } catch {
+      throw new Error('importIdentity: invalid backup format');
+    }
+    if (parsed.v !== 1) throw new Error(`importIdentity: unknown version ${parsed.v}`);
+
+    const salt = hexToUint8Array(parsed.salt);
+    const iv = hexToUint8Array(parsed.iv);
+    const ciphertext = hexToUint8Array(parsed.ciphertext);
+
+    const baseKey = await globalThis.crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(passphrase),
+      'PBKDF2',
+      false,
+      ['deriveKey'],
+    );
+    const aesKey = await globalThis.crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 100_000, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt'],
+    );
+
+    let privateKeyBytes: Uint8Array;
+    try {
+      privateKeyBytes = new Uint8Array(
+        await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, aesKey, ciphertext.buffer as ArrayBuffer),
+      );
+    } catch {
+      throw new Error('importIdentity: wrong passphrase or corrupt backup');
+    }
+
+    // Validate it's a real Ed25519 key (32 bytes)
+    if (privateKeyBytes.length !== 32) {
+      throw new Error('importIdentity: decrypted key has unexpected length');
+    }
+
+    // Persist to storage so the next init() picks it up
+    const storage = MeshWhisper._instance?.storage;
+    if (storage) {
+      await storage.set('identity', uint8ArrayToHex(privateKeyBytes));
+    }
+  }
+
   /**
    * Generate a QR code payload for first contact. Contains the
    * local peer's identity public key and pre-key bundle so a
@@ -954,6 +1111,14 @@ export class MeshWhisper {
     };
     const { bundle, signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
     this.signedPreKeyPair = signedPreKeyPair;
+    // Persist so the private key survives restarts — incoming X3DH handshakes
+    // that arrive after a reconnect can still be completed.
+    if (this.storage) {
+      this.storage.set(
+        'signed_pre_key',
+        `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
+      ).catch(() => {});
+    }
     const serialized = serializePreKeyBundle(bundle);
 
     // Encode as: peerId-length(2) + peerId-bytes + bundle-bytes
@@ -1874,6 +2039,24 @@ export class MeshWhisper {
       throw new Error(
         'MeshWhisper is not running. Call MeshWhisper.init() first.',
       );
+    }
+  }
+
+  // ================================================================
+  // Internal — Offline queue flush
+  // ================================================================
+
+  private async flushOutboundQueue(): Promise<void> {
+    while (this.outboundQueue.length > 0 && this.nodeConnected) {
+      const item = this.outboundQueue.shift();
+      if (!item) break;
+      try {
+        await this.sendMessage(item.recipientId, item.payload, item.options);
+      } catch {
+        // Put it back at the front and stop — avoid thrashing on a broken session
+        this.outboundQueue.unshift(item);
+        break;
+      }
     }
   }
 }

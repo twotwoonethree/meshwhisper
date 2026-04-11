@@ -250,6 +250,10 @@ export interface MeshWhisperConfig {
   onPresence?: (peerId: string, status: PresenceStatus) => void;
   /** Called when the delivery status of an outbound message changes. */
   onMessageStatus?: (messageId: string, status: import('./persistence/types.js').StoredMessage['status']) => void;
+  /** Called when the WebSocket connection to the Node goes up or down.
+   *  Use this to show a connectivity indicator in your UI.
+   *  Messages sent while disconnected are queued and flushed automatically on reconnect. */
+  onConnectionStatus?: (status: 'connected' | 'disconnected') => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;
