@@ -1,6 +1,6 @@
 {
   "name": "@meshwhisper/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Serverless P2P E2EE Messaging SDK",
   "type": "module",
   "main": "dist/index.js",
@@ -27,8 +27,13 @@
       "default": "./dist/persistence/node-storage.js"
     }
   },
-  "files": ["dist", "src"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prepublishOnly": "npm run build",
     "build": "tsc",
