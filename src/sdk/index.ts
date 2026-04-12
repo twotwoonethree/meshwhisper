@@ -216,6 +216,7 @@ export class MeshWhisper {
 
   // --- Lifecycle ---
   private running = false;
+  private startupReinitiationDone = false;
   private ephemeralRotationTimer: ReturnType<typeof setInterval> | null = null;
   private reputationBroadcastTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -368,6 +369,16 @@ export class MeshWhisper {
       config.onConnectionStatus?.(status);
       if (status === 'connected') {
         instance.flushOutboundQueue().catch(() => {});
+        // On first connection after startup, re-establish any sessions that
+        // didn't survive the restart. Done here (not in start()) so the node
+        // transport is actually live when we try to send handshake packets.
+        if (!instance.startupReinitiationDone) {
+          instance.startupReinitiationDone = true;
+          const contacts = instance.permissionManager.getContacts();
+          if (contacts.length > 0) {
+            instance.sessionManager.reinitiateSessionsOnStartup(contacts).catch(() => {});
+          }
+        }
       }
     };
 
@@ -415,11 +426,6 @@ export class MeshWhisper {
 
     if (this.storage) {
       await this.loadPersistedState();
-      const contacts = this.permissionManager.getContacts();
-      const hasSessions = contacts.some(id => this.sessionManager.hasSession(id));
-      if (contacts.length > 0 && !hasSessions) {
-        this.sessionManager.reinitiateSessionsOnStartup(contacts).catch(() => {});
-      }
     }
 
     this.negotiator.onReceive((packet, source, bearer) => {
@@ -1242,8 +1248,9 @@ export class MeshWhisper {
    * Used to verify entropy responses and reputation proofs.
    */
   private getPeerEdPublicKey(peerId: string): Uint8Array | null {
-    const bundle = this.sessionManager.getBundle(peerId);
-    return bundle?.identityKey ?? null;
+    // getPeerEdKey covers both initiators (who have the full bundle) and
+    // responders (who only stored the Ed key from the x3dh_init envelope).
+    return this.sessionManager.getPeerEdKey(peerId);
   }
 
   // ================================================================

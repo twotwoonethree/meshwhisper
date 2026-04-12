@@ -54,6 +54,12 @@ export class SessionManager {
   // Peer pre-key bundles (needed for initiating X3DH and re-establishment)
   private readonly peerPreKeyBundles: Map<string, PreKeyBundle> = new Map();
 
+  // Ed25519 identity key for each known peer (X25519 peerId → Ed25519 pubKey).
+  // Stored separately because responders never receive the initiator's full
+  // pre-key bundle — only their identity key in the x3dh_init envelope.
+  // Required for directory lookups when trying to re-establish a lost session.
+  private readonly peerEdKeys: Map<string, Uint8Array> = new Map();
+
   // Tracks in-flight outbound handshakes. The `resolve` is called when the
   // peer sends back an x3dh_response, confirming the session is live.
   private readonly pendingHandshakes: Map<string, { resolve: () => void }> = new Map();
@@ -115,8 +121,21 @@ export class SessionManager {
       try {
         const bundle = deserializePreKeyBundle(base64ToUint8Array(b64));
         this.peerPreKeyBundles.set(peerId, bundle);
+        // Ed key is embedded in the bundle — no separate load needed
+        this.peerEdKeys.set(peerId, bundle.identityKey);
       } catch {
         // Corrupted bundle — skip
+      }
+    }
+
+    const edKeyKeys = await this.storage.keys('edkeys/');
+    for (const key of edKeyKeys) {
+      const hex = await this.storage.get(key);
+      if (!hex) continue;
+      const peerId = key.replace(/^edkeys\//, '');
+      // Don't overwrite if already populated from the bundle above
+      if (!this.peerEdKeys.has(peerId)) {
+        this.peerEdKeys.set(peerId, hexToUint8Array(hex));
       }
     }
   }
@@ -313,10 +332,21 @@ export class SessionManager {
 
   setBundle(peerId: string, bundle: PreKeyBundle): void {
     this.peerPreKeyBundles.set(peerId, bundle);
+    this.peerEdKeys.set(peerId, bundle.identityKey);
     this.storage?.set(
       `prekeys/${peerId}`,
       uint8ArrayToBase64(serializePreKeyBundle(bundle)),
     ).catch(() => {});
+    // Also persist the Ed25519 key standalone so session re-establishment
+    // works even if the bundle entry gets corrupted.
+    this.storage?.set(
+      `edkeys/${peerId}`,
+      uint8ArrayToHex(bundle.identityKey),
+    ).catch(() => {});
+  }
+
+  getPeerEdKey(peerId: string): Uint8Array | null {
+    return this.peerEdKeys.get(peerId) ?? null;
   }
 
   getSignedPreKeyPair(): KeyPair | null {
@@ -335,15 +365,28 @@ export class SessionManager {
   async ensureSession(recipientId: string): Promise<void> {
     if (this.sessions.has(recipientId)) return;
 
-    const bundle = this.peerPreKeyBundles.get(recipientId);
-    if (bundle) {
-      await this.initiateHandshake(recipientId, bundle);
+    const cached = this.peerPreKeyBundles.get(recipientId);
+    if (cached) {
+      await this.initiateHandshake(recipientId, cached);
       return;
     }
 
+    // No bundle in cache — try the directory. This handles the case where
+    // our session was lost but the peer has published their bundle, as well as
+    // the case where we were the X3DH responder and never stored their bundle.
+    const edKey = this.peerEdKeys.get(recipientId);
+    if (edKey) {
+      const fresh = await this.lookupPreKeyBundle(uint8ArrayToHex(edKey));
+      if (fresh) {
+        this.setBundle(recipientId, fresh);
+        await this.initiateHandshake(recipientId, fresh);
+        return;
+      }
+    }
+
     throw new Error(
-      `No pre-key bundle for ${recipientId}. ` +
-      `Use acceptContact() or acceptContact(scannedQR) to establish first contact.`,
+      `Cannot reach ${recipientId}: no pre-key bundle available locally or in the directory. ` +
+      `The peer may be offline and have not yet published a bundle.`,
     );
   }
 
@@ -434,13 +477,13 @@ export class SessionManager {
     this.sessions.set(envelope.senderId, ratchetState);
     this.storage?.set(`sessions/${envelope.senderId}`, serializeRatchetState(ratchetState)).catch(() => {});
 
-    // Cache and persist the peer's X25519 routing key.
-    const peerX25519Key = edwardsToMontgomeryPub(new Uint8Array(envelope.identityKey));
+    // Cache and persist the peer's X25519 routing key and Ed25519 identity key.
+    const peerEdKey = new Uint8Array(envelope.identityKey);
+    const peerX25519Key = edwardsToMontgomeryPub(peerEdKey);
     this.peerCache.addPeer(envelope.senderId, peerX25519Key);
-    this.storage?.set(
-      `peers/${envelope.senderId}`,
-      uint8ArrayToHex(peerX25519Key),
-    ).catch(() => {});
+    this.peerEdKeys.set(envelope.senderId, peerEdKey);
+    this.storage?.set(`peers/${envelope.senderId}`, uint8ArrayToHex(peerX25519Key)).catch(() => {});
+    this.storage?.set(`edkeys/${envelope.senderId}`, uint8ArrayToHex(peerEdKey)).catch(() => {});
 
     // Notify the coordinator so it can update the permission manager
     this.onContactEstablished(envelope.senderId);
