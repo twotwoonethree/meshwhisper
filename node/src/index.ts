@@ -839,7 +839,9 @@ const pruneInterval = setInterval(() => {
 }, PRUNE_INTERVAL_MS);
 pruneInterval.unref();
 
-const LISTEN_HOST = process.env.LISTEN_HOST ?? '0.0.0.0';
+// Default to '::' (IPv6 wildcard) which also accepts IPv4 on Linux (bindv6only=0).
+// Set LISTEN_HOST=0.0.0.0 to restrict to IPv4 only.
+const LISTEN_HOST = process.env.LISTEN_HOST ?? '::';
 httpServer.listen(PORT, LISTEN_HOST, () => {
   console.log(`MeshWhisper Node listening on port ${PORT}`);
   console.log(`  Relay:     ws://localhost:${PORT}`);

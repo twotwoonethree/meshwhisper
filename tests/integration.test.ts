@@ -145,7 +145,7 @@ describe('MeshWhisper end-to-end', () => {
     // Note: MeshWhisper.init() is a singleton per process — initialising Alice shuts
     // down Bob. This test therefore uses the store-and-forward path: Alice sends while
     // Bob is offline, then Bob reconnects and the relay delivers the queued message.
-    const NODE_URL = `ws://localhost:${PORT}`;
+    const NODE_URL = `ws://127.0.0.1:${PORT}`;
     const NAMESPACE = 'com.test.integration';
     const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-alice-'));
     const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-bob-'));
@@ -209,7 +209,7 @@ describe('MeshWhisper end-to-end', () => {
   }, 20000);
 
   it('messages are stored and delivered when recipient comes online', async () => {
-    const NODE_URL = `ws://localhost:${PORT}`;
+    const NODE_URL = `ws://127.0.0.1:${PORT}`;
     const NAMESPACE = 'com.test.offline';
     const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-alice2-'));
     const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-bob2-'));
@@ -273,7 +273,7 @@ describe('MeshWhisper end-to-end', () => {
   }, 25000);
 
   it('Bob can reply to Alice (bidirectional Double Ratchet)', async () => {
-    const NODE_URL = `ws://localhost:${PORT}`;
+    const NODE_URL = `ws://127.0.0.1:${PORT}`;
     const NAMESPACE = 'com.test.bidir';
     const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-alice3-'));
     const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-bob3-'));
