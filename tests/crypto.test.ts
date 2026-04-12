@@ -105,52 +105,58 @@ describe('computeSharedSecret (X25519)', () => {
 });
 
 describe('deriveDestHash', () => {
+  const ns = randomBytes(32);
+
   it('returns 8 bytes', () => {
     const kp = generateKeyPair();
-    expect(deriveDestHash(kp.publicKey, 0).length).toBe(8);
+    expect(deriveDestHash(ns, kp.publicKey, 0).length).toBe(8);
   });
 
   it('same key + same hour → same hash', () => {
     const kp = generateKeyPair();
     const hour = 12345;
-    expect(deriveDestHash(kp.publicKey, hour)).toEqual(deriveDestHash(kp.publicKey, hour));
+    expect(deriveDestHash(ns, kp.publicKey, hour)).toEqual(deriveDestHash(ns, kp.publicKey, hour));
   });
 
   it('same key + different hour → different hash', () => {
     const kp = generateKeyPair();
-    const h1 = deriveDestHash(kp.publicKey, 1000);
-    const h2 = deriveDestHash(kp.publicKey, 1001);
+    const h1 = deriveDestHash(ns, kp.publicKey, 1000);
+    const h2 = deriveDestHash(ns, kp.publicKey, 1001);
     expect(h1).not.toEqual(h2);
   });
 
   it('different keys → different hashes', () => {
     const a = generateKeyPair();
     const b = generateKeyPair();
-    const h1 = deriveDestHash(a.publicKey, 42);
-    const h2 = deriveDestHash(b.publicKey, 42);
+    const h1 = deriveDestHash(ns, a.publicKey, 42);
+    const h2 = deriveDestHash(ns, b.publicKey, 42);
     expect(h1).not.toEqual(h2);
+  });
+
+  it('different namespaces → different hashes for same key and hour', () => {
+    const kp = generateKeyPair();
+    const ns2 = randomBytes(32);
+    expect(deriveDestHash(ns, kp.publicKey, 100)).not.toEqual(deriveDestHash(ns2, kp.publicKey, 100));
   });
 });
 
 describe('deriveNamespaceId', () => {
   it('returns 32 bytes', () => {
-    const id = deriveNamespaceId('com.example.app', randomBytes(32), randomBytes(32));
+    const id = deriveNamespaceId('com.example.app', randomBytes(32));
     expect(id.length).toBe(32);
   });
 
   it('same inputs → same ID', () => {
     const devKey = randomBytes(32);
-    const salt = randomBytes(32);
-    const a = deriveNamespaceId('com.example.app', devKey, salt);
-    const b = deriveNamespaceId('com.example.app', devKey, salt);
+    const a = deriveNamespaceId('com.example.app', devKey);
+    const b = deriveNamespaceId('com.example.app', devKey);
     expect(a).toEqual(b);
   });
 
   it('different bundle IDs → different namespace IDs', () => {
     const devKey = randomBytes(32);
-    const salt = randomBytes(32);
-    const a = deriveNamespaceId('com.app.one', devKey, salt);
-    const b = deriveNamespaceId('com.app.two', devKey, salt);
+    const a = deriveNamespaceId('com.app.one', devKey);
+    const b = deriveNamespaceId('com.app.two', devKey);
     expect(a).not.toEqual(b);
   });
 });

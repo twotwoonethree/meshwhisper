@@ -310,7 +310,6 @@ export interface MeshWhisperConfig {
 export interface NamespaceConfig {
   appBundleId: string;
   developerPublicKey: Uint8Array;
-  salt: Uint8Array;
 }
 
 // --- Event Emitter ---

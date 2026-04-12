@@ -239,11 +239,9 @@ export class MeshWhisper {
     const developerKeyBytes = config.developerKey
       ? base64ToUint8Array(config.developerKey)
       : randomBytes(32);
-    const namespaceSalt = randomBytes(32);
     this.namespaceManager = new NamespaceManager({
       appBundleId: config.namespace,
       developerPublicKey: developerKeyBytes,
-      salt: namespaceSalt,
     });
     this.peerCache = new PeerIdentityCache();
     this.permissionManager = new PermissionManager(config.permissionModel ?? 'open');
@@ -286,7 +284,7 @@ export class MeshWhisper {
     this.sybilManager = new SybilManager(localPeerId);
 
     // --- Cluster ---
-    if (config.config?.clusterEnabled !== false) {
+    if (config.config?.clusterEnabled === true) {
       this.cluster = new DeviceCluster(
         this.identity.getPublicKey(),
         localPeerId,
@@ -302,6 +300,7 @@ export class MeshWhisper {
       (peerId) => this.onContactEstablished(peerId),
       config.namespace,
       config.node ?? 'mesh',
+      this.namespaceManager.getNamespaceId(),
     );
 
     // --- Message handler ---
@@ -575,7 +574,7 @@ export class MeshWhisper {
     const recipientPublicKey = this.peerCache.getPeerPublicKey(recipientId);
     if (!recipientPublicKey) throw new Error(`No public key for recipient ${recipientId}`);
 
-    const destHash = deriveDestHash(recipientPublicKey, getCurrentEpochHour());
+    const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const packet = createDataPacket(destHash, senderEphId, fullPayload);
 
@@ -705,7 +704,7 @@ export class MeshWhisper {
       try {
         const recipientPublicKey = this.peerCache.getPeerPublicKey(target.peerId);
         if (!recipientPublicKey) return;
-        const destHash = deriveDestHash(recipientPublicKey, getCurrentEpochHour());
+        const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
         const senderEphId = this.identity.generateEphemeralId();
         const packet = createDataPacket(destHash, senderEphId, target.data);
         await this.routeAndSend(packet, target.peerId);
@@ -996,7 +995,7 @@ export class MeshWhisper {
 
     if (packet.flags === PacketFlags.CHAFF) return;
 
-    const isForUs = this.identity.matchesDestHash(packet.destHash);
+    const isForUs = this.namespaceManager.isMessageForUs(packet.destHash, this.identity.getPublicKey());
     if (isForUs) {
       this.processLocalPacket(packet, source);
     } else {
@@ -1132,7 +1131,7 @@ export class MeshWhisper {
 
     const peerPublicKey = this.peerCache.getPeerPublicKey(peerId);
     if (peerPublicKey) {
-      const destHash = deriveDestHash(peerPublicKey, getCurrentEpochHour());
+      const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), peerPublicKey, getCurrentEpochHour());
       const storedBlobs = this.relayManager.deliverStored(destHash);
       for (const blob of storedBlobs) {
         const storedPacket: Packet = {
@@ -1314,10 +1313,11 @@ export class MeshWhisper {
 
   private getCurrentDestHashes(): string[] {
     const xPub = this.identity.getPublicKey();
+    const nsId = this.namespaceManager.getNamespaceId();
     const hour = getCurrentEpochHour();
     return [
-      uint8ArrayToHex(deriveDestHash(xPub, hour)),
-      uint8ArrayToHex(deriveDestHash(xPub, hour - 1)),
+      uint8ArrayToHex(deriveDestHash(nsId, xPub, hour)),
+      uint8ArrayToHex(deriveDestHash(nsId, xPub, hour - 1)),
     ];
   }
 

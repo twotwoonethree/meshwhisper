@@ -15,6 +15,11 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 
+// Shared developer key so all instances in the same test derive the same
+// namespace ID. Without this, each init() generates a random key and the
+// namespace-scoped dest hashes don't match between Alice and Bob.
+const TEST_DEV_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
 // ---- Helpers ----
 
 /** Wait until the relay's /health endpoint responds OK. */
@@ -103,6 +108,7 @@ describe('MeshWhisper end-to-end', () => {
     const bob = await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(bobDir),
     });
     const bobQR = MeshWhisper.generateContactQR();
@@ -113,6 +119,7 @@ describe('MeshWhisper end-to-end', () => {
     const alice = await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(aliceDir),
     });
 
@@ -133,6 +140,7 @@ describe('MeshWhisper end-to-end', () => {
     await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(bobDir),
       onMessage: (msg) => {
         bobReceivedText = new TextDecoder().decode(new Uint8Array(msg.payload));
@@ -164,6 +172,7 @@ describe('MeshWhisper end-to-end', () => {
     const bob = await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(bobDir),
     });
     const bobQR = MeshWhisper.generateContactQR();
@@ -173,6 +182,7 @@ describe('MeshWhisper end-to-end', () => {
     const alice = await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(aliceDir),
     });
     await MeshWhisper.acceptContact(bobQR);
@@ -194,6 +204,7 @@ describe('MeshWhisper end-to-end', () => {
     await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(bobDir),
       onMessage: (msg) => {
         deliveredText = new TextDecoder().decode(new Uint8Array(msg.payload));
@@ -225,6 +236,7 @@ describe('MeshWhisper end-to-end', () => {
     const bob = await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(bobDir),
     });
     const bobQR = MeshWhisper.generateContactQR();
@@ -235,6 +247,7 @@ describe('MeshWhisper end-to-end', () => {
     const alice = await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(aliceDir),
     });
     const aliceId = alice.getLocalPeerId();
@@ -248,6 +261,7 @@ describe('MeshWhisper end-to-end', () => {
     await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(bobDir),
       onMessage: (msg) => {
         if (new TextDecoder().decode(new Uint8Array(msg.payload)) === 'Hello Bob!') {
@@ -267,6 +281,7 @@ describe('MeshWhisper end-to-end', () => {
     await MeshWhisper.init({
       namespace: NAMESPACE,
       node: NODE_URL,
+      developerKey: TEST_DEV_KEY,
       storage: new NodeStorage(aliceDir),
       onMessage: (msg) => {
         replyText = new TextDecoder().decode(new Uint8Array(msg.payload));

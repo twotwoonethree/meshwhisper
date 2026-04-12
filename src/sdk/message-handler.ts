@@ -19,6 +19,7 @@ import {
   deserializeRatchetHeader,
   tryParseControl,
   generateMessageId,
+  uint8ArrayToHex,
   type ControlMessage,
   type MessageEnvelope,
 } from './utils.js';
@@ -81,15 +82,46 @@ export class MessageHandler {
       let decrypted: Uint8Array | null = null;
       let matchedPeerId: string | null = null;
 
-      for (const [peerId, session] of this.sessionManager.sessions_iter()) {
-        try {
-          const result = ratchetDecrypt(session, header, ciphertextBody);
-          this.sessionManager.setSession(peerId, result.state);
-          decrypted = result.plaintext;
-          matchedPeerId = peerId;
-          break;
-        } catch {
-          continue;
+      // Fast path: look up the session by the sender's ratchet DH public key.
+      // This is O(1) and avoids leaking timing information across sessions.
+      // The index is populated on first successful decryption; until then we
+      // fall through to trial decryption (only on the first message or after
+      // each DH ratchet step, which happens at most every other message).
+      const dhKeyHex = uint8ArrayToHex(header.dhPublicKey);
+      const indexedPeerId = this.sessionManager.lookupByDhKey(dhKeyHex);
+
+      if (indexedPeerId) {
+        const session = this.sessionManager.getSession(indexedPeerId);
+        if (session) {
+          try {
+            const result = ratchetDecrypt(session, header, ciphertextBody);
+            this.sessionManager.setSession(indexedPeerId, result.state);
+            // Re-register in case the DH key changed during this decrypt (ratchet step)
+            this.sessionManager.registerDhKey(dhKeyHex, indexedPeerId);
+            decrypted = result.plaintext;
+            matchedPeerId = indexedPeerId;
+          } catch {
+            // Index hit but decrypt failed — key may have been re-used across
+            // a ratchet boundary. Fall through to trial decryption below.
+          }
+        }
+      }
+
+      // Slow path: try every session. Runs only on cache miss (first message
+      // from a peer or first message after their DH ratchet step).
+      if (!decrypted) {
+        for (const [peerId, session] of this.sessionManager.sessions_iter()) {
+          try {
+            const result = ratchetDecrypt(session, header, ciphertextBody);
+            this.sessionManager.setSession(peerId, result.state);
+            // Seed the index so future messages from this peer are O(1).
+            this.sessionManager.registerDhKey(dhKeyHex, peerId);
+            decrypted = result.plaintext;
+            matchedPeerId = peerId;
+            break;
+          } catch {
+            continue;
+          }
         }
       }
 

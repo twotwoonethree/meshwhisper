@@ -68,36 +68,41 @@ export function hash(data: Uint8Array): Uint8Array {
 }
 
 /**
- * Derives a 256-bit namespace ID via BLAKE3(appBundleId || developerPublicKey || salt).
+ * Derives a 256-bit namespace ID via BLAKE3(appBundleId || developerPublicKey).
  * The namespace isolates different applications sharing the same mesh.
+ * Deterministic — no salt — so the same app always produces the same namespace ID.
  */
 export function deriveNamespaceId(
   appBundleId: string,
   developerPublicKey: Uint8Array,
-  salt: Uint8Array,
 ): Uint8Array {
   const encoder = new TextEncoder();
   const appBytes = encoder.encode(appBundleId);
-  const input = concat(appBytes, developerPublicKey, salt);
+  const input = concat(appBytes, developerPublicKey);
   return blake3(input);
 }
 
 /**
- * Derives a truncated 8-byte destination hash via BLAKE3(recipientPublicKey || epochHour).
- * Rotates every hour to limit linkability.
+ * Derives a truncated 8-byte destination hash via
+ * BLAKE3(namespaceId || recipientPublicKey || epochHour).
+ *
+ * Including the namespace in the hash means a packet for Bob in AppA has a
+ * different dest_hash than a packet for Bob in AppB, giving namespace isolation
+ * as a property of routing rather than a policy check.
+ * Rotates every hour to limit long-term linkability.
  */
 export function deriveDestHash(
+  namespaceId: Uint8Array,
   recipientPublicKey: Uint8Array,
   epochHour: number,
 ): Uint8Array {
   // Encode epochHour as 8-byte big-endian uint64
   const epochBytes = new Uint8Array(8);
   const view = new DataView(epochBytes.buffer);
-  // Use two 32-bit writes for full 64-bit range (epochHour fits in 53-bit JS number)
   view.setUint32(0, Math.floor(epochHour / 0x100000000), false);
   view.setUint32(4, epochHour >>> 0, false);
 
-  const input = concat(recipientPublicKey, epochBytes);
+  const input = concat(namespaceId, recipientPublicKey, epochBytes);
   const fullHash = blake3(input);
   return fullHash.slice(0, DEST_HASH_LENGTH);
 }

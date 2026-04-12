@@ -11,7 +11,12 @@ import type { KeyPair } from '../types.js';
 
 // ---- Constants ----
 
-const MAX_SKIP = 1000;
+// MAX_SKIP must be large enough to cover the relay store-and-forward TTL.
+// Default relay TTL is 72 hours. At ~1 message per minute that's ~4,320
+// messages; at ~1 per 10 minutes it's ~432. 2,000 is a reasonable ceiling
+// that avoids silently dropping relay-buffered messages in most real scenarios
+// while still bounding the skipped-key map size against DoS.
+const MAX_SKIP = 2000;
 const KEY_LENGTH = 32;
 const GCM_NONCE_LENGTH = 12;
 

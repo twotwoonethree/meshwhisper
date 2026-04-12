@@ -215,10 +215,10 @@ describe('out-of-order delivery', () => {
     let alice = initSender(secret, bobKP.publicKey);
     const bob = initReceiver(secret, bobKP);
 
-    // Encrypt 1001 messages so the last one requires skipping > MAX_SKIP (1000)
+    // Encrypt 2001 messages so the last one requires skipping > MAX_SKIP (2000)
     let lastHeader: any;
     let lastCiphertext: Uint8Array = new Uint8Array();
-    for (let i = 0; i <= 1001; i++) {
+    for (let i = 0; i <= 2001; i++) {
       const { state, header, ciphertext } = ratchetEncrypt(alice, enc(`msg${i}`));
       alice = state;
       lastHeader = header;

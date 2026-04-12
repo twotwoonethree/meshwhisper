@@ -38,7 +38,6 @@ export class NamespaceManager {
     this.namespaceId = NamespaceManager.computeNamespaceId(
       config.appBundleId,
       config.developerPublicKey,
-      config.salt,
     );
   }
 
@@ -57,9 +56,8 @@ export class NamespaceManager {
   static computeNamespaceId(
     appBundleId: string,
     developerPublicKey: Uint8Array,
-    salt: Uint8Array,
   ): Uint8Array {
-    return deriveNamespaceId(appBundleId, developerPublicKey, salt);
+    return deriveNamespaceId(appBundleId, developerPublicKey);
   }
 
   /**
@@ -77,21 +75,21 @@ export class NamespaceManager {
    */
   computeDestHash(publicKey: Uint8Array, epochHour?: number): Uint8Array {
     const hour = epochHour ?? getCurrentEpochHour();
-    return deriveDestHash(publicKey, hour);
+    return deriveDestHash(this.namespaceId, publicKey, hour);
   }
 
   /**
    * Computes the destination hash for the current epoch hour.
    */
   computeCurrentDestHash(publicKey: Uint8Array): Uint8Array {
-    return deriveDestHash(publicKey, getCurrentEpochHour());
+    return deriveDestHash(this.namespaceId, publicKey, getCurrentEpochHour());
   }
 
   /**
    * Computes the destination hash for the previous epoch hour.
    */
   computePreviousDestHash(publicKey: Uint8Array): Uint8Array {
-    return deriveDestHash(publicKey, getCurrentEpochHour() - 1);
+    return deriveDestHash(this.namespaceId, publicKey, getCurrentEpochHour() - 1);
   }
 
   /**
@@ -188,25 +186,6 @@ export class LocalIdentity {
   }
 
   /**
-   * Returns the current destination hash for this identity (8 bytes).
-   */
-  getDestHash(): Uint8Array {
-    return deriveDestHash(this.xPublicKey, getCurrentEpochHour());
-  }
-
-  /**
-   * Checks whether a received dest_hash matches this identity,
-   * covering both the current and previous epoch hour.
-   */
-  matchesDestHash(destHash: Uint8Array): boolean {
-    const currentHash = deriveDestHash(this.xPublicKey, getCurrentEpochHour());
-    if (timingSafeEqual(currentHash, destHash)) return true;
-
-    const previousHash = deriveDestHash(this.xPublicKey, getCurrentEpochHour() - 1);
-    return timingSafeEqual(previousHash, destHash);
-  }
-
-  /**
    * Signs arbitrary data with this identity's Ed25519 private key.
    * Returns a 64-byte signature.
    */
@@ -284,17 +263,17 @@ export class PeerIdentityCache {
    *
    * Returns the peer ID if found, or null.
    */
-  findPeerByDestHash(destHash: Uint8Array, epochHour?: number): string | null {
+  findPeerByDestHash(namespaceId: Uint8Array, destHash: Uint8Array, epochHour?: number): string | null {
     for (const [peerId, publicKey] of this.peers) {
       if (epochHour !== undefined) {
-        const hash = deriveDestHash(publicKey, epochHour);
+        const hash = deriveDestHash(namespaceId, publicKey, epochHour);
         if (timingSafeEqual(hash, destHash)) return peerId;
       } else {
         const currentHour = getCurrentEpochHour();
-        const currentHash = deriveDestHash(publicKey, currentHour);
+        const currentHash = deriveDestHash(namespaceId, publicKey, currentHour);
         if (timingSafeEqual(currentHash, destHash)) return peerId;
 
-        const previousHash = deriveDestHash(publicKey, currentHour - 1);
+        const previousHash = deriveDestHash(namespaceId, publicKey, currentHour - 1);
         if (timingSafeEqual(previousHash, destHash)) return peerId;
       }
     }

@@ -47,6 +47,9 @@ import {
   type HandshakeEnvelope,
 } from './utils.js';
 
+/** How long to wait for an x3dh_response before discarding the pending entry. */
+const HANDSHAKE_TIMEOUT_MS = 60_000;
+
 export class SessionManager {
   // Double Ratchet session state, keyed by peer ID
   private readonly sessions: Map<string, RatchetState> = new Map();
@@ -60,9 +63,17 @@ export class SessionManager {
   // Required for directory lookups when trying to re-establish a lost session.
   private readonly peerEdKeys: Map<string, Uint8Array> = new Map();
 
-  // Tracks in-flight outbound handshakes. The `resolve` is called when the
-  // peer sends back an x3dh_response, confirming the session is live.
-  private readonly pendingHandshakes: Map<string, { resolve: () => void }> = new Map();
+  // Tracks in-flight outbound handshakes. Entries expire after HANDSHAKE_TIMEOUT_MS
+  // so the map doesn't grow without bound when peers never respond.
+  private readonly pendingHandshakes: Map<string, {
+    resolve: () => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = new Map();
+
+  // Index from a peer's ratchet DH public key (hex) to their peer ID.
+  // Populated on successful decryption; allows O(1) session lookup instead
+  // of trying every session for each incoming packet.
+  private readonly dhKeyIndex: Map<string, string> = new Map();
 
   // Signed pre-key pair — loaded from storage on start or generated fresh.
   // Must survive restarts so incoming X3DH handshakes can be completed with
@@ -91,6 +102,7 @@ export class SessionManager {
     private readonly onContactEstablished: (peerId: string) => void,
     private readonly namespace: string,
     private readonly nodeUrl: string | string[] | 'mesh',
+    private readonly namespaceId: Uint8Array,
   ) {}
 
   // ----------------------------------------------------------------
@@ -419,15 +431,29 @@ export class SessionManager {
     const recipientPublicKey = this.peerCache.getPeerPublicKey(peerId);
     if (!recipientPublicKey) return;
 
-    const destHash = deriveDestHash(recipientPublicKey, getCurrentEpochHour());
+    const destHash = deriveDestHash(this.namespaceId, recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const handshakePacket = createHandshakePacket(destHash, senderEphId, envelopeBytes);
 
     await this.sendPacket(handshakePacket, peerId);
 
-    // Track this handshake; resolved when the peer confirms with x3dh_response.
-    new Promise<void>((resolve) => {
-      this.pendingHandshakes.set(peerId, { resolve });
+    // Track this handshake; auto-expires after HANDSHAKE_TIMEOUT_MS so the map
+    // doesn't grow without bound when a peer never responds.
+    const existing = this.pendingHandshakes.get(peerId);
+    if (existing) clearTimeout(existing.timer);
+
+    const timer = setTimeout(() => {
+      this.pendingHandshakes.delete(peerId);
+    }, HANDSHAKE_TIMEOUT_MS);
+    // Let the timer be GC'd without keeping the process alive in Node.js
+    if (typeof timer === 'object' && 'unref' in timer) (timer as NodeJS.Timeout).unref();
+
+    this.pendingHandshakes.set(peerId, {
+      resolve: () => {
+        clearTimeout(timer);
+        this.pendingHandshakes.delete(peerId);
+      },
+      timer,
     });
   }
 
@@ -498,7 +524,7 @@ export class SessionManager {
     const peerPublicKey = this.peerCache.getPeerPublicKey(envelope.senderId);
     if (!peerPublicKey) return;
 
-    const destHash = deriveDestHash(peerPublicKey, getCurrentEpochHour());
+    const destHash = deriveDestHash(this.namespaceId, peerPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const responsePacket = createHandshakePacket(destHash, senderEphId, responseBytes);
 
@@ -538,8 +564,7 @@ export class SessionManager {
         case 'x3dh_response': {
           const pending = this.pendingHandshakes.get(envelope.senderId);
           if (pending) {
-            pending.resolve();
-            this.pendingHandshakes.delete(envelope.senderId);
+            pending.resolve(); // also clears the timer and removes from map
           }
           break;
         }
@@ -550,7 +575,28 @@ export class SessionManager {
   }
 
   // ----------------------------------------------------------------
-  // Session iteration (used by message handler for decrypt-by-trial)
+  // DH key index — O(1) session lookup
+  // ----------------------------------------------------------------
+
+  /**
+   * Records that `dhKeyHex` (a peer's ratchet DH public key) belongs to `peerId`.
+   * Called after a successful decryption so future packets from the same
+   * ratchet step are routed directly without trial decryption.
+   */
+  registerDhKey(dhKeyHex: string, peerId: string): void {
+    this.dhKeyIndex.set(dhKeyHex, peerId);
+  }
+
+  /**
+   * Returns the peer ID whose current ratchet DH key matches `dhKeyHex`,
+   * or null if not yet indexed (first message from a new ratchet step).
+   */
+  lookupByDhKey(dhKeyHex: string): string | null {
+    return this.dhKeyIndex.get(dhKeyHex) ?? null;
+  }
+
+  // ----------------------------------------------------------------
+  // Session iteration (fallback trial decryption)
   // ----------------------------------------------------------------
 
   sessions_iter(): IterableIterator<[string, RatchetState]> {
