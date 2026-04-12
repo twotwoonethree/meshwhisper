@@ -48,6 +48,12 @@ import {
 /** How long to wait for an x3dh_response before discarding the pending entry. */
 const HANDSHAKE_TIMEOUT_MS = 60_000;
 
+/** Target number of one-time pre-keys to maintain in the pool. */
+const OPK_POOL_SIZE = 10;
+
+/** Replenish the pool when it drops below this many keys. */
+const OPK_LOW_WATERMARK = 3;
+
 export class SessionManager {
   // Double Ratchet session state, keyed by peer ID
   private readonly sessions: Map<string, RatchetState> = new Map();
@@ -78,10 +84,10 @@ export class SessionManager {
   // the same key that was published in the pre-key bundle / contact QR.
   private signedPreKeyPair: KeyPair | null = null;
 
-  // Current one-time pre-key. A single OPK is maintained at a time; it is
-  // included in published bundles and consumed on the first incoming x3dh_init
-  // that references it. A fresh OPK is generated automatically after use.
-  private currentOPK: KeyPair | null = null;
+  // Pool of one-time pre-keys, keyed by public key hex. Maintained locally;
+  // public keys are uploaded to the relay so initiators can claim one atomically.
+  // On startup the pool is loaded from storage and replenished up to OPK_POOL_SIZE.
+  private readonly opkPool: Map<string, KeyPair> = new Map();
 
   constructor(
     private readonly identity: LocalIdentity,
@@ -151,7 +157,7 @@ export class SessionManager {
   }
 
   /**
-   * Load or generate the signed pre-key pair and current OPK.
+   * Load or generate the signed pre-key pair and initialise the OPK pool.
    * Must be called during startup before any handshakes are processed.
    */
   async initSignedPreKey(): Promise<void> {
@@ -169,15 +175,6 @@ export class SessionManager {
           privateKey: hexToUint8Array(privHex!),
         };
       }
-
-      const savedOPK = await this.storage.get('opk_current');
-      if (savedOPK) {
-        const [pubHex, privHex] = savedOPK.split(':');
-        this.currentOPK = {
-          publicKey: hexToUint8Array(pubHex!),
-          privateKey: hexToUint8Array(privHex!),
-        };
-      }
     }
 
     if (!this.signedPreKeyPair) {
@@ -191,26 +188,103 @@ export class SessionManager {
       }
     }
 
-    if (!this.currentOPK) {
-      await this.rotateOPK();
-    }
+    await this.initOPKPool();
   }
 
   /**
-   * Generates a fresh OPK and persists it, replacing any existing one.
-   * Called on first startup and after the current OPK is consumed.
+   * Loads the OPK pool from storage, generates new keys if below OPK_POOL_SIZE,
+   * and uploads the full pool to the relay (handles relay restarts gracefully).
    */
-  private async rotateOPK(): Promise<void> {
-    const [opkPair] = generateOneTimePreKeys(
-      { publicKey: new Uint8Array(32), privateKey: new Uint8Array(32) },
-      1,
-    );
-    this.currentOPK = opkPair!;
+  private async initOPKPool(): Promise<void> {
     if (this.storage) {
-      await this.storage.set(
-        'opk_current',
-        `${uint8ArrayToHex(opkPair!.publicKey)}:${uint8ArrayToHex(opkPair!.privateKey)}`,
+      const keys = await this.storage.keys('opks/');
+      for (const key of keys) {
+        const privHex = await this.storage.get(key);
+        if (!privHex) continue;
+        const pubHex = key.replace(/^opks\//, '');
+        this.opkPool.set(pubHex, {
+          publicKey: hexToUint8Array(pubHex),
+          privateKey: hexToUint8Array(privHex),
+        });
+      }
+    }
+
+    // Generate fresh keys if the pool is short
+    if (this.opkPool.size < OPK_POOL_SIZE) {
+      const needed = OPK_POOL_SIZE - this.opkPool.size;
+      const edKeyPair = { publicKey: this.identity.getEdPublicKey(), privateKey: this.identity.getEdPrivateKey() };
+      const newKeys = generateOneTimePreKeys(edKeyPair, needed);
+      for (const kp of newKeys) {
+        const pubHex = uint8ArrayToHex(kp.publicKey);
+        this.opkPool.set(pubHex, kp);
+        this.storage?.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey)).catch(() => {});
+      }
+    }
+
+    // Upload the full pool on startup — this handles relay restarts where the
+    // relay's OPK table was wiped but our private keys are still in local storage.
+    await this.uploadOPKs([...this.opkPool.values()]);
+  }
+
+  /**
+   * Generates new OPKs and uploads them when the pool drops below OPK_LOW_WATERMARK.
+   * Called after an OPK is consumed (incoming handshake) or claimed (outgoing handshake).
+   */
+  private async replenishOPKPool(): Promise<void> {
+    if (this.opkPool.size >= OPK_LOW_WATERMARK) return;
+    const needed = OPK_POOL_SIZE - this.opkPool.size;
+    const edKeyPair = { publicKey: this.identity.getEdPublicKey(), privateKey: this.identity.getEdPrivateKey() };
+    const newKeys = generateOneTimePreKeys(edKeyPair, needed);
+    for (const kp of newKeys) {
+      const pubHex = uint8ArrayToHex(kp.publicKey);
+      this.opkPool.set(pubHex, kp);
+      this.storage?.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey)).catch(() => {});
+    }
+    await this.uploadOPKs(newKeys);
+  }
+
+  /** Uploads OPK public keys to the relay. Best-effort — silently ignored on failure. */
+  private async uploadOPKs(opks: KeyPair[]): Promise<void> {
+    if (opks.length === 0) return;
+    const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
+    const primaryWsUrl = wsUrls[0];
+    if (!primaryWsUrl || primaryWsUrl === 'mesh') return;
+    const httpUrl = primaryWsUrl
+      .replace(/^wss:\/\//, 'https://')
+      .replace(/^ws:\/\//, 'http://');
+    await fetch(`${httpUrl}/opks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        namespace: this.namespace,
+        publicKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
+        opks: opks.map((kp) => uint8ArrayToBase64(kp.publicKey)),
+      }),
+    }).catch(() => {});
+  }
+
+  /**
+   * Claims one OPK public key for a peer from the relay (atomic — the relay removes
+   * it so no other initiator can use the same key). Returns null if unavailable,
+   * in which case the caller falls back to 3-DH.
+   */
+  async claimRemoteOPK(peerEdPublicKeyHex: string): Promise<Uint8Array | null> {
+    const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
+    const primaryWsUrl = wsUrls[0];
+    if (!primaryWsUrl || primaryWsUrl === 'mesh') return null;
+    const httpUrl = primaryWsUrl
+      .replace(/^wss:\/\//, 'https://')
+      .replace(/^ws:\/\//, 'http://');
+    try {
+      const res = await fetch(
+        `${httpUrl}/opks/claim?namespace=${encodeURIComponent(this.namespace)}&publicKey=${encodeURIComponent(peerEdPublicKeyHex)}`,
       );
+      if (!res.ok) return null;
+      const json = await res.json() as { opk?: string };
+      if (!json.opk) return null;
+      return base64ToUint8Array(json.opk);
+    } catch {
+      return null;
     }
   }
 
@@ -265,9 +339,8 @@ export class SessionManager {
       identityKey: this.identity.getEdPublicKey(),
       signedPreKey: this.signedPreKeyPair.publicKey,
       signedPreKeySignature: this.identity.signData(this.signedPreKeyPair.publicKey),
-      // Include the current OPK so the initiator can perform 4-DH.
-      // The OPK is consumed on first use and rotated automatically.
-      oneTimePreKey: this.currentOPK?.publicKey,
+      // OPKs are distributed via the relay /opks pool, not embedded in the bundle.
+      // Initiators claim one atomically from the relay before starting X3DH.
     };
   }
 
@@ -406,9 +479,15 @@ export class SessionManager {
       privateKey: this.identity.getEdPrivateKey(),
     };
 
-    // Use the full bundle including OPK if present (4-DH). Bob will look up
-    // the OPK private key by the public key we include in the envelope.
-    const result = initiateKeyExchange(aliceIdentity, bundle);
+    // Claim one OPK from the relay for full 4-DH. Falls back to 3-DH if none
+    // are available (relay offline, peer hasn't uploaded any yet).
+    const peerEdKeyHex = uint8ArrayToHex(bundle.identityKey);
+    const claimedOPK = await this.claimRemoteOPK(peerEdKeyHex);
+    const bundleWithOPK: PreKeyBundle = claimedOPK
+      ? { ...bundle, oneTimePreKey: claimedOPK }
+      : bundle;
+
+    const result = initiateKeyExchange(aliceIdentity, bundleWithOPK);
 
     const ratchetState = initSender(result.sharedSecret, bundle.signedPreKey);
     this.sessions.set(peerId, ratchetState);
@@ -471,22 +550,22 @@ export class SessionManager {
       privateKey: this.identity.getEdPrivateKey(),
     };
 
-    // Look up the OPK private key if Alice used one. The lookup is
-    // synchronous (in-memory) to avoid a race where a data packet arrives
-    // while an async lookup is still pending. Storage cleanup is fire-and-forget.
+    // Look up the OPK private key if Alice used one. The lookup is synchronous
+    // (in-memory) — the pool is always ready so there's no async gap.
     let bobOPK: KeyPair | null = null;
     if (envelope.usedOneTimePreKeyPublic) {
       const opkPubHex = uint8ArrayToHex(new Uint8Array(envelope.usedOneTimePreKeyPublic));
-      if (this.currentOPK && uint8ArrayToHex(this.currentOPK.publicKey) === opkPubHex) {
-        bobOPK = this.currentOPK;
-        this.currentOPK = null;
-        if (this.storage) this.storage.delete('opk_current').catch(() => {});
-        this.rotateOPK().catch(() => {});
+      bobOPK = this.opkPool.get(opkPubHex) ?? null;
+      if (bobOPK) {
+        this.opkPool.delete(opkPubHex);
+        this.storage?.delete(`opks/${opkPubHex}`).catch(() => {});
+        // Replenish in the background — keeps pool topped up without blocking
+        this.replenishOPKPool().catch(() => {});
       }
       // If OPK not found (already consumed), bobOPK stays null → 3-DH fallback.
-      // Alice computed 4-DH, so the secrets won't match and decryption will
-      // fail. This only happens on duplicate x3dh_init delivery, which the
-      // dedup layer prevents in practice.
+      // Alice computed 4-DH, so the secrets won't match and decryption fails.
+      // This only happens on duplicate x3dh_init delivery, which the dedup
+      // layer prevents in practice.
     }
 
     const sharedSecret = completeKeyExchange(

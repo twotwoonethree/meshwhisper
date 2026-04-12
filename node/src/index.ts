@@ -96,6 +96,15 @@ db.exec(`
     data      BLOB    NOT NULL,
     stored_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS opks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key TEXT    NOT NULL,
+    opk_public   TEXT    NOT NULL,
+    stored_at    INTEGER NOT NULL,
+    UNIQUE (identity_key, opk_public)
+  );
+  CREATE INDEX IF NOT EXISTS opks_identity_key ON opks (identity_key);
 `);
 
 // Prepared statements
@@ -158,6 +167,17 @@ const stmts = {
     'SELECT COUNT(*) AS cnt FROM prekey_bundles',
   ),
 
+  // opks
+  insertOpk: db.prepare(
+    'INSERT OR IGNORE INTO opks (identity_key, opk_public, stored_at) VALUES (?, ?, ?)',
+  ),
+  countOpksForKey: db.prepare<[string]>(
+    'SELECT COUNT(*) AS cnt FROM opks WHERE identity_key = ?',
+  ),
+  countOpks: db.prepare(
+    'SELECT COUNT(*) AS cnt FROM opks',
+  ),
+
   // media
   insertMedia: db.prepare(
     'INSERT INTO media (id, data, stored_at) VALUES (?, ?, ?)',
@@ -175,6 +195,17 @@ const stmts = {
     'SELECT COUNT(*) AS cnt FROM media',
   ),
 };
+
+// Atomic OPK claim: SELECT + DELETE in a single transaction so two concurrent
+// initiators can never claim the same one-time pre-key.
+const claimOpkTx = db.transaction((identityKey: string): string | null => {
+  const row = db.prepare<[string]>(
+    'SELECT id, opk_public FROM opks WHERE identity_key = ? LIMIT 1',
+  ).get(identityKey) as { id: number; opk_public: string } | undefined;
+  if (!row) return null;
+  db.prepare<[number]>('DELETE FROM opks WHERE id = ?').run(row.id);
+  return row.opk_public;
+});
 
 // ============================================================
 // Rate limiter — sliding window counter per IP (in-memory, intentionally)
@@ -589,6 +620,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       prekeyEntries: (stmts.countPrekeys.get() as { cnt: number }).cnt,
       pushRegistrations: (stmts.countPush.get() as { cnt: number }).cnt,
       mediaEntries: (stmts.countMedia.get() as { cnt: number }).cnt,
+      opkEntries: (stmts.countOpks.get() as { cnt: number }).cnt,
     });
     return;
   }
@@ -641,6 +673,71 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
 
     sendJson(res, 200, { bundle });
+    return;
+  }
+
+  // Upload one-time pre-keys for a user
+  // POST /opks  { namespace, publicKey, opks: string[] }  (base64 public keys)
+  if (url.pathname === '/opks' && method === 'POST') {
+    if (!checkRateLimit(getClientIp(req), 'dir', RATE_LIMIT_DIR)) {
+      sendJson(res, 429, { error: 'Too many requests' });
+      return;
+    }
+    let body: { namespace?: string; publicKey?: string; opks?: unknown };
+    try {
+      body = JSON.parse(await parseBody(req));
+    } catch {
+      sendJson(res, 400, { error: 'Invalid JSON body' });
+      return;
+    }
+
+    const { namespace, publicKey, opks } = body;
+    if (
+      typeof namespace !== 'string' || !namespace ||
+      typeof publicKey !== 'string' || !publicKey ||
+      !Array.isArray(opks) || opks.length === 0
+    ) {
+      sendJson(res, 400, { error: 'Missing required fields: namespace, publicKey, opks[]' });
+      return;
+    }
+
+    const MAX_OPKS_PER_UPLOAD = 20;
+    const MAX_OPKS_PER_IDENTITY = 100;
+    const batch = (opks as unknown[]).slice(0, MAX_OPKS_PER_UPLOAD).filter(
+      (o): o is string => typeof o === 'string' && o.length > 0,
+    );
+
+    const identityKey = directoryKey(namespace, publicKey);
+    const existing = (stmts.countOpksForKey.get(identityKey) as { cnt: number }).cnt;
+    const canStore = Math.max(0, MAX_OPKS_PER_IDENTITY - existing);
+    const toStore = batch.slice(0, canStore);
+
+    const now = Date.now();
+    for (const opk of toStore) {
+      stmts.insertOpk.run(identityKey, opk, now);
+    }
+    sendJson(res, 200, { ok: true, stored: toStore.length });
+    return;
+  }
+
+  // Claim one one-time pre-key for a user (atomic — removes it from the pool)
+  // GET /opks/claim?namespace=&publicKey=
+  if (url.pathname === '/opks/claim' && method === 'GET') {
+    const namespace = url.searchParams.get('namespace');
+    const publicKey = url.searchParams.get('publicKey');
+
+    if (!namespace || !publicKey) {
+      sendJson(res, 400, { error: 'Missing query params: namespace, publicKey' });
+      return;
+    }
+
+    const opk = claimOpkTx(directoryKey(namespace, publicKey));
+    if (!opk) {
+      sendJson(res, 404, { error: 'No one-time pre-keys available' });
+      return;
+    }
+
+    sendJson(res, 200, { opk });
     return;
   }
 
@@ -746,6 +843,7 @@ httpServer.listen(PORT, () => {
   console.log(`MeshWhisper Node listening on port ${PORT}`);
   console.log(`  Relay:     ws://localhost:${PORT}`);
   console.log(`  Directory: http://localhost:${PORT}/directory`);
+  console.log(`  OPKs:      http://localhost:${PORT}/opks`);
   console.log(`  Media:     http://localhost:${PORT}/media`);
   console.log(`  Health:    http://localhost:${PORT}/health`);
   console.log(`  Database:  ${DB_PATH}`);
