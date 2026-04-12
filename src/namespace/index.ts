@@ -15,8 +15,7 @@ import {
 
 // ---- Constants ----
 
-/** Destination hash length in bytes (truncated BLAKE3). */
-const DEST_HASH_LENGTH = 8;
+
 
 /** Ephemeral sender ID length in bytes. */
 const EPHEMERAL_ID_LENGTH = 16;

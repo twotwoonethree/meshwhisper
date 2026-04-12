@@ -1,0 +1,45 @@
+services:
+  meshwhisper-node:
+    build: ./node
+    restart: unless-stopped
+    ports:
+      - "${NODE_PORT:-8080}:8080"
+    volumes:
+      - meshwhisper_data:/data
+    environment:
+      PORT: "8080"
+      DB_PATH: "/data/meshwhisper.db"
+      BASE_URL: "${BASE_URL}"
+      PUSH_WEBHOOK_URL: "http://meshwhisper-push:4000/notify"
+      BLOB_TTL_HOURS: "${BLOB_TTL_HOURS:-72}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  meshwhisper-push:
+    build: ./push-service
+    restart: unless-stopped
+    environment:
+      PUSH_PORT: "4000"
+      # Web Push (PWA) — generate keys with: npm run generate-vapid-keys
+      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY}"
+      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY}"
+      VAPID_SUBJECT: "${VAPID_SUBJECT:-mailto:ops@example.com}"
+      # APNs (iOS) — optional
+      APNS_KEY_ID: "${APNS_KEY_ID:-}"
+      APNS_TEAM_ID: "${APNS_TEAM_ID:-}"
+      APNS_KEY_PATH: "${APNS_KEY_PATH:-}"
+      APNS_BUNDLE_ID: "${APNS_BUNDLE_ID:-}"
+      # FCM (Android) — optional
+      FCM_SERVICE_ACCOUNT_PATH: "${FCM_SERVICE_ACCOUNT_PATH:-}"
+      FCM_PROJECT_ID: "${FCM_PROJECT_ID:-}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  meshwhisper_data:

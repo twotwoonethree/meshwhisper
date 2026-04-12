@@ -394,7 +394,7 @@ export class SocialGraphRouter {
    * returns a RouteOffer.  Otherwise returns null (the caller should
    * decide whether to forward the request further).
    */
-  handleRouteRequest(request: RouteRequest, fromPeer: string): RouteOffer | null {
+  handleRouteRequest(request: RouteRequest, _fromPeer: string): RouteOffer | null {
     const peer = this.proximityTable.findPeer(request.destHash);
     if (!peer) return null;
     if (!this.isRecent(peer.lastSeen)) return null;

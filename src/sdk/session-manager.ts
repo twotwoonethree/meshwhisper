@@ -15,7 +15,6 @@ import type { KeyPair, Packet, PreKeyBundle, StorageBackend } from '../types.js'
 import {
   deriveDestHash,
   getCurrentEpochHour,
-  concat,
 } from '../crypto/index.js';
 import {
   generatePreKeyBundle,
@@ -32,7 +31,6 @@ import {
 } from '../ratchet/index.js';
 import {
   createHandshakePacket,
-  PROTOCOL_VERSION,
 } from '../packet/index.js';
 import type { LocalIdentity, PeerIdentityCache } from '../namespace/index.js';
 import {

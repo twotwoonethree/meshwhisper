@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Type check, lint, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install SDK dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx eslint src/
+
+      - name: Test
+        run: npx vitest run
+
+  build-node:
+    name: Build relay
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - name: Install relay dependencies
+        working-directory: node
+        run: npm ci
+
+      - name: Build relay
+        working-directory: node
+        run: npm run build
+
+  build-push-service:
+    name: Build push service
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: push-service/package-lock.json
+
+      - name: Install push service dependencies
+        working-directory: push-service
+        run: npm ci
+
+      - name: Build push service
+        working-directory: push-service
+        run: npm run build

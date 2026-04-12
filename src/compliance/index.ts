@@ -68,7 +68,6 @@ export interface ScanResult {
 // ---------------------------------------------------------------------------
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 // ---------------------------------------------------------------------------
 // ComplianceManager

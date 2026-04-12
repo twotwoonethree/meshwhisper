@@ -42,7 +42,8 @@
     "lint": "eslint src/",
     "demo": "npx tsx demo/server.ts",
     "demo:alice": "npx tsx demo/server.ts 3001 Alice",
-    "demo:bob": "npx tsx demo/server.ts 3002 Bob"
+    "demo:bob": "npx tsx demo/server.ts 3002 Bob",
+    "generate-vapid-keys": "tsx scripts/generate-vapid-keys.ts"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.0",
@@ -56,6 +57,9 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.1",
+    "@typescript-eslint/parser": "^8.58.1",
+    "eslint": "^10.2.0",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

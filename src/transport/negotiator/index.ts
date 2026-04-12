@@ -145,7 +145,7 @@ export class BearerNegotiator {
    * Select the highest-priority transport that is currently available and can
    * reach `destination`. Falls back through all registered transports.
    */
-  async selectTransport(destination: string): Promise<Transport | null> {
+  async selectTransport(_destination: string): Promise<Transport | null> {
     const sorted = this.getAvailableTransports();
 
     for (const transport of sorted) {

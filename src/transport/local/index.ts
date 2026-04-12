@@ -47,7 +47,7 @@ function deviceIdToHex(buf: Uint8Array): string {
 }
 
 /** Decode a hex string back to a 16-byte Uint8Array. */
-function hexToDeviceId(hex: string): Uint8Array {
+function _hexToDeviceId(hex: string): Uint8Array {
   return new Uint8Array(Buffer.from(hex, 'hex'));
 }
 

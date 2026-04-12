@@ -9,19 +9,14 @@
 
 import type {
   BearerType,
-  ChaffRate,
   ClusterDevice,
-  DeviceCapability,
   Group,
-  KeyPair,
   Message,
   MessageUrgency,
   Packet,
   PermissionModel,
-  PreKeyBundle,
   PresenceStatus,
   MeshWhisperConfig,
-  RelayWillingness,
   StorageBackend,
   StoredMessage,
   Transport as MWTransport,
@@ -36,8 +31,6 @@ import {
   deriveDestHash,
   getCurrentEpochHour,
   concat,
-  generateKeyPair,
-  kdf,
 } from '../crypto/index.js';
 import {
   serializePreKeyBundle,
@@ -47,12 +40,8 @@ import {
   ratchetEncrypt,
 } from '../ratchet/index.js';
 import {
-  encodePacket,
-  decodePacket,
   createDataPacket,
-  createHandshakePacket,
   compressPayload,
-  decompressPayload,
   PROTOCOL_VERSION,
 } from '../packet/index.js';
 import {
@@ -73,14 +62,12 @@ import {
   PeerIdentityCache,
 } from '../namespace/index.js';
 import { PermissionManager } from '../permissions/index.js';
-import type { ContactContext } from '../permissions/index.js';
 import { DeviceCluster } from '../cluster/index.js';
 import { GroupManager } from '../group/index.js';
 import { ChaffGenerator } from '../chaff/index.js';
 import { SessionManager } from './session-manager.js';
 import { MessageHandler } from './message-handler.js';
 import { SybilManager, RELAY_TRUST_FLOOR } from './sybil-manager.js';
-import type { SerializedReputationProof } from './sybil-manager.js';
 import {
   uint8ArrayToHex,
   hexToUint8Array,
@@ -361,6 +348,7 @@ export class MeshWhisper {
     let localTransport: MWTransport;
     let nodeTransport: MWTransport;
 
+    // eslint-disable-next-line prefer-const -- definite assignment; closures below capture it before it's assigned
     let instance!: MeshWhisper;
     const getDestHashes = (): string[] => instance.getCurrentDestHashes();
     const onNodeStatus = (status: 'connected' | 'disconnected'): void => {
@@ -1299,7 +1287,7 @@ export class MeshWhisper {
       if (!item) break;
       try {
         await this.sendMessage(item.recipientId, item.payload, item.options);
-      } catch (err) {
+      } catch {
         // fireError already called by sendMessage for session/permission failures
         this.outboundQueue.unshift(item);
         break;

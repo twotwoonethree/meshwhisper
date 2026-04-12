@@ -346,7 +346,7 @@ export class GroupManager {
   distributeSenderKey(
     groupId: string,
     senderKey: Uint8Array,
-    recipientId: string,
+    _recipientId: string,
   ): SenderKeyDistribution {
     const state = this.requireGroupState(groupId);
     const iteration = state.keyIterations.get(this.localPeerId) ?? 0;
@@ -640,12 +640,12 @@ export class GroupManager {
     const targets: Array<{ peerId: string; data: Uint8Array }> = [];
 
     // Collect all descendants that should receive the relay
-    const collectDescendants = (node: TreeNode): void => {
+    const _collectDescendants = (node: TreeNode): void => {
       for (const child of node.children) {
         if (child.peerId !== senderId) {
           targets.push({ peerId: child.peerId, data: ciphertext });
         }
-        collectDescendants(child);
+        _collectDescendants(child);
       }
     };
 

@@ -44,7 +44,7 @@ const CHALLENGE_ID_LENGTH = 16;
 const ACCEL_MAX = 20.0;
 
 /** Expected gravity magnitude in m/s². */
-const GRAVITY = 9.81;
+const _GRAVITY = 9.81;
 
 /** Minimum acceptable standard deviation for accelerometer data. */
 const MIN_STD_DEV = 0.01;
@@ -109,7 +109,6 @@ function encodeFloat64(value: number): Uint8Array {
 
 /** Encodes a UTF-8 string to bytes. */
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 function encodeString(s: string): Uint8Array {
   return textEncoder.encode(s);
