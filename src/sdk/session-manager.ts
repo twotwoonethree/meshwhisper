@@ -498,9 +498,11 @@ export class SessionManager {
       senderId: uint8ArrayToHex(this.identity.getPublicKey()),
       ephemeralPublicKey: Array.from(result.ephemeralPublicKey),
       identityKey: Array.from(this.identity.getEdPublicKey()),
-      // Tell Bob which OPK we consumed so he can look up the private key
-      ...(result.usedOneTimePreKey && bundle.oneTimePreKey
-        ? { usedOneTimePreKeyPublic: Array.from(bundle.oneTimePreKey) }
+      // Tell Bob which OPK we consumed so he can look up the private key.
+      // Must reference bundleWithOPK (the claimed OPK was injected there),
+      // not the original `bundle` which never carried the OPK field.
+      ...(result.usedOneTimePreKey && bundleWithOPK.oneTimePreKey
+        ? { usedOneTimePreKeyPublic: Array.from(bundleWithOPK.oneTimePreKey) }
         : {}),
     };
 

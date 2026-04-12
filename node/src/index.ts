@@ -839,7 +839,8 @@ const pruneInterval = setInterval(() => {
 }, PRUNE_INTERVAL_MS);
 pruneInterval.unref();
 
-httpServer.listen(PORT, () => {
+const LISTEN_HOST = process.env.LISTEN_HOST ?? '0.0.0.0';
+httpServer.listen(PORT, LISTEN_HOST, () => {
   console.log(`MeshWhisper Node listening on port ${PORT}`);
   console.log(`  Relay:     ws://localhost:${PORT}`);
   console.log(`  Directory: http://localhost:${PORT}/directory`);

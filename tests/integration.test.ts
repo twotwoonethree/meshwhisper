@@ -31,9 +31,18 @@ async function waitForRelay(
   proc: childProcess.ChildProcess,
   timeoutMs = 10000,
 ): Promise<void> {
-  // Capture stderr so we can include it in the error if startup fails
+  // Capture stdout+stderr so we can include them in the error if startup fails.
+  // Also tee to process.stdout/stderr so relay logs appear in CI output immediately.
+  const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
-  proc.stderr?.on('data', (d: Buffer) => stderrChunks.push(d));
+  proc.stdout?.on('data', (d: Buffer) => {
+    stdoutChunks.push(d);
+    process.stdout.write(`[relay] ${d}`);
+  });
+  proc.stderr?.on('data', (d: Buffer) => {
+    stderrChunks.push(d);
+    process.stderr.write(`[relay-err] ${d}`);
+  });
 
   let exited = false;
   let exitCode: number | null = null;
@@ -42,23 +51,29 @@ async function waitForRelay(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (exited) {
+      const stdout = Buffer.concat(stdoutChunks).toString().trim();
       const stderr = Buffer.concat(stderrChunks).toString().trim();
       throw new Error(
         `Relay process exited early (code ${exitCode})` +
+        (stdout ? `\nstdout:\n${stdout}` : '') +
         (stderr ? `\nstderr:\n${stderr}` : ''),
       );
     }
     try {
-      const res = await fetch(`http://localhost:${port}/health`);
+      // Use 127.0.0.1 explicitly — on some Linux setups 'localhost' resolves
+      // to ::1 (IPv6) but the relay may only be reachable on IPv4.
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
       if (res.ok) return;
     } catch {
       // Not up yet
     }
     await new Promise((r) => setTimeout(r, 100));
   }
+  const stdout = Buffer.concat(stdoutChunks).toString().trim();
   const stderr = Buffer.concat(stderrChunks).toString().trim();
   throw new Error(
     `Relay on port ${port} did not start within ${timeoutMs}ms` +
+    (stdout ? `\nstdout:\n${stdout}` : '') +
     (stderr ? `\nstderr:\n${stderr}` : ''),
   );
 }
