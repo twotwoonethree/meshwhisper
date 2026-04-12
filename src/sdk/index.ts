@@ -77,10 +77,10 @@ import type { ContactContext } from '../permissions/index.js';
 import { DeviceCluster } from '../cluster/index.js';
 import { GroupManager } from '../group/index.js';
 import { ChaffGenerator } from '../chaff/index.js';
-import { EntropyChallenger, ZKRelayReputation } from '../sybil/index.js';
-
 import { SessionManager } from './session-manager.js';
 import { MessageHandler } from './message-handler.js';
+import { SybilManager, RELAY_TRUST_FLOOR } from './sybil-manager.js';
+import type { SerializedReputationProof } from './sybil-manager.js';
 import {
   uint8ArrayToHex,
   hexToUint8Array,
@@ -183,8 +183,7 @@ export class MeshWhisper {
   private readonly reciprocityLedger: RelayLedger;
   private readonly groupManager: GroupManager;
   private readonly chaffGenerator: ChaffGenerator;
-  private readonly entropyChallenger: EntropyChallenger;
-  private readonly zkReputation: ZKRelayReputation;
+  private readonly sybilManager: SybilManager;
   private cluster: DeviceCluster | null = null;
 
   // --- Focused managers ---
@@ -218,6 +217,7 @@ export class MeshWhisper {
   // --- Lifecycle ---
   private running = false;
   private ephemeralRotationTimer: ReturnType<typeof setInterval> | null = null;
+  private reputationBroadcastTimer: ReturnType<typeof setInterval> | null = null;
 
   // ================================================================
   // Constructor (private — use MeshWhisper.init())
@@ -282,8 +282,7 @@ export class MeshWhisper {
     this.chaffGenerator = new ChaffGenerator({ rate: chaffRate });
 
     // --- Sybil resistance ---
-    this.entropyChallenger = new EntropyChallenger();
-    this.zkReputation = new ZKRelayReputation(localPeerId);
+    this.sybilManager = new SybilManager(localPeerId);
 
     // --- Cluster ---
     if (config.config?.clusterEnabled !== false) {
@@ -313,6 +312,7 @@ export class MeshWhisper {
       config.onMessageStatus ?? null,
       (peerId, payload) => this.sendControl(peerId, payload),
       this.cluster,
+      (ctrl, fromPeerId) => this.handleSybilControl(ctrl, fromPeerId),
     );
 
     this.onPresenceHandler = config.onPresence ?? null;
@@ -471,6 +471,15 @@ export class MeshWhisper {
     if (typeof this.ephemeralRotationTimer === 'object' && 'unref' in this.ephemeralRotationTimer) {
       (this.ephemeralRotationTimer as NodeJS.Timeout).unref();
     }
+
+    // Broadcast our relay reputation proof to all connected peers every hour.
+    // This lets peers calibrate how much they trust us as a relay.
+    this.reputationBroadcastTimer = setInterval(() => {
+      this.broadcastReputationProof();
+    }, 60 * 60 * 1000);
+    if (typeof this.reputationBroadcastTimer === 'object' && 'unref' in this.reputationBroadcastTimer) {
+      (this.reputationBroadcastTimer as NodeJS.Timeout).unref();
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -490,6 +499,10 @@ export class MeshWhisper {
     if (this.ephemeralRotationTimer) {
       clearInterval(this.ephemeralRotationTimer);
       this.ephemeralRotationTimer = null;
+    }
+    if (this.reputationBroadcastTimer) {
+      clearInterval(this.reputationBroadcastTimer);
+      this.reputationBroadcastTimer = null;
     }
 
     await Promise.allSettled([
@@ -1053,6 +1066,10 @@ export class MeshWhisper {
     if (bearer === 'internet') return;
     if (!this.router.shouldRelay(packet)) return;
     if (!this.reciprocityLedger.shouldRelay(source)) return;
+    // Sybil check: only relay for peers whose trust score meets the floor.
+    // Unknown peers score 0.5 (neutral) so they're not blocked.
+    // Only peers that actively fail an entropy challenge score below the floor.
+    if (this.sybilManager.getRelayTrustScore(source) < RELAY_TRUST_FLOOR) return;
 
     const forwarded = this.router.decrementTTL(packet);
     this.reciprocityLedger.recordRelayedForPeer(source, packet.encryptedPayload.length);
@@ -1129,6 +1146,17 @@ export class MeshWhisper {
   private onContactEstablished(peerId: string): void {
     this.permissionManager.addContact(peerId);
     this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())).catch(() => {});
+
+    // Issue an entropy challenge so we can assess whether this peer is a
+    // real physical device. The result feeds into relay trust scoring.
+    const { challengeData } = this.sybilManager.createChallenge(peerId);
+    this.sendControl(peerId, { __mw_ctrl: 'entropy_challenge', challengeData });
+
+    // Share our relay reputation proof so the peer can trust us as a relay.
+    const proof = this.sybilManager.getLocalProof();
+    if (proof) {
+      this.sendControl(peerId, { __mw_ctrl: 'reputation_proof', reputationProof: proof });
+    }
   }
 
   // ================================================================
@@ -1138,6 +1166,76 @@ export class MeshWhisper {
   private sendControl(peerId: string, payload: Record<string, unknown>): void {
     const bytes = new TextEncoder().encode(JSON.stringify(payload));
     this.sendMessage(peerId, bytes, { urgency: 'background' }).catch(() => {});
+  }
+
+  // ================================================================
+  // Internal — Sybil control message handling
+  // ================================================================
+
+  private handleSybilControl(ctrl: import('./utils.js').ControlMessage, fromPeerId: string): void {
+    switch (ctrl.__mw_ctrl) {
+      case 'entropy_challenge': {
+        if (!ctrl.challengeData) return;
+        const onChallenge = this.config.onEntropyChallenge;
+        if (!onChallenge) return; // app hasn't provided a sensor callback — stay unverified
+
+        const challenge = this.sybilManager.deserializeChallenge(ctrl.challengeData);
+        onChallenge(fromPeerId, challenge.sensorType, challenge.durationMs)
+          .then((sensorData) => {
+            const { responseData } = this.sybilManager.createResponse(
+              challenge,
+              sensorData,
+              this.identity.getEdPrivateKey(),
+            );
+            this.sendControl(fromPeerId, { __mw_ctrl: 'entropy_response', responseData });
+          })
+          .catch(() => {
+            // Sensor collection failed — don't send a response; challenger marks us unverified
+          });
+        break;
+      }
+
+      case 'entropy_response': {
+        if (!ctrl.responseData) return;
+        const peerEdPubKey = this.getPeerEdPublicKey(fromPeerId);
+        if (!peerEdPubKey) return;
+        this.sybilManager.processEntropyResponse(ctrl.responseData, fromPeerId, peerEdPubKey);
+        break;
+      }
+
+      case 'reputation_proof': {
+        if (!ctrl.reputationProof) return;
+        const peerEdPubKey = this.getPeerEdPublicKey(fromPeerId);
+        if (!peerEdPubKey) return;
+        this.sybilManager.acceptReputationProof(ctrl.reputationProof, fromPeerId, peerEdPubKey);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Regenerates our relay reputation proof from the current ledger state
+   * and sends it to all contacts we have sessions with.
+   */
+  private broadcastReputationProof(): void {
+    const proof = this.sybilManager.buildLocalProof(
+      this.reciprocityLedger,
+      this.identity.getEdPrivateKey(),
+    );
+    for (const contactId of this.permissionManager.getContacts()) {
+      if (this.sessionManager.hasSession(contactId)) {
+        this.sendControl(contactId, { __mw_ctrl: 'reputation_proof', reputationProof: proof });
+      }
+    }
+  }
+
+  /**
+   * Returns a peer's Ed25519 public key from the peerPreKeyBundles cache.
+   * Used to verify entropy responses and reputation proofs.
+   */
+  private getPeerEdPublicKey(peerId: string): Uint8Array | null {
+    const bundle = this.sessionManager.getBundle(peerId);
+    return bundle?.identityKey ?? null;
   }
 
   // ================================================================

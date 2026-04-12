@@ -41,6 +41,12 @@ export class MessageHandler {
      */
     private readonly sendControl: (peerId: string, payload: Record<string, unknown>) => void,
     private readonly cluster: DeviceCluster | null,
+    /**
+     * Called for control message types MessageHandler doesn't own
+     * (e.g. sybil: entropy_challenge, entropy_response, reputation_proof).
+     * The coordinator handles these.
+     */
+    private readonly onUnhandledControl: ((ctrl: ControlMessage, fromPeerId: string) => void) | null = null,
   ) {}
 
   // ----------------------------------------------------------------
@@ -168,6 +174,12 @@ export class MessageHandler {
       case 'read':
         if (ctrl.messageId) {
           this.updateMessageStatus(ctrl.messageId, fromPeerId, 'read').catch(() => {});
+        }
+        break;
+      default:
+        // Delegate sybil and other coordinator-owned control types
+        if (this.onUnhandledControl) {
+          this.onUnhandledControl(ctrl, fromPeerId);
         }
         break;
     }

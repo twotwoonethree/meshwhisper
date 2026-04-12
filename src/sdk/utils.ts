@@ -100,8 +100,27 @@ export function deserializeRatchetHeader(
 // ============================================================
 
 export interface ControlMessage {
-  __mw_ctrl: 'delivered' | 'read' | 'typing_start' | 'typing_stop';
+  __mw_ctrl:
+    | 'delivered'
+    | 'read'
+    | 'typing_start'
+    | 'typing_stop'
+    | 'entropy_challenge'
+    | 'entropy_response'
+    | 'reputation_proof';
   messageId?: string;
+  // entropy_challenge
+  challengeData?: number[];
+  // entropy_response
+  responseData?: number[];
+  // reputation_proof
+  reputationProof?: {
+    peerId: string;
+    commitment: number[];
+    proof: number[];
+    claims: { minRelayCount: number; periodDays: number; minReciprocityScore: number };
+    timestamp: number;
+  };
 }
 
 export function tryParseControl(payload: Uint8Array): ControlMessage | null {

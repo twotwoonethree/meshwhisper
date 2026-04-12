@@ -254,6 +254,28 @@ export interface MeshWhisperConfig {
    *  Use this to show a connectivity indicator in your UI.
    *  Messages sent while disconnected are queued and flushed automatically on reconnect. */
   onConnectionStatus?: (status: 'connected' | 'disconnected') => void;
+  /**
+   * Called when a connected peer issues an entropy (proof-of-physical-device) challenge.
+   * Collect `durationMs` milliseconds of readings from the requested sensor and return them.
+   * If not provided, the challenge is silently ignored and the peer marks us as "unverified"
+   * (lower relay priority) rather than "failed" (blocked).
+   *
+   * Example (React Native with expo-sensors):
+   * ```ts
+   * onEntropyChallenge: async (peerId, sensorType, durationMs) => {
+   *   const samples: number[] = [];
+   *   const sub = Accelerometer.addListener(({ x, y, z }) => samples.push(x, y, z));
+   *   await new Promise(r => setTimeout(r, durationMs));
+   *   sub.remove();
+   *   return new Float64Array(samples);
+   * }
+   * ```
+   */
+  onEntropyChallenge?: (
+    peerId: string,
+    sensorType: EntropySensorType,
+    durationMs: number,
+  ) => Promise<Float64Array>;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;
