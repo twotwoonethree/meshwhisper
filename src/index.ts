@@ -85,3 +85,7 @@ export { PacketFlags } from './types.js';
 
 export type { PlatformP2PBridge, PeerInfo } from './transport/p2p/index.js';
 export { registerPlatformBridge } from './transport/p2p/index.js';
+
+// --- Browser / PWA sensor utilities ---
+
+export { requestSensorPermission, collectSensorData } from './sdk/browser-sensors.js';

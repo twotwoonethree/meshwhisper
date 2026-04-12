@@ -33,7 +33,7 @@ export class MessageHandler {
     private readonly storage: StorageBackend | null,
     private readonly getLocalPeerId: () => string,
     private readonly onMessage: ((message: Message) => void) | null,
-    private readonly onMessageStatus: ((messageId: string, status: string) => void) | null,
+    private readonly onMessageStatus: ((messageId: string, status: StoredMessage['status']) => void) | null,
     /**
      * Called when an inbound message triggers a delivery receipt or read
      * receipt that must be sent back to the peer. Implemented by the

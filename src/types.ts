@@ -266,9 +266,24 @@ export interface MeshWhisperConfig {
    * If not provided, the challenge is silently ignored and the peer marks us as "unverified"
    * (lower relay priority) rather than "failed" (blocked).
    *
-   * Example (React Native with expo-sensors):
+   * **PWA / browser:** use the built-in helpers. Call `requestSensorPermission()` once from
+   * a user-gesture handler at startup (required on iOS 13+), then wire `collectSensorData`
+   * directly:
    * ```ts
-   * onEntropyChallenge: async (peerId, sensorType, durationMs) => {
+   * import { requestSensorPermission, collectSensorData } from '@meshwhisper/sdk'
+   *
+   * // In your "Start" button handler:
+   * await requestSensorPermission()
+   *
+   * MeshWhisper.init({
+   *   onEntropyChallenge: (_peerId, sensorType, durationMs) =>
+   *     collectSensorData(sensorType, durationMs),
+   * })
+   * ```
+   *
+   * **React Native (expo-sensors):**
+   * ```ts
+   * onEntropyChallenge: async (_peerId, sensorType, durationMs) => {
    *   const samples: number[] = [];
    *   const sub = Accelerometer.addListener(({ x, y, z }) => samples.push(x, y, z));
    *   await new Promise(r => setTimeout(r, durationMs));
