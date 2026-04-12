@@ -73,6 +73,7 @@ function spawnRelay(port: number): { proc: childProcess.ChildProcess; dbPath: st
   // Prefer the compiled output when available (CI builds the relay before tests).
   // Fall back to tsx for local development without a prior build.
   const useCompiled = fs.existsSync(distEntry);
+  console.log(`[spawnRelay] distEntry=${distEntry} exists=${useCompiled}`);
 
   const proc = childProcess.spawn(
     useCompiled ? 'node' : 'npx',
@@ -89,6 +90,7 @@ function spawnRelay(port: number): { proc: childProcess.ChildProcess; dbPath: st
       stdio: 'pipe',
     },
   );
+  console.log(`[spawnRelay] spawned pid=${proc.pid} cmd=${useCompiled ? 'node' : 'npx tsx'}`);
 
   return { proc, dbPath };
 }
