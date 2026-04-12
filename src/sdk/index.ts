@@ -813,6 +813,45 @@ export class MeshWhisper {
     await this.sessionManager.initiateHandshake(peerId, bundle);
   }
 
+  /**
+   * Look up a peer's pre-key bundle from the relay directory and initiate
+   * an X3DH session with them. Returns true if the bundle was found and the
+   * handshake was initiated, false if the peer has not published a bundle.
+   *
+   * The `publicKey` is the peer's hex-encoded Ed25519 identity public key —
+   * the same value returned by `getLocalPeerId()` on their device.
+   *
+   * ```ts
+   * const found = await MeshWhisper.addContactByKey('a1b2c3...');
+   * ```
+   */
+  static async addContactByKey(publicKey: string): Promise<boolean> {
+    return MeshWhisper.instance.addContactByKeyInstance(publicKey);
+  }
+
+  async addContactByKeyInstance(publicKey: string): Promise<boolean> {
+    this.assertRunning();
+    const bundle = await this.sessionManager.lookupPreKeyBundle(publicKey);
+    if (!bundle) return false;
+
+    // Derive the peer ID (X25519 public key hex) from the Ed25519 public key
+    const edPubBytes = hexToUint8Array(publicKey);
+    const x25519PubBytes = edwardsToMontgomeryPub(edPubBytes);
+    const peerId = uint8ArrayToHex(x25519PubBytes);
+
+    this.sessionManager.setBundle(peerId, bundle);
+    this.peerCache.addPeer(peerId, x25519PubBytes);
+
+    if (this.config.permissionModel === 'mutual') {
+      this.permissionManager.confirmMutualContact(peerId);
+    } else {
+      this.permissionManager.addContact(peerId);
+    }
+
+    await this.sessionManager.initiateHandshake(peerId, bundle);
+    return true;
+  }
+
   static async introduceContacts(peerA: string, peerB: string): Promise<void> {
     return MeshWhisper.instance.introduceContactsInstance(peerA, peerB);
   }
@@ -934,7 +973,7 @@ export class MeshWhisper {
     if (isForUs) {
       this.processLocalPacket(packet, source);
     } else {
-      this.maybeRelay(packet, source);
+      this.maybeRelay(packet, source, bearer);
     }
   }
 
@@ -1007,7 +1046,11 @@ export class MeshWhisper {
   // Internal — Relay Logic
   // ================================================================
 
-  private maybeRelay(packet: Packet, source: string): void {
+  private maybeRelay(packet: Packet, source: string, bearer: BearerType): void {
+    // Only relay for local mesh bearers. Packets arriving from the Node relay
+    // are already handled server-side — re-relaying them here would cause
+    // unnecessary duplicate forwarding.
+    if (bearer === 'internet') return;
     if (!this.router.shouldRelay(packet)) return;
     if (!this.reciprocityLedger.shouldRelay(source)) return;
 

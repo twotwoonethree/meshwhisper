@@ -96,6 +96,9 @@ export class MessageHandler {
       if (this.seenMessageIds.has(envelope.id)) return;
       this.seenMessageIds.set(envelope.id, envelope.timestamp);
       this.pruneSeenIds();
+      // Persist immediately so the dedup window survives unclean exits
+      // (crash, OOM kill). Without this, reconnect causes duplicate delivery.
+      this.persistSeenIds().catch(() => {});
 
       // Control messages (delivery receipts, read receipts, typing)
       const payloadBytes = new Uint8Array(envelope.payload);

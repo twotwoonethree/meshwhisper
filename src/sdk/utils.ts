@@ -153,4 +153,7 @@ export interface HandshakeEnvelope {
   preKeyBundle?: number[]; // serialized PreKeyBundle
   ephemeralPublicKey?: number[];
   identityKey?: number[];
+  // Public key of the one-time pre-key Alice consumed, so Bob can look up
+  // the corresponding private key to complete DH4. Absent when no OPK was used.
+  usedOneTimePreKeyPublic?: number[];
 }

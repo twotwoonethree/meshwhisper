@@ -19,6 +19,7 @@ import {
 } from '../crypto/index.js';
 import {
   generatePreKeyBundle,
+  generateOneTimePreKeys,
   initiateKeyExchange,
   completeKeyExchange,
   serializePreKeyBundle,
@@ -61,6 +62,11 @@ export class SessionManager {
   // Must survive restarts so incoming X3DH handshakes can be completed with
   // the same key that was published in the pre-key bundle / contact QR.
   private signedPreKeyPair: KeyPair | null = null;
+
+  // Current one-time pre-key. A single OPK is maintained at a time; it is
+  // included in published bundles and consumed on the first incoming x3dh_init
+  // that references it. A fresh OPK is generated automatically after use.
+  private currentOPK: KeyPair | null = null;
 
   constructor(
     private readonly identity: LocalIdentity,
@@ -116,7 +122,7 @@ export class SessionManager {
   }
 
   /**
-   * Load or generate the signed pre-key pair.
+   * Load or generate the signed pre-key pair and current OPK.
    * Must be called during startup before any handshakes are processed.
    */
   async initSignedPreKey(): Promise<void> {
@@ -133,19 +139,52 @@ export class SessionManager {
           publicKey: hexToUint8Array(pubHex!),
           privateKey: hexToUint8Array(privHex!),
         };
-        return;
+      }
+
+      const savedOPK = await this.storage.get('opk_current');
+      if (savedOPK) {
+        const [pubHex, privHex] = savedOPK.split(':');
+        this.currentOPK = {
+          publicKey: hexToUint8Array(pubHex!),
+          privateKey: hexToUint8Array(privHex!),
+        };
       }
     }
 
-    const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
-    this.signedPreKeyPair = signedPreKeyPair;
+    if (!this.signedPreKeyPair) {
+      const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
+      this.signedPreKeyPair = signedPreKeyPair;
+      if (this.storage) {
+        await this.storage.set(
+          'signed_pre_key',
+          `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
+        );
+      }
+    }
+
+    if (!this.currentOPK) {
+      await this.rotateOPK();
+    }
+  }
+
+  /**
+   * Generates a fresh OPK and persists it, replacing any existing one.
+   * Called on first startup and after the current OPK is consumed.
+   */
+  private async rotateOPK(): Promise<void> {
+    const [opkPair] = generateOneTimePreKeys(
+      { publicKey: new Uint8Array(32), privateKey: new Uint8Array(32) },
+      1,
+    );
+    this.currentOPK = opkPair!;
     if (this.storage) {
       await this.storage.set(
-        'signed_pre_key',
-        `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
+        'opk_current',
+        `${uint8ArrayToHex(opkPair!.publicKey)}:${uint8ArrayToHex(opkPair!.privateKey)}`,
       );
     }
   }
+
 
   /**
    * Re-initiates X3DH sessions with all contacts whose prekey bundles are saved.
@@ -194,7 +233,34 @@ export class SessionManager {
       identityKey: this.identity.getEdPublicKey(),
       signedPreKey: this.signedPreKeyPair.publicKey,
       signedPreKeySignature: this.identity.signData(this.signedPreKeyPair.publicKey),
+      // Include the current OPK so the initiator can perform 4-DH.
+      // The OPK is consumed on first use and rotated automatically.
+      oneTimePreKey: this.currentOPK?.publicKey,
     };
+  }
+
+  /**
+   * Looks up a peer's pre-key bundle from the relay's /directory endpoint.
+   * Returns null if the peer has not published a bundle or is not found.
+   */
+  async lookupPreKeyBundle(publicKey: string): Promise<PreKeyBundle | null> {
+    const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
+    const primaryWsUrl = wsUrls[0];
+    if (!primaryWsUrl || primaryWsUrl === 'mesh') return null;
+
+    const httpUrl = primaryWsUrl
+      .replace(/^wss:\/\//, 'https://')
+      .replace(/^ws:\/\//, 'http://');
+
+    const res = await fetch(
+      `${httpUrl}/directory?namespace=${encodeURIComponent(this.namespace)}&publicKey=${encodeURIComponent(publicKey)}`,
+    );
+    if (!res.ok) return null;
+
+    const json = await res.json() as { bundle?: string };
+    if (!json.bundle) return null;
+
+    return deserializePreKeyBundle(base64ToUint8Array(json.bundle));
   }
 
   /**
@@ -284,14 +350,9 @@ export class SessionManager {
       privateKey: this.identity.getEdPrivateKey(),
     };
 
-    // TODO: implement one-time pre-key (OPK) storage.
-    // generatePreKeyBundle() always produces an OPK, so bundles always have
-    // oneTimePreKey set. initiateKeyExchange() then performs DH4 with it, but
-    // completeIncomingHandshake() passes null for the OPK private key (it is
-    // never persisted), producing a different shared secret on Bob's side.
-    // Strip the OPK here so both sides compute the same 3-DH shared secret
-    // until OPK private-key storage and lookup are implemented.
-    const result = initiateKeyExchange(aliceIdentity, { ...bundle, oneTimePreKey: undefined });
+    // Use the full bundle including OPK if present (4-DH). Bob will look up
+    // the OPK private key by the public key we include in the envelope.
+    const result = initiateKeyExchange(aliceIdentity, bundle);
 
     const ratchetState = initSender(result.sharedSecret, bundle.signedPreKey);
     this.sessions.set(peerId, ratchetState);
@@ -302,6 +363,10 @@ export class SessionManager {
       senderId: uint8ArrayToHex(this.identity.getPublicKey()),
       ephemeralPublicKey: Array.from(result.ephemeralPublicKey),
       identityKey: Array.from(this.identity.getEdPublicKey()),
+      // Tell Bob which OPK we consumed so he can look up the private key
+      ...(result.usedOneTimePreKey && bundle.oneTimePreKey
+        ? { usedOneTimePreKeyPublic: Array.from(bundle.oneTimePreKey) }
+        : {}),
     };
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(handshakeEnvelope));
@@ -336,10 +401,28 @@ export class SessionManager {
       privateKey: this.identity.getEdPrivateKey(),
     };
 
+    // Look up the OPK private key if Alice used one. The lookup is
+    // synchronous (in-memory) to avoid a race where a data packet arrives
+    // while an async lookup is still pending. Storage cleanup is fire-and-forget.
+    let bobOPK: KeyPair | null = null;
+    if (envelope.usedOneTimePreKeyPublic) {
+      const opkPubHex = uint8ArrayToHex(new Uint8Array(envelope.usedOneTimePreKeyPublic));
+      if (this.currentOPK && uint8ArrayToHex(this.currentOPK.publicKey) === opkPubHex) {
+        bobOPK = this.currentOPK;
+        this.currentOPK = null;
+        if (this.storage) this.storage.delete('opk_current').catch(() => {});
+        this.rotateOPK().catch(() => {});
+      }
+      // If OPK not found (already consumed), bobOPK stays null → 3-DH fallback.
+      // Alice computed 4-DH, so the secrets won't match and decryption will
+      // fail. This only happens on duplicate x3dh_init delivery, which the
+      // dedup layer prevents in practice.
+    }
+
     const sharedSecret = completeKeyExchange(
       bobIdentity,
       bobSignedPreKey,
-      null, // No one-time pre-key for now
+      bobOPK,
       aliceIdentityKey,
       aliceEphemeralKey,
     );
