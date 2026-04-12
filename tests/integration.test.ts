@@ -23,9 +23,31 @@ const TEST_DEV_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 // ---- Helpers ----
 
 /** Wait until the relay's /health endpoint responds OK. */
-async function waitForRelay(port: number, timeoutMs = 5000): Promise<void> {
+/** Wait until the relay's /health endpoint responds OK.
+ *  Accepts the spawned process so it can detect early crashes and include
+ *  captured stderr in the error message for easier CI debugging. */
+async function waitForRelay(
+  port: number,
+  proc: childProcess.ChildProcess,
+  timeoutMs = 10000,
+): Promise<void> {
+  // Capture stderr so we can include it in the error if startup fails
+  const stderrChunks: Buffer[] = [];
+  proc.stderr?.on('data', (d: Buffer) => stderrChunks.push(d));
+
+  let exited = false;
+  let exitCode: number | null = null;
+  proc.once('exit', (code) => { exited = true; exitCode = code; });
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (exited) {
+      const stderr = Buffer.concat(stderrChunks).toString().trim();
+      throw new Error(
+        `Relay process exited early (code ${exitCode})` +
+        (stderr ? `\nstderr:\n${stderr}` : ''),
+      );
+    }
     try {
       const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) return;
@@ -34,7 +56,11 @@ async function waitForRelay(port: number, timeoutMs = 5000): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`Relay on port ${port} did not start within ${timeoutMs}ms`);
+  const stderr = Buffer.concat(stderrChunks).toString().trim();
+  throw new Error(
+    `Relay on port ${port} did not start within ${timeoutMs}ms` +
+    (stderr ? `\nstderr:\n${stderr}` : ''),
+  );
 }
 
 /** Spawn the Node relay on a given port with an isolated temp DB. */
@@ -58,16 +84,11 @@ function spawnRelay(port: number): { proc: childProcess.ChildProcess; dbPath: st
         ...process.env,
         PORT: String(port),
         DB_PATH: dbPath,
-        // Silence startup logs in test output
         NODE_ENV: 'test',
       },
       stdio: 'pipe',
     },
   );
-
-  // Uncomment to debug relay output:
-  // proc.stdout?.on('data', (d) => process.stdout.write('[relay] ' + d));
-  // proc.stderr?.on('data', (d) => process.stderr.write('[relay] ' + d));
 
   return { proc, dbPath };
 }
@@ -92,7 +113,7 @@ describe('MeshWhisper end-to-end', () => {
   beforeAll(async () => {
     // Start relay
     ({ proc: relayProc, dbPath } = spawnRelay(PORT));
-    await waitForRelay(PORT, 8000);
+    await waitForRelay(PORT, relayProc, 15000);
 
     // Import SDK (dynamic to avoid module-level side effects)
     ({ MeshWhisper } = await import('../src/sdk/index.js'));
