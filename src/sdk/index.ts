@@ -532,12 +532,20 @@ export class MeshWhisper {
     }
 
     const canSend = await this.permissionManager.canSendTo(recipientId);
-    if (!canSend) throw new Error(`Permission denied: cannot send to ${recipientId}`);
+    if (!canSend) {
+      const err = new Error(`Permission denied: cannot send to ${recipientId}`);
+      this.fireError(err);
+      throw err;
+    }
 
     await this.sessionManager.ensureSession(recipientId);
 
     const session = this.sessionManager.getSession(recipientId);
-    if (!session) throw new Error(`Failed to establish session with ${recipientId}`);
+    if (!session) {
+      const err = new Error(`Failed to establish session with ${recipientId}`);
+      this.fireError(err);
+      throw err;
+    }
 
     const messageId = generateMessageId();
     const envelope = {
@@ -1270,8 +1278,8 @@ export class MeshWhisper {
 
   private async persistPeers(): Promise<void> {
     if (!this.storage) return;
-    for (const [peerId, pubKey] of (this.peerCache as any).peers as Map<string, Uint8Array>) {
-      await this.storage.set(`peers/${peerId}`, uint8ArrayToHex(pubKey));
+    for (const { id, publicKey } of this.peerCache.getAllPeers()) {
+      await this.storage.set(`peers/${id}`, uint8ArrayToHex(publicKey));
     }
   }
 
@@ -1285,7 +1293,8 @@ export class MeshWhisper {
       if (!item) break;
       try {
         await this.sendMessage(item.recipientId, item.payload, item.options);
-      } catch {
+      } catch (err) {
+        // fireError already called by sendMessage for session/permission failures
         this.outboundQueue.unshift(item);
         break;
       }
@@ -1312,6 +1321,12 @@ export class MeshWhisper {
   private assertRunning(): void {
     if (!this.running) {
       throw new Error('MeshWhisper is not running. Call MeshWhisper.init() first.');
+    }
+  }
+
+  private fireError(error: Error): void {
+    if (this.config.onError) {
+      try { this.config.onError(error); } catch { /* swallow handler throws */ }
     }
   }
 }

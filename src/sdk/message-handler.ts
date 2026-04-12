@@ -189,6 +189,8 @@ export class MessageHandler {
   // Message persistence
   // ----------------------------------------------------------------
 
+  private static readonly MAX_STORED_MESSAGES = 500;
+
   async saveMessage(message: StoredMessage): Promise<void> {
     if (!this.storage) return;
     const key = `messages/${message.conversationId}`;
@@ -199,6 +201,10 @@ export class MessageHandler {
       messages[existing] = message;
     } else {
       messages.push(message);
+      // Keep the newest N messages; drop oldest when over the cap
+      if (messages.length > MessageHandler.MAX_STORED_MESSAGES) {
+        messages.splice(0, messages.length - MessageHandler.MAX_STORED_MESSAGES);
+      }
     }
     await this.storage.set(key, JSON.stringify(messages));
   }

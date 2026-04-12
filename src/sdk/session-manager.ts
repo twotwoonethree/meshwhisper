@@ -193,6 +193,9 @@ export class SessionManager {
    */
   async reinitiateSessionsOnStartup(contacts: string[]): Promise<void> {
     for (const contactId of contacts) {
+      // Skip if we already have an active session — avoids both sides
+      // simultaneously re-handshaking on restart (double-handshake race).
+      if (this.sessions.has(contactId)) continue;
       const bundle = this.peerPreKeyBundles.get(contactId);
       if (!bundle) continue;
       try {
