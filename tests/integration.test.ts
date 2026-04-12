@@ -215,6 +215,79 @@ describe('MeshWhisper end-to-end', () => {
     fs.rmSync(bobDir, { recursive: true, force: true });
   }, 25000);
 
+  it('Bob can reply to Alice (bidirectional Double Ratchet)', async () => {
+    const NODE_URL = `ws://localhost:${PORT}`;
+    const NAMESPACE = 'com.test.bidir';
+    const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-alice3-'));
+    const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-bob3-'));
+
+    // ---- Bob inits, generates QR ----
+    const bob = await MeshWhisper.init({
+      namespace: NAMESPACE,
+      node: NODE_URL,
+      storage: new NodeStorage(bobDir),
+    });
+    const bobQR = MeshWhisper.generateContactQR();
+    const bobId = bob.getLocalPeerId();
+    await new Promise((r) => setTimeout(r, 300));
+
+    // ---- Alice inits (shuts Bob down), accepts contact, sends to Bob ----
+    const alice = await MeshWhisper.init({
+      namespace: NAMESPACE,
+      node: NODE_URL,
+      storage: new NodeStorage(aliceDir),
+    });
+    const aliceId = alice.getLocalPeerId();
+    await MeshWhisper.acceptContact(bobQR);
+    await new Promise((r) => setTimeout(r, 300));
+    await alice.sendMessage(bobId, new TextEncoder().encode('Hello Bob!'));
+    await new Promise((r) => setTimeout(r, 400));
+    await alice.shutdown();
+
+    // ---- Bob2 inits, receives Alice's message, sends a reply ----
+    await MeshWhisper.init({
+      namespace: NAMESPACE,
+      node: NODE_URL,
+      storage: new NodeStorage(bobDir),
+      onMessage: (msg) => {
+        if (new TextDecoder().decode(new Uint8Array(msg.payload)) === 'Hello Bob!') {
+          MeshWhisper.instance.sendMessage(msg.senderId, new TextEncoder().encode('Hello Alice!'))
+            .catch(() => {});
+        }
+      },
+    });
+    // Wait for Bob to receive Alice's message and fire off the reply
+    await new Promise((r) => setTimeout(r, 800));
+
+    // ---- Alice2 inits (shuts Bob2 down), receives Bob's reply ----
+    let replyText = '';
+    let resolveReply: (() => void) | null = null;
+    const replyReceived = new Promise<void>((r) => { resolveReply = r; });
+
+    await MeshWhisper.init({
+      namespace: NAMESPACE,
+      node: NODE_URL,
+      storage: new NodeStorage(aliceDir),
+      onMessage: (msg) => {
+        replyText = new TextDecoder().decode(new Uint8Array(msg.payload));
+        resolveReply?.();
+      },
+    });
+
+    await Promise.race([
+      replyReceived,
+      new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout: Alice did not receive Bob's reply")), 5000),
+      ),
+    ]);
+
+    expect(replyText).toBe('Hello Alice!');
+
+    await MeshWhisper.instance.shutdown();
+    fs.rmSync(aliceDir, { recursive: true, force: true });
+    fs.rmSync(bobDir, { recursive: true, force: true });
+  }, 30000);
+
   it('/health returns ok', async () => {
     const res = await fetch(`http://localhost:${PORT}/health`);
     expect(res.ok).toBe(true);

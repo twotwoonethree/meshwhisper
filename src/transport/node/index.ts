@@ -80,7 +80,12 @@ export class NodeTransport implements Transport {
       this.reconnectTimer = null;
     }
     if (this.ws) {
-      this.ws.close(1000, 'shutdown');
+      // Use terminate() rather than close() so the TCP connection drops
+      // immediately.  close() initiates a graceful WebSocket close handshake
+      // that completes asynchronously — the relay keeps the client registered
+      // until the handshake finishes, causing a race where the relay forwards
+      // packets to a "shutting down" socket instead of storing them.
+      this.ws.terminate();
       this.ws = null;
     }
   }

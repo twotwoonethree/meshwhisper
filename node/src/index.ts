@@ -243,14 +243,15 @@ function readDestHash(buf: Uint8Array): string | null {
 // Blob store — SQLite-backed, TTL-based
 // ============================================================
 
-function storeBlob(destHash: string, data: Uint8Array): void {
+function storeBlob(destHash: string, data: Uint8Array): number {
   // Enforce per-hash cap: drop oldest if full
   const row = stmts.countBlobsForHash.get(destHash) as { cnt: number };
   if (row.cnt >= MAX_BLOBS_PER_HASH) {
     const oldest = stmts.oldestBlobIdForHash.get(destHash) as { id: number } | undefined;
     if (oldest) stmts.deleteBlob.run(oldest.id);
   }
-  stmts.insertBlob.run(destHash, Buffer.from(data), Date.now());
+  const result = stmts.insertBlob.run(destHash, Buffer.from(data), Date.now());
+  return Number(result.lastInsertRowid);
 }
 
 function pullBlobs(destHash: string): Uint8Array[] {
@@ -446,15 +447,28 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
   const destHash = readDestHash(data);
   if (!destHash) return; // malformed header
 
+  // Always store the blob first so it survives regardless of delivery outcome.
+  // This prevents a race where the recipient's WebSocket is still in the
+  // registry (close event not yet fired) but the peer has already called
+  // terminate(): we'd forward to the stale socket and the store-and-forward
+  // delivery on reconnect would never happen.
+  const blobId = storeBlob(destHash, data);
+
   const recipient = clientsByHash.get(destHash);
   if (recipient && recipient !== sender && recipient.readyState === WebSocket.OPEN) {
-    // Recipient is connected — forward directly
-    recipient.send(data, { binary: true });
+    // Recipient appears connected — deliver immediately AND delete from store.
+    // If the send fails (connection dropped between readyState check and write),
+    // the blob stays in the store and will be delivered on the next reconnect.
+    recipient.send(data, { binary: true }, (err) => {
+      if (!err) {
+        // Delivery succeeded — purge from store so it isn't delivered twice
+        stmts.deleteBlob.run(blobId);
+      }
+      // On error: blob remains in store for reconnect delivery
+    });
   } else {
-    // Recipient offline (or same socket) — store for later delivery
-    storeBlob(destHash, data);
-
-    // Wake the recipient via push if they have a registered token
+    // Recipient offline (or same socket) — already stored above.
+    // Wake the recipient via push if they have a registered token.
     const pushReg = getPushRegistration(destHash);
     if (pushReg) notifyPush(destHash, pushReg);
   }
@@ -465,18 +479,18 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
 // ============================================================
 
 function handleWebSocketConnection(ws: WebSocket): void {
-  ws.on('message', (raw: RawData) => {
-    if (raw instanceof ArrayBuffer) {
-      handleRelayPacket(new Uint8Array(raw), ws);
+  ws.on('message', (raw: RawData, isBinary: boolean) => {
+    // Binary frames are relay packets
+    if (isBinary) {
+      if (raw instanceof ArrayBuffer) {
+        handleRelayPacket(new Uint8Array(raw), ws);
+      } else if (Buffer.isBuffer(raw)) {
+        handleRelayPacket(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength), ws);
+      }
       return;
     }
 
-    if (Buffer.isBuffer(raw)) {
-      handleRelayPacket(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength), ws);
-      return;
-    }
-
-    // JSON control message
+    // Text frames are JSON control messages
     try {
       const msg = JSON.parse(raw.toString()) as {
         type: string;

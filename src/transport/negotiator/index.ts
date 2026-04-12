@@ -166,16 +166,28 @@ export class BearerNegotiator {
 
   /**
    * Send a packet via the best available transport for the given destination.
-   * Throws if no transport is available.
+   * Tries transports in priority order, falling through to the next on failure.
+   * Throws if every transport fails or none is available.
    */
   async send(packet: Packet, destination: string): Promise<void> {
-    const transport = await this.selectTransport(destination);
-    if (!transport) {
-      throw new Error(
-        `No available transport for destination: ${destination}`,
-      );
+    const sorted = this.getAvailableTransports();
+    let lastError: unknown;
+
+    for (const transport of sorted) {
+      try {
+        const available = await transport.isAvailable();
+        if (!available) continue;
+        await transport.send(packet, destination);
+        return; // success — stop here
+      } catch (err) {
+        lastError = err;
+        // This transport failed for this destination — try the next
+      }
     }
-    await transport.send(packet, destination);
+
+    throw lastError ?? new Error(
+      `No available transport for destination: ${destination}`,
+    );
   }
 
   /**
