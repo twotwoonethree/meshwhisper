@@ -26,6 +26,10 @@ jobs:
         working-directory: node
         run: npm ci
 
+      - name: Build relay (integration tests use compiled output for fast startup)
+        working-directory: node
+        run: npm run build
+
       - name: Type check
         run: npx tsc --noEmit
 

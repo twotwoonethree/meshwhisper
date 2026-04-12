@@ -40,12 +40,20 @@ async function waitForRelay(port: number, timeoutMs = 5000): Promise<void> {
 /** Spawn the Node relay on a given port with an isolated temp DB. */
 function spawnRelay(port: number): { proc: childProcess.ChildProcess; dbPath: string } {
   const dbPath = path.join(os.tmpdir(), `mw-test-${port}-${Date.now()}.db`);
-  const relayEntry = path.resolve(__dirname, '../node/src/index.ts');
+  const nodeDir = path.resolve(__dirname, '../node');
+  const distEntry = path.join(nodeDir, 'dist/index.js');
+  const srcEntry = path.join(nodeDir, 'src/index.ts');
+
+  // Prefer the compiled output when available (CI builds the relay before tests).
+  // Fall back to tsx for local development without a prior build.
+  const useCompiled = fs.existsSync(distEntry);
 
   const proc = childProcess.spawn(
-    'npx',
-    ['tsx', relayEntry],
+    useCompiled ? 'node' : 'npx',
+    useCompiled ? [distEntry] : ['tsx', srcEntry],
     {
+      // Run from node/ so better-sqlite3 resolves from node/node_modules
+      cwd: nodeDir,
       env: {
         ...process.env,
         PORT: String(port),
