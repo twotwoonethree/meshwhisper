@@ -1,7 +1,10 @@
 // ============================================================
 // MeshWhisper SDK — Public API Surface
-// The main entry point developers interact with. Wires together
-// all 17 internal modules into a cohesive, ergonomic interface.
+//
+// Thin coordinator that wires together:
+//   - SessionManager  (X3DH + Double Ratchet)
+//   - MessageHandler  (decrypt, dedup, persistence)
+//   - All transport subsystems
 // ============================================================
 
 import type {
@@ -24,13 +27,8 @@ import type {
   Transport as MWTransport,
 } from '../types.js';
 import { PacketFlags } from '../types.js';
-import {
-  serializeRatchetState,
-  deserializeRatchetState,
-} from '../persistence/serialization.js';
 
-// --- Internal module imports ---
-
+import { edwardsToMontgomeryPub } from '@noble/curves/ed25519';
 import {
   encrypt,
   decrypt,
@@ -42,18 +40,11 @@ import {
   kdf,
 } from '../crypto/index.js';
 import {
-  generatePreKeyBundle,
-  initiateKeyExchange,
-  completeKeyExchange,
   serializePreKeyBundle,
   deserializePreKeyBundle,
 } from '../x3dh/index.js';
-import type { RatchetState, RatchetHeader } from '../ratchet/index.js';
 import {
-  initSender,
-  initReceiver,
   ratchetEncrypt,
-  ratchetDecrypt,
 } from '../ratchet/index.js';
 import {
   encodePacket,
@@ -88,30 +79,35 @@ import { GroupManager } from '../group/index.js';
 import { ChaffGenerator } from '../chaff/index.js';
 import { EntropyChallenger, ZKRelayReputation } from '../sybil/index.js';
 
+import { SessionManager } from './session-manager.js';
+import { MessageHandler } from './message-handler.js';
+import {
+  uint8ArrayToHex,
+  hexToUint8Array,
+  uint8ArrayToBase64,
+  base64ToUint8Array,
+  generateMessageId,
+  serializeRatchetHeader,
+  isControlPayload,
+} from './utils.js';
+
 // ============================================================
 // Public option/event types
 // ============================================================
 
 export interface SendOptions {
-  /** Message urgency: background | normal | urgent | critical. */
   urgency?: MessageUrgency;
-  /** Message expiry in seconds from now. */
   expiry?: number;
 }
 
 export interface MediaSendOptions extends SendOptions {
-  /** MIME type of the media (e.g. "image/jpeg", "audio/mp4"). */
   mimeType?: string;
-  /** Custom upload handler. If provided, overrides the Node media endpoint. */
   upload?: (encryptedData: Uint8Array) => Promise<string>;
 }
 
 export interface MediaMessage {
-  /** URL to the encrypted media blob. */
   url: string;
-  /** Base64-encoded AES-256-GCM key for decrypting the blob. */
   key: string;
-  /** Optional MIME type. */
   mimeType?: string;
 }
 
@@ -127,95 +123,33 @@ export interface TransportChangedEvent {
 }
 
 // ============================================================
-// GroupHandle — returned by createGroup / getGroup
+// GroupHandle
 // ============================================================
 
-/**
- * A handle to a group that provides a `send()` method, mirroring
- * the PRD's `group.send(payload)` API.
- */
 export class GroupHandle {
-  /** The underlying group metadata. */
   readonly group: Group;
-
   private readonly sdk: MeshWhisper;
 
-  /** @internal */
   constructor(group: Group, sdk: MeshWhisper) {
     this.group = group;
     this.sdk = sdk;
   }
 
-  /** The group's unique ID. */
-  get id(): string {
-    return this.group.id;
-  }
+  get id(): string { return this.group.id; }
+  get name(): string { return this.group.name; }
+  get members(): string[] { return Array.from(this.group.members.keys()); }
 
-  /** The group's display name. */
-  get name(): string {
-    return this.group.name;
-  }
-
-  /** List of member IDs. */
-  get members(): string[] {
-    return Array.from(this.group.members.keys());
-  }
-
-  /**
-   * Send a message to all group members.
-   * The payload is encrypted with the local peer's sender key and
-   * relayed through the group's dynamic relay tree.
-   */
   async send(payload: Uint8Array): Promise<void> {
     await this.sdk.sendToGroup(this.group.id, payload);
   }
 
-  /** Add a member to the group. */
   addMember(peerId: string): void {
     this.sdk['groupManager'].addMember(this.group.id, peerId);
   }
 
-  /** Remove a member from the group. */
   removeMember(peerId: string): void {
     this.sdk['groupManager'].removeMember(this.group.id, peerId);
   }
-}
-
-// ============================================================
-// Internal message envelope (serialized inside encrypted payload)
-// ============================================================
-
-interface MessageEnvelope {
-  id: string;
-  senderId: string;
-  recipientId: string;
-  payload: number[]; // serialized Uint8Array
-  timestamp: number;
-  urgency: MessageUrgency;
-  expiry?: number;
-  /** Group message metadata, if present. */
-  group?: {
-    groupId: string;
-    senderId: string;
-  };
-  /** Ratchet header for pairwise sessions. */
-  ratchetHeader?: {
-    dhPublicKey: number[];
-    previousChainLength: number;
-    messageNumber: number;
-  };
-}
-
-// ============================================================
-// Handshake envelope (serialized inside HANDSHAKE packets)
-// ============================================================
-
-interface HandshakeEnvelope {
-  type: 'x3dh_init' | 'x3dh_response' | 'prekey_bundle';
-  senderId: string;
-  preKeyBundle?: number[]; // serialized PreKeyBundle
-  ephemeralPublicKey?: number[];
-  identityKey?: number[];
 }
 
 // ============================================================
@@ -232,22 +166,12 @@ interface PeerPresenceRecord {
 // MeshWhisper — Main SDK Class
 // ============================================================
 
-/**
- * MeshWhisper is the primary API surface for the serverless P2P E2EE
- * messaging SDK. Instantiate via `MeshWhisper.init(config)`, then use
- * the returned instance (also accessible via `MeshWhisper.instance`)
- * for all messaging operations.
- *
- * Static convenience methods delegate to the singleton instance.
- */
 export class MeshWhisper {
-  // --- Singleton ---
   private static _instance: MeshWhisper | null = null;
 
-  // --- Configuration ---
   private readonly config: MeshWhisperConfig;
 
-  // --- Subsystem instances ---
+  // --- Subsystems ---
   private readonly identity: LocalIdentity;
   private readonly namespaceManager: NamespaceManager;
   private readonly peerCache: PeerIdentityCache;
@@ -263,34 +187,23 @@ export class MeshWhisper {
   private readonly zkReputation: ZKRelayReputation;
   private cluster: DeviceCluster | null = null;
 
+  // --- Focused managers ---
+  private readonly sessionManager: SessionManager;
+  private readonly messageHandler: MessageHandler;
+
   // --- Transports ---
   private readonly wsTransport: MWTransport;
   private readonly localTransport: MWTransport;
   private readonly p2pTransport: PlatformP2PTransport;
-
-  // --- Node/relay transport ---
   private nodeTransport: MWTransport | null = null;
-
-  // --- Pre-key pair storage (required for X3DH responder side) ---
-  private signedPreKeyPair: KeyPair | null = null;
 
   // --- Persistence ---
   private readonly storage: StorageBackend | null;
-
-  // --- Session state ---
-  private readonly sessions: Map<string, RatchetState> = new Map();
-  private readonly peerPreKeyBundles: Map<string, PreKeyBundle> = new Map();
-  private readonly pendingHandshakes: Map<string, { resolve: () => void }> = new Map();
-
-  // --- Deduplication ---
-  /** Rolling set of seen message IDs to prevent duplicates. */
-  private readonly seenMessageIds: Map<string, number> = new Map(); // id → timestamp
 
   // --- Presence ---
   private readonly presenceRecords: Map<string, PeerPresenceRecord> = new Map();
 
   // --- Event handlers ---
-  private onMessageHandler: ((message: Message) => void) | null = null;
   private onPresenceHandler: ((peerId: string, status: PresenceStatus) => void) | null = null;
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -320,12 +233,11 @@ export class MeshWhisper {
   ) {
     this.config = config;
     this.storage = storage;
-
-    // --- Identity ---
     this.identity = identity;
+
     const developerKeyBytes = config.developerKey
       ? base64ToUint8Array(config.developerKey)
-      : randomBytes(32); // random key for dev/single-tenant use
+      : randomBytes(32);
     const namespaceSalt = randomBytes(32);
     this.namespaceManager = new NamespaceManager({
       appBundleId: config.namespace,
@@ -333,8 +245,6 @@ export class MeshWhisper {
       salt: namespaceSalt,
     });
     this.peerCache = new PeerIdentityCache();
-
-    // --- Permissions ---
     this.permissionManager = new PermissionManager(config.permissionModel ?? 'open');
 
     // --- Transports ---
@@ -346,8 +256,8 @@ export class MeshWhisper {
     this.negotiator = new BearerNegotiator([
       this.p2pTransport,
       this.localTransport,
-      this.nodeTransport,
       this.wsTransport,
+      this.nodeTransport,
     ]);
 
     // --- Routing ---
@@ -355,7 +265,7 @@ export class MeshWhisper {
     const proximityTable = new PeerProximityTable();
     this.router = new SocialGraphRouter(localPeerId, proximityTable);
 
-    // --- Relay (store-and-forward) ---
+    // --- Relay ---
     const storeTTL = config.config?.storeTTL ?? 72;
     this.relayStore = new RelayStore({ defaultTTLHours: storeTTL });
     this.relayManager = new StoreAndForwardManager(this.relayStore);
@@ -375,7 +285,7 @@ export class MeshWhisper {
     this.entropyChallenger = new EntropyChallenger();
     this.zkReputation = new ZKRelayReputation(localPeerId);
 
-    // --- Cluster (optional) ---
+    // --- Cluster ---
     if (config.config?.clusterEnabled !== false) {
       this.cluster = new DeviceCluster(
         this.identity.getPublicKey(),
@@ -383,61 +293,56 @@ export class MeshWhisper {
       );
     }
 
-    // --- Event handlers from config ---
-    this.onMessageHandler = config.onMessage ?? null;
+    // --- Session manager ---
+    this.sessionManager = new SessionManager(
+      this.identity,
+      this.peerCache,
+      this.storage,
+      (packet, peerId) => this.routeAndSend(packet, peerId),
+      (peerId) => this.onContactEstablished(peerId),
+      config.namespace,
+      config.node ?? 'mesh',
+    );
+
+    // --- Message handler ---
+    this.messageHandler = new MessageHandler(
+      this.sessionManager,
+      this.storage,
+      () => this.getLocalPeerId(),
+      config.onMessage ?? null,
+      config.onMessageStatus ?? null,
+      (peerId, payload) => this.sendControl(peerId, payload),
+      this.cluster,
+    );
+
     this.onPresenceHandler = config.onPresence ?? null;
   }
 
   // ================================================================
-  // Initialization — static entry point
+  // Initialization
   // ================================================================
 
-  /**
-   * Initialize the MeshWhisper SDK with the given configuration.
-   *
-   * ```ts
-   * const mw = await MeshWhisper.init({
-   *   namespace: "com.example.fitnessapp",
-   *   developerKey: "base64-encoded-public-key",
-   *   permissionModel: "mutual",
-   *   onMessage: (message) => { ... },
-   *   onPresence: (peer, status) => { ... },
-   *   config: {
-   *     relayWillingness: "auto",
-   *     chaffRate: "normal",
-   *     storeTTL: 72,
-   *     clusterEnabled: true,
-   *   },
-   * });
-   * ```
-   */
   static async init(config: MeshWhisperConfig): Promise<MeshWhisper> {
     if (MeshWhisper._instance) {
       await MeshWhisper._instance.shutdown();
     }
 
-    // ---- Environment detection ----
     const isBrowser =
       typeof window !== 'undefined' && typeof indexedDB !== 'undefined';
 
-    // ---- Storage ----
+    // Storage
     let storage: StorageBackend | null = config.storage ?? null;
     if (!storage && isBrowser) {
       const { IDBStorage } = await import('../persistence/idb-storage.js');
       storage = new IDBStorage(config.namespace);
     }
 
-    // ---- Identity ----
-    // Loaded from storage so the peer ID stays stable across page reloads /
-    // process restarts. Falls back to a fresh ephemeral identity when storage
-    // is unavailable (development / anonymous use).
+    // Identity
     let identity: LocalIdentity;
     if (storage) {
       const savedKey = await storage.get('identity');
       if (savedKey) {
-        identity = LocalIdentity.fromPrivateKey(
-          hexToUint8Array(savedKey),
-        );
+        identity = LocalIdentity.fromPrivateKey(hexToUint8Array(savedKey));
       } else {
         identity = LocalIdentity.create();
         await storage.set('identity', uint8ArrayToHex(identity.getEdPrivateKey()));
@@ -446,34 +351,27 @@ export class MeshWhisper {
       identity = LocalIdentity.create();
     }
 
-    // ---- Relay URL ----
+    // Relay URL
     const nodeConfig = config.node ?? 'mesh';
     const nodeUrls = Array.isArray(nodeConfig) ? nodeConfig : [nodeConfig];
     const primaryNodeUrl = nodeUrls[0];
 
-    // ---- Transports (platform-appropriate) ----
+    // Transports
     let wsTransport: MWTransport;
     let localTransport: MWTransport;
     let nodeTransport: MWTransport;
 
-    // Declare instance early so the transport closures can capture it by
-    // reference. The getDestHashes callback is only ever invoked after
-    // instance.start() is awaited below, so the assignment is safe.
     let instance!: MeshWhisper;
     const getDestHashes = (): string[] => instance.getCurrentDestHashes();
-
     const onNodeStatus = (status: 'connected' | 'disconnected'): void => {
       instance.nodeConnected = status === 'connected';
       config.onConnectionStatus?.(status);
       if (status === 'connected') {
-        // Flush any messages that were queued while offline
-        instance.flushOutboundQueue().catch(() => { /* best-effort */ });
+        instance.flushOutboundQueue().catch(() => {});
       }
     };
 
     if (isBrowser) {
-      // In a browser/PWA: relay via BrowserTransport, stub out Node.js-only
-      // transports (WebSocketTransport for P2P, LocalTransport for LAN).
       const [{ NoOpTransport }, { BrowserTransport }] = await Promise.all([
         import('../transport/noop/index.js'),
         import('../transport/browser/index.js'),
@@ -482,7 +380,6 @@ export class MeshWhisper {
       localTransport = new NoOpTransport('local_net');
       nodeTransport = new BrowserTransport(primaryNodeUrl, getDestHashes, config.push, onNodeStatus);
     } else {
-      // In Node.js: full transport stack.
       const [{ WebSocketTransport }, { LocalTransport }, { NodeTransport }] =
         await Promise.all([
           import('../transport/websocket/index.js'),
@@ -495,27 +392,15 @@ export class MeshWhisper {
       nodeTransport = new NodeTransport(primaryNodeUrl, getDestHashes, config.push, onNodeStatus);
     }
 
-    instance = new MeshWhisper(
-      config,
-      identity,
-      storage,
-      wsTransport,
-      localTransport,
-      nodeTransport,
-    );
+    instance = new MeshWhisper(config, identity, storage, wsTransport, localTransport, nodeTransport);
     MeshWhisper._instance = instance;
     await instance.start();
     return instance;
   }
 
-  /**
-   * Returns the active MeshWhisper instance, or throws if not initialized.
-   */
   static get instance(): MeshWhisper {
     if (!MeshWhisper._instance) {
-      throw new Error(
-        'MeshWhisper has not been initialized. Call MeshWhisper.init() first.',
-      );
+      throw new Error('MeshWhisper has not been initialized. Call MeshWhisper.init() first.');
     }
     return MeshWhisper._instance;
   }
@@ -528,54 +413,21 @@ export class MeshWhisper {
     if (this.running) return;
     this.running = true;
 
-    // --- Restore persisted state ---
     if (this.storage) {
       await this.loadPersistedState();
-
-      // If we have contacts but no sessions, the session state was lost
-      // (storage wipe, new device with same identity key). Re-initiate X3DH
-      // with every contact we have a saved prekey bundle for.
-      if (this.sessions.size === 0 && this.permissionManager.getContacts().length > 0) {
-        this.reinitiateSessionsOnStartup().catch(() => {});
+      const contacts = this.permissionManager.getContacts();
+      const hasSessions = contacts.some(id => this.sessionManager.hasSession(id));
+      if (contacts.length > 0 && !hasSessions) {
+        this.sessionManager.reinitiateSessionsOnStartup(contacts).catch(() => {});
       }
     }
 
-    // Wire up the unified receive handler across all transports
-    this.negotiator.onReceive(
-      (packet: Packet, source: string, bearer: BearerType) => {
-        this.handleIncomingPacket(packet, source, bearer);
-      },
-    );
+    this.negotiator.onReceive((packet, source, bearer) => {
+      this.handleIncomingPacket(packet, source, bearer);
+    });
 
-    // Generate (or restore) signed pre-key pair. The private key must survive
-    // restarts so incoming X3DH handshakes can be completed with the same key
-    // that was published in the pre-key bundle / contact QR.
-    const edKeyPair = {
-      publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity.getEdPrivateKey(),
-    };
-    if (this.storage) {
-      const savedSpk = await this.storage.get('signed_pre_key');
-      if (savedSpk) {
-        const [pubHex, privHex] = savedSpk.split(':');
-        this.signedPreKeyPair = {
-          publicKey: hexToUint8Array(pubHex!),
-          privateKey: hexToUint8Array(privHex!),
-        };
-      } else {
-        const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
-        this.signedPreKeyPair = signedPreKeyPair;
-        await this.storage.set(
-          'signed_pre_key',
-          `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
-        );
-      }
-    } else {
-      const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
-      this.signedPreKeyPair = signedPreKeyPair;
-    }
+    await this.sessionManager.initSignedPreKey();
 
-    // Start transports (best-effort; some may not be available)
     const startResults = await Promise.allSettled([
       this.wsTransport.start(),
       this.localTransport.start(),
@@ -583,31 +435,24 @@ export class MeshWhisper {
       this.nodeTransport?.start() ?? Promise.resolve(),
     ]);
 
-    // Emit transport availability events (node transport doesn't map to a distinct bearer type)
     const transportTypes: BearerType[] = ['internet', 'local_net', 'platform_p2p', 'internet'];
     for (let i = 0; i < startResults.length; i++) {
-      const available = startResults[i].status === 'fulfilled';
+      const available = startResults[i]!.status === 'fulfilled';
       for (const handler of this.transportChangedHandlers) {
-        try {
-          handler({ type: transportTypes[i], available });
-        } catch {
-          // Swallow handler errors
-        }
+        try { handler({ type: transportTypes[i]!, available }); } catch { /* swallow */ }
       }
     }
 
-    // Start chaff generator — wire output into the negotiator
+    const bundle = this.sessionManager.getOrCreatePreKeyBundle();
+    this.sessionManager.publishPreKeyBundle(bundle).catch(() => {});
+
     this.chaffGenerator.onChaffGenerated((packet: Packet) => {
-      this.negotiator.broadcast(packet).catch(() => {
-        // Best effort for chaff
-      });
+      this.negotiator.broadcast(packet).catch(() => {});
     });
     this.chaffGenerator.start();
 
-    // Start relay store pruning
     this.relayStore.startPruneInterval();
 
-    // Start device cluster
     if (this.cluster) {
       const localDevice: ClusterDevice = {
         deviceId: this.getLocalPeerId(),
@@ -620,7 +465,6 @@ export class MeshWhisper {
       this.cluster.start();
     }
 
-    // Rotate ephemeral sender ID every 10 minutes
     this.ephemeralRotationTimer = setInterval(() => {
       this.identity.rotateEphemeralId();
     }, 10 * 60 * 1000);
@@ -629,45 +473,30 @@ export class MeshWhisper {
     }
   }
 
-  /**
-   * Shut down the SDK, stopping all transports, timers, and subsystems.
-   * After calling `shutdown()`, you must call `MeshWhisper.init()` again
-   * to resume operation.
-   */
   async shutdown(): Promise<void> {
     if (!this.running) return;
     this.running = false;
 
-    // Persist state before stopping (sessions are also saved incrementally,
-    // but contacts and peers are only saved here and on mutations)
     if (this.storage) {
       await this.persistContacts();
       await this.persistPeers();
-      await this.persistSeenIds();
+      await this.messageHandler.persistSeenIds();
     }
 
-    // Stop chaff
     this.chaffGenerator.stop();
-
-    // Stop relay pruning
     this.relayStore.stopPruneInterval();
+    if (this.cluster) this.cluster.stop();
 
-    // Stop cluster
-    if (this.cluster) {
-      this.cluster.stop();
-    }
-
-    // Stop ephemeral rotation
     if (this.ephemeralRotationTimer) {
       clearInterval(this.ephemeralRotationTimer);
       this.ephemeralRotationTimer = null;
     }
 
-    // Stop transports
     await Promise.allSettled([
       this.wsTransport.stop(),
       this.localTransport.stop(),
       this.p2pTransport.stop(),
+      this.nodeTransport?.stop() ?? Promise.resolve(),
     ]);
 
     MeshWhisper._instance = null;
@@ -677,59 +506,28 @@ export class MeshWhisper {
   // Public API — Messaging
   // ================================================================
 
-  /**
-   * Send an encrypted message to a recipient.
-   *
-   * If no session exists with the recipient, an X3DH handshake is
-   * automatically initiated. Messages are compressed, encrypted via
-   * the Double Ratchet, assembled into a packet, and routed through
-   * the best available transport.
-   *
-   * ```ts
-   * await MeshWhisper.send(recipientId, payload, {
-   *   urgency: "normal",
-   *   expiry: 3600,
-   * });
-   * ```
-   */
-  static async send(
-    recipientId: string,
-    payload: Uint8Array,
-    options?: SendOptions,
-  ): Promise<void> {
+  static async send(recipientId: string, payload: Uint8Array, options?: SendOptions): Promise<void> {
     return MeshWhisper.instance.sendMessage(recipientId, payload, options);
   }
 
-  async sendMessage(
-    recipientId: string,
-    payload: Uint8Array,
-    options?: SendOptions,
-  ): Promise<void> {
+  async sendMessage(recipientId: string, payload: Uint8Array, options?: SendOptions): Promise<void> {
     this.assertRunning();
 
-    // Queue the message if the Node connection is not yet up
     if (!this.nodeConnected) {
       this.outboundQueue.push({ recipientId, payload: payload.slice(), options });
       return;
     }
 
-    // Check permissions
     const canSend = await this.permissionManager.canSendTo(recipientId);
-    if (!canSend) {
-      throw new Error(`Permission denied: cannot send to ${recipientId}`);
-    }
+    if (!canSend) throw new Error(`Permission denied: cannot send to ${recipientId}`);
 
-    // Ensure we have a ratchet session with this peer
-    await this.ensureSession(recipientId);
+    await this.sessionManager.ensureSession(recipientId);
 
-    const session = this.sessions.get(recipientId);
-    if (!session) {
-      throw new Error(`Failed to establish session with ${recipientId}`);
-    }
+    const session = this.sessionManager.getSession(recipientId);
+    if (!session) throw new Error(`Failed to establish session with ${recipientId}`);
 
-    // Build message envelope
     const messageId = generateMessageId();
-    const envelope: MessageEnvelope = {
+    const envelope = {
       id: messageId,
       senderId: this.getLocalPeerId(),
       recipientId,
@@ -739,37 +537,29 @@ export class MeshWhisper {
       expiry: options?.expiry,
     };
 
-    // Serialize, compress, encrypt
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));
     const compressed = compressPayload(envelopeBytes);
     const { state: newState, header, ciphertext } = ratchetEncrypt(session, compressed);
-    this.sessions.set(recipientId, newState);
+    this.sessionManager.setSession(recipientId, newState);
 
-    // Embed ratchet header into the ciphertext for the receiver
     const headerBytes = serializeRatchetHeader(header);
     const fullPayload = concat(headerBytes, ciphertext);
 
-    // Build packet
     const recipientPublicKey = this.peerCache.getPeerPublicKey(recipientId);
-    if (!recipientPublicKey) {
-      throw new Error(`No public key for recipient ${recipientId}`);
-    }
+    if (!recipientPublicKey) throw new Error(`No public key for recipient ${recipientId}`);
+
     const destHash = deriveDestHash(recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const packet = createDataPacket(destHash, senderEphId, fullPayload);
 
-    // Camouflage with chaff
     const burst = this.chaffGenerator.camouflageRealMessage(packet);
-
-    // Route and send each packet in the burst
     for (const p of burst) {
       await this.routeAndSend(p, recipientId);
     }
 
-    // Persist the outbound message (skip internal control messages)
     const isControl = isControlPayload(payload);
     if (!isControl) {
-      await this.saveMessage({
+      await this.messageHandler.saveMessage({
         id: messageId,
         conversationId: recipientId,
         senderId: this.getLocalPeerId(),
@@ -786,39 +576,16 @@ export class MeshWhisper {
   // Public API — Media
   // ================================================================
 
-  /**
-   * Send media to a recipient using the two-part flow:
-   *  1. Encrypt locally with a random AES-256-GCM key.
-   *  2. Upload the ciphertext to the Node (or a custom handler).
-   *  3. Send the URL + key through the normal encrypted message channel.
-   *
-   * The Node never receives the decryption key.
-   *
-   * ```ts
-   * await MeshWhisper.sendMedia(recipientId, imageBytes, { mimeType: 'image/jpeg' });
-   * ```
-   */
-  static async sendMedia(
-    recipientId: string,
-    data: Uint8Array,
-    options?: MediaSendOptions,
-  ): Promise<void> {
+  static async sendMedia(recipientId: string, data: Uint8Array, options?: MediaSendOptions): Promise<void> {
     return MeshWhisper.instance.sendMediaMessage(recipientId, data, options);
   }
 
-  async sendMediaMessage(
-    recipientId: string,
-    data: Uint8Array,
-    options?: MediaSendOptions,
-  ): Promise<void> {
+  async sendMediaMessage(recipientId: string, data: Uint8Array, options?: MediaSendOptions): Promise<void> {
     this.assertRunning();
-
-    // 1. Encrypt the media locally
     const mediaKey = randomBytes(32);
     const { ciphertext, nonce, tag } = encrypt(data, mediaKey);
     const encryptedBlob = concat(nonce, tag, ciphertext);
 
-    // 2. Upload — use custom handler if provided, else POST to Node
     let url: string;
     if (options?.upload) {
       url = await options.upload(encryptedBlob);
@@ -826,26 +593,15 @@ export class MeshWhisper {
       url = await this.uploadMediaToNode(encryptedBlob);
     }
 
-    // 3. Send pointer message through normal encrypted channel
     const mediaMsg: MediaMessage = {
       url,
       key: uint8ArrayToBase64(mediaKey),
       ...(options?.mimeType ? { mimeType: options.mimeType } : {}),
     };
-    const pointer = new TextEncoder().encode(
-      JSON.stringify({ __mw_media: true, ...mediaMsg }),
-    );
+    const pointer = new TextEncoder().encode(JSON.stringify({ __mw_media: true, ...mediaMsg }));
     await this.sendMessage(recipientId, pointer, options);
   }
 
-  /**
-   * Download and decrypt a media message received via `onMessage`.
-   * Detects messages produced by `sendMedia` automatically.
-   *
-   * ```ts
-   * const bytes = await MeshWhisper.downloadMedia(message);
-   * ```
-   */
   static async downloadMedia(message: Message): Promise<Uint8Array | null> {
     return MeshWhisper.instance.downloadMediaMessage(message);
   }
@@ -861,13 +617,10 @@ export class MeshWhisper {
     if (!parsed.__mw_media || !parsed.url || !parsed.key) return null;
 
     const mediaKey = base64ToUint8Array(parsed.key);
-
-    // Fetch encrypted blob
     const response = await fetch(parsed.url);
     if (!response.ok) throw new Error(`Media fetch failed: ${response.status}`);
     const blob = new Uint8Array(await response.arrayBuffer());
 
-    // Unpack nonce (12) + tag (16) + ciphertext
     const nonce = blob.slice(0, 12);
     const tag = blob.slice(12, 28);
     const ciphertext = blob.slice(28);
@@ -877,20 +630,16 @@ export class MeshWhisper {
   private async uploadMediaToNode(encryptedBlob: Uint8Array): Promise<string> {
     const nodeConfig = this.config.node ?? 'mesh';
     const nodeUrl = Array.isArray(nodeConfig) ? nodeConfig[0] : nodeConfig;
-
-    // Convert WebSocket URL to HTTP URL
     const httpUrl = nodeUrl === 'mesh'
       ? 'https://relay.meshwhisper.io/media'
-      : nodeUrl.replace(/^wss?:\/\//, (m) => m === 'wss://' ? 'https://' : 'http://') + '/media';
+      : nodeUrl!.replace(/^wss?:\/\//, (m) => m === 'wss://' ? 'https://' : 'http://') + '/media';
 
     const response = await fetch(httpUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: encryptedBlob.buffer as ArrayBuffer,
     });
-    if (!response.ok) {
-      throw new Error(`Media upload failed: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Media upload failed: ${response.status}`);
     const json = await response.json() as { url?: string };
     if (!json.url) throw new Error('Media upload: Node returned no URL');
     return json.url;
@@ -900,66 +649,35 @@ export class MeshWhisper {
   // Public API — Groups
   // ================================================================
 
-  /**
-   * Create a new group.
-   *
-   * ```ts
-   * const group = MeshWhisper.createGroup({
-   *   name: "Team Chat",
-   *   members: [id1, id2, id3],
-   *   permissionModel: "open",
-   * });
-   * group.send(payload);
-   * ```
-   */
   static createGroup(options: CreateGroupOptions): GroupHandle {
     return MeshWhisper.instance.createGroupInstance(options);
   }
 
   createGroupInstance(options: CreateGroupOptions): GroupHandle {
     this.assertRunning();
-
-    const group = this.groupManager.createGroup(
-      options.name,
-      options.members,
-      options.permissionModel ?? 'open',
-    );
-
+    const group = this.groupManager.createGroup(options.name, options.members, options.permissionModel ?? 'open');
     return new GroupHandle(group, this);
   }
 
-  /**
-   * Retrieve a group handle by ID.
-   * Returns null if the group is not found.
-   */
   getGroup(groupId: string): GroupHandle | null {
     const group = this.groupManager.getGroup(groupId);
     if (!group) return null;
     return new GroupHandle(group, this);
   }
 
-  /**
-   * List all groups the local peer is participating in.
-   */
   getGroups(): GroupHandle[] {
     return this.groupManager.getGroups().map(g => new GroupHandle(g, this));
   }
 
-  /**
-   * Send a message to all members of a group.
-   * @internal — use GroupHandle.send() instead.
-   */
   async sendToGroup(groupId: string, payload: Uint8Array): Promise<void> {
     this.assertRunning();
-
     const { ciphertext, senderId } = this.groupManager.encryptForGroup(groupId, payload);
     const targets = this.groupManager.routeGroupMessage(groupId, ciphertext, senderId);
 
-    const sendPromises = targets.map(async (target) => {
+    await Promise.allSettled(targets.map(async (target) => {
       try {
         const recipientPublicKey = this.peerCache.getPeerPublicKey(target.peerId);
         if (!recipientPublicKey) return;
-
         const destHash = deriveDestHash(recipientPublicKey, getCurrentEpochHour());
         const senderEphId = this.identity.generateEphemeralId();
         const packet = createDataPacket(destHash, senderEphId, target.data);
@@ -967,31 +685,13 @@ export class MeshWhisper {
       } catch {
         // Best effort per member
       }
-    });
-
-    await Promise.allSettled(sendPromises);
+    }));
   }
 
   // ================================================================
-  // Public API — Contacts & Identity
+  // Public API — Identity backup / restore
   // ================================================================
 
-  // ================================================================
-  // Identity backup / restore
-  // ================================================================
-
-  /**
-   * Exports the local identity as an encrypted backup string.
-   *
-   * The private key is encrypted with AES-256-GCM using a key derived from
-   * the passphrase via PBKDF2 (100,000 iterations, SHA-256). The result is
-   * a base64-encoded JSON string safe to save to a file or display as a QR code.
-   *
-   * ```ts
-   * const backup = await MeshWhisper.exportIdentity('my-strong-passphrase');
-   * // save backup string to a file
-   * ```
-   */
   static async exportIdentity(passphrase: string): Promise<string> {
     return MeshWhisper.instance.exportIdentityInstance(passphrase);
   }
@@ -1003,11 +703,7 @@ export class MeshWhisper {
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
 
     const baseKey = await globalThis.crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(passphrase),
-      'PBKDF2',
-      false,
-      ['deriveKey'],
+      'raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey'],
     );
     const aesKey = await globalThis.crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 100_000, hash: 'SHA-256' },
@@ -1020,28 +716,14 @@ export class MeshWhisper {
       await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, privateKey.buffer as ArrayBuffer),
     );
 
-    const payload = JSON.stringify({
+    return btoa(JSON.stringify({
       v: 1,
       salt: uint8ArrayToHex(salt),
       iv: uint8ArrayToHex(iv),
       ciphertext: uint8ArrayToHex(ciphertext),
-    });
-    return btoa(payload);
+    }));
   }
 
-  /**
-   * Imports an identity from a backup string created by `exportIdentity`.
-   * Decrypts with the passphrase and stores the private key in the current
-   * storage backend. Takes effect on the next `MeshWhisper.init()` call.
-   *
-   * ```ts
-   * await MeshWhisper.importIdentity(backupString, 'my-strong-passphrase');
-   * // then re-init to use the restored identity
-   * await MeshWhisper.init({ ... });
-   * ```
-   *
-   * Throws if the passphrase is wrong or the backup is corrupt.
-   */
   static async importIdentity(data: string, passphrase: string): Promise<void> {
     let parsed: { v: number; salt: string; iv: string; ciphertext: string };
     try {
@@ -1056,11 +738,7 @@ export class MeshWhisper {
     const ciphertext = hexToUint8Array(parsed.ciphertext);
 
     const baseKey = await globalThis.crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(passphrase),
-      'PBKDF2',
-      false,
-      ['deriveKey'],
+      'raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey'],
     );
     const aesKey = await globalThis.crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 100_000, hash: 'SHA-256' },
@@ -1073,67 +751,41 @@ export class MeshWhisper {
     let privateKeyBytes: Uint8Array;
     try {
       privateKeyBytes = new Uint8Array(
-        await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, aesKey, ciphertext.buffer as ArrayBuffer),
+        await globalThis.crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, aesKey, ciphertext.buffer as ArrayBuffer,
+        ),
       );
     } catch {
       throw new Error('importIdentity: wrong passphrase or corrupt backup');
     }
 
-    // Validate it's a real Ed25519 key (32 bytes)
-    if (privateKeyBytes.length !== 32) {
-      throw new Error('importIdentity: decrypted key has unexpected length');
-    }
+    if (privateKeyBytes.length !== 32) throw new Error('importIdentity: decrypted key has unexpected length');
 
-    // Persist to storage so the next init() picks it up
     const storage = MeshWhisper._instance?.storage;
-    if (storage) {
-      await storage.set('identity', uint8ArrayToHex(privateKeyBytes));
-    }
+    if (storage) await storage.set('identity', uint8ArrayToHex(privateKeyBytes));
   }
 
-  /**
-   * Generate a QR code payload for first contact. Contains the
-   * local peer's identity public key and pre-key bundle so a
-   * scanner can initiate an X3DH handshake.
-   *
-   * Returns a base64-encoded string suitable for embedding in a QR code.
-   */
+  // ================================================================
+  // Public API — Contacts
+  // ================================================================
+
   static generateContactQR(): string {
     return MeshWhisper.instance.generateContactQRInstance();
   }
 
   generateContactQRInstance(): string {
     this.assertRunning();
+    const bundle = this.sessionManager.getOrCreatePreKeyBundle();
+    this.sessionManager.publishPreKeyBundle(bundle).catch(() => {});
 
-    const edKeyPair = {
-      publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity.getEdPrivateKey(),
-    };
-    const { bundle, signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
-    this.signedPreKeyPair = signedPreKeyPair;
-    // Persist so the private key survives restarts — incoming X3DH handshakes
-    // that arrive after a reconnect can still be completed.
-    if (this.storage) {
-      this.storage.set(
-        'signed_pre_key',
-        `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
-      ).catch(() => {});
-    }
     const serialized = serializePreKeyBundle(bundle);
-
-    // Encode as: peerId-length(2) + peerId-bytes + bundle-bytes
     const peerIdBytes = new TextEncoder().encode(this.getLocalPeerId());
     const lenBuf = new Uint8Array(2);
     new DataView(lenBuf.buffer).setUint16(0, peerIdBytes.length, false);
-
     const qrPayload = concat(lenBuf, peerIdBytes, serialized);
     return uint8ArrayToBase64(qrPayload);
   }
 
-  /**
-   * Accept a contact from scanned QR data. Parses the peer's
-   * pre-key bundle and initiates an X3DH handshake.
-   */
   static async acceptContact(scannedQRData: string): Promise<void> {
     return MeshWhisper.instance.acceptContactInstance(scannedQRData);
   }
@@ -1149,68 +801,40 @@ export class MeshWhisper {
     const bundleBytes = raw.slice(2 + peerIdLen);
     const bundle = deserializePreKeyBundle(bundleBytes);
 
-    // Store and persist the peer's prekey bundle
-    this.peerPreKeyBundles.set(peerId, bundle);
-    this.persistPreKeyBundle(peerId, bundle).catch(() => {});
+    this.sessionManager.setBundle(peerId, bundle);
 
-    // For mutual model, register the contact request
     if (this.config.permissionModel === 'mutual') {
       this.permissionManager.confirmMutualContact(peerId);
     } else {
       this.permissionManager.addContact(peerId);
     }
 
-    // Cache the peer's public key (convert Ed25519 identity key to X25519)
-    // The bundle identity key is Ed25519; the signed pre-key is X25519.
-    // For dest_hash we need the X25519 key derived from the identity key.
-    // Store the signed pre-key as the peer's X25519 public key for routing.
-    this.peerCache.addPeer(peerId, bundle.signedPreKey);
-
-    // Initiate X3DH session
-    await this.initiateHandshake(peerId, bundle);
+    this.peerCache.addPeer(peerId, edwardsToMontgomeryPub(bundle.identityKey));
+    await this.sessionManager.initiateHandshake(peerId, bundle);
   }
 
-  /**
-   * Introduce two contacts to each other.
-   * Both peers must already be contacts of the local peer.
-   */
   static async introduceContacts(peerA: string, peerB: string): Promise<void> {
     return MeshWhisper.instance.introduceContactsInstance(peerA, peerB);
   }
 
   async introduceContactsInstance(peerA: string, peerB: string): Promise<void> {
     this.assertRunning();
+    if (!this.permissionManager.isContact(peerA)) throw new Error(`${peerA} is not a contact`);
+    if (!this.permissionManager.isContact(peerB)) throw new Error(`${peerB} is not a contact`);
 
-    if (!this.permissionManager.isContact(peerA)) {
-      throw new Error(`${peerA} is not a contact`);
-    }
-    if (!this.permissionManager.isContact(peerB)) {
-      throw new Error(`${peerB} is not a contact`);
-    }
-
-    // Send each peer the other's pre-key bundle so they can establish
-    // a session directly.
     const pubKeyA = this.peerCache.getPeerPublicKey(peerA);
     const pubKeyB = this.peerCache.getPeerPublicKey(peerB);
 
     if (pubKeyA && pubKeyB) {
-      // Craft introduction messages containing the peer's public key
-      const introForA = new TextEncoder().encode(JSON.stringify({
-        type: 'introduction',
-        introducedPeerId: peerB,
-        introducedPublicKey: Array.from(pubKeyB),
-        introducedBy: this.getLocalPeerId(),
-      }));
-      const introForB = new TextEncoder().encode(JSON.stringify({
-        type: 'introduction',
-        introducedPeerId: peerA,
-        introducedPublicKey: Array.from(pubKeyA),
-        introducedBy: this.getLocalPeerId(),
-      }));
-
       await Promise.allSettled([
-        this.sendMessage(peerA, introForA),
-        this.sendMessage(peerB, introForB),
+        this.sendMessage(peerA, new TextEncoder().encode(JSON.stringify({
+          type: 'introduction', introducedPeerId: peerB,
+          introducedPublicKey: Array.from(pubKeyB), introducedBy: this.getLocalPeerId(),
+        }))),
+        this.sendMessage(peerB, new TextEncoder().encode(JSON.stringify({
+          type: 'introduction', introducedPeerId: peerA,
+          introducedPublicKey: Array.from(pubKeyA), introducedBy: this.getLocalPeerId(),
+        }))),
       ]);
     }
   }
@@ -1219,9 +843,6 @@ export class MeshWhisper {
   // Public API — Presence
   // ================================================================
 
-  /**
-   * Get the current presence status of a peer.
-   */
   static getPresence(peerId: string): PresenceStatus {
     return MeshWhisper.instance.getPresenceInstance(peerId);
   }
@@ -1229,7 +850,6 @@ export class MeshWhisper {
   getPresenceInstance(peerId: string): PresenceStatus {
     const record = this.presenceRecords.get(peerId);
     if (!record) return 'unknown';
-
     const elapsed = Date.now() - record.lastSeen;
     if (elapsed < 5 * 60 * 1000) return 'online';
     if (elapsed < 60 * 60 * 1000) return 'recently_seen';
@@ -1240,9 +860,6 @@ export class MeshWhisper {
   // Public API — Transport Events
   // ================================================================
 
-  /**
-   * Register a callback that fires when transport availability changes.
-   */
   static onTransportChanged(handler: (event: TransportChangedEvent) => void): void {
     MeshWhisper.instance.onTransportChangedInstance(handler);
   }
@@ -1251,63 +868,52 @@ export class MeshWhisper {
     this.transportChangedHandlers.add(handler);
   }
 
-  /**
-   * Unregister a transport-changed handler.
-   */
   offTransportChanged(handler: (event: TransportChangedEvent) => void): void {
     this.transportChangedHandlers.delete(handler);
+  }
+
+  // ================================================================
+  // Public API — Message History
+  // ================================================================
+
+  static async getMessages(peerId: string, options?: { limit?: number; before?: number }): Promise<StoredMessage[]> {
+    return MeshWhisper.instance.getMessagesInstance(peerId, options);
+  }
+
+  async getMessagesInstance(peerId: string, options?: { limit?: number; before?: number }): Promise<StoredMessage[]> {
+    return this.messageHandler.getMessages(peerId, options);
+  }
+
+  static async markRead(messageId: string, peerId: string): Promise<void> {
+    return MeshWhisper.instance.markReadInstance(messageId, peerId);
+  }
+
+  async markReadInstance(messageId: string, peerId: string): Promise<void> {
+    this.assertRunning();
+    await this.messageHandler.updateMessageStatus(messageId, peerId, 'read');
+    this.sendControl(peerId, { __mw_ctrl: 'read', messageId });
   }
 
   // ================================================================
   // Public API — Accessors
   // ================================================================
 
-  /**
-   * Returns the local peer's public identity string (hex-encoded X25519 public key).
-   */
   getLocalPeerId(): string {
     return uint8ArrayToHex(this.identity.getPublicKey());
   }
 
-  /**
-   * Returns the device's current and previous epoch-hour destination hashes
-   * as hex strings. Used by NodeTransport to register with the Node.
-   */
-  private getCurrentDestHashes(): string[] {
-    const xPub = this.identity.getPublicKey();
-    const hour = getCurrentEpochHour();
-    return [
-      uint8ArrayToHex(deriveDestHash(xPub, hour)),
-      uint8ArrayToHex(deriveDestHash(xPub, hour - 1)),
-    ];
-  }
-
-  /**
-   * Returns the local peer's X25519 public key bytes.
-   */
   getPublicKey(): Uint8Array {
     return this.identity.getPublicKey();
   }
 
-  /**
-   * Returns the namespace ID for this SDK instance.
-   */
   getNamespaceId(): Uint8Array {
     return this.namespaceManager.getNamespaceId();
   }
 
-  /**
-   * Whether the SDK is currently running.
-   */
   isRunning(): boolean {
     return this.running;
   }
 
-  /**
-   * Register a native P2P bridge (e.g., Apple Multipeer Connectivity
-   * or Google Nearby Connections). Call before `init()` for the bridge
-   * to be available at startup.
-   */
   static registerPlatformBridge(bridge: PlatformP2PBridge): void {
     registerPlatformBridge(bridge);
   }
@@ -1316,29 +922,18 @@ export class MeshWhisper {
   // Internal — Incoming Packet Handling
   // ================================================================
 
-  private handleIncomingPacket(
-    packet: Packet,
-    source: string,
-    bearer: BearerType,
-  ): void {
-    // Update presence for the source
-    this.updatePresence(source, 'online');
+  private handleIncomingPacket(packet: Packet, source: string, bearer: BearerType): void {
+    if (!this.running) return;
 
-    // Track reciprocity for relayed packets
+    this.updatePresence(source, 'online');
     this.reciprocityLedger.recordPeerRelayedForUs(source, packet.encryptedPayload.length);
 
-    // Drop chaff packets silently
-    if (packet.flags === PacketFlags.CHAFF) {
-      return;
-    }
+    if (packet.flags === PacketFlags.CHAFF) return;
 
-    // Check if the packet is destined for us
     const isForUs = this.identity.matchesDestHash(packet.destHash);
-
     if (isForUs) {
       this.processLocalPacket(packet, source);
     } else {
-      // Not for us — consider relaying
       this.maybeRelay(packet, source);
     }
   }
@@ -1346,169 +941,25 @@ export class MeshWhisper {
   private processLocalPacket(packet: Packet, source: string): void {
     switch (packet.flags) {
       case PacketFlags.HANDSHAKE:
-        this.handleHandshakePacket(packet, source);
+        this.sessionManager.handleHandshakePacket(packet.encryptedPayload);
         break;
-
       case PacketFlags.DATA:
-        this.handleDataPacket(packet, source);
+        this.messageHandler.handleDataPacket(packet);
         break;
-
       case PacketFlags.ACK:
-        // ACKs are currently handled implicitly by the ratchet
         break;
-
       case PacketFlags.ROUTE_REQUEST:
         this.handleRouteRequestPacket(packet, source);
         break;
-
       case PacketFlags.ROUTE_OFFER:
-        this.handleRouteOfferPacket(packet, source);
+        this.handleRouteOfferPacket(packet);
         break;
-
-      default:
-        // Unknown flag — drop silently
-        break;
-    }
-  }
-
-  private handleDataPacket(packet: Packet, source: string): void {
-    try {
-      const { header, ciphertextBody } = deserializeRatchetHeader(packet.encryptedPayload);
-
-      let decrypted: Uint8Array | null = null;
-      let matchedPeerId: string | null = null;
-      let newState: RatchetState | null = null;
-
-      for (const [peerId, session] of this.sessions) {
-        try {
-          const result = ratchetDecrypt(session, header, ciphertextBody);
-          newState = result.state;
-          decrypted = result.plaintext;
-          matchedPeerId = peerId;
-          break;
-        } catch {
-          continue;
-        }
-      }
-
-      if (!decrypted || !matchedPeerId || !newState) return;
-
-      // Persist the advanced ratchet state immediately
-      this.sessions.set(matchedPeerId, newState);
-      this.persistSession(matchedPeerId, newState).catch(() => {});
-
-      // Decompress and parse envelope
-      const decompressed = decompressPayload(decrypted);
-      const envelope: MessageEnvelope = JSON.parse(new TextDecoder().decode(decompressed));
-
-      // --- Deduplication ---
-      if (this.seenMessageIds.has(envelope.id)) return;
-      this.seenMessageIds.set(envelope.id, envelope.timestamp);
-      this.pruneSeenIds();
-
-      // --- Internal control messages (delivery receipts etc.) ---
-      const payloadBytes = new Uint8Array(envelope.payload);
-      const ctrl = tryParseControl(payloadBytes);
-      if (ctrl) {
-        this.handleControlMessage(ctrl, matchedPeerId);
-        return;
-      }
-
-      // --- Expiry check ---
-      if (envelope.expiry) {
-        if (Date.now() > envelope.timestamp + envelope.expiry * 1000) return;
-      }
-
-      const message: Message = {
-        id: envelope.id,
-        senderId: envelope.senderId,
-        recipientId: envelope.recipientId,
-        payload: payloadBytes,
-        timestamp: envelope.timestamp,
-        urgency: envelope.urgency,
-        expiry: envelope.expiry,
-      };
-
-      // --- Persist inbound message ---
-      this.saveMessage({
-        id: message.id,
-        conversationId: matchedPeerId,
-        senderId: message.senderId,
-        recipientId: message.recipientId,
-        payload: Array.from(payloadBytes),
-        timestamp: message.timestamp,
-        direction: 'inbound',
-        status: 'delivered',
-      }).catch(() => {});
-
-      // --- Surface to app ---
-      if (this.onMessageHandler) {
-        this.onMessageHandler(message);
-      }
-
-      // --- Send DELIVERED receipt ---
-      this.sendControl(matchedPeerId, { __mw_ctrl: 'delivered', messageId: message.id });
-
-      // --- Cluster sync ---
-      if (this.cluster) {
-        this.cluster.syncManager.queueForSync({
-          messageId: message.id,
-          encryptedPayload: packet.encryptedPayload,
-          receivedAt: Date.now(),
-          receivedBy: this.getLocalPeerId(),
-          syncedTo: new Set([this.getLocalPeerId()]),
-        });
-      }
-    } catch {
-      // Malformed packet — drop silently
-    }
-  }
-
-  private handleHandshakePacket(packet: Packet, source: string): void {
-    try {
-      const envelopeStr = new TextDecoder().decode(packet.encryptedPayload);
-      const envelope: HandshakeEnvelope = JSON.parse(envelopeStr);
-
-      switch (envelope.type) {
-        case 'prekey_bundle': {
-          if (envelope.preKeyBundle) {
-            const bundleBytes = new Uint8Array(envelope.preKeyBundle);
-            const bundle = deserializePreKeyBundle(bundleBytes);
-            this.peerPreKeyBundles.set(envelope.senderId, bundle);
-            this.peerCache.addPeer(envelope.senderId, bundle.signedPreKey);
-            this.persistPreKeyBundle(envelope.senderId, bundle).catch(() => {});
-          }
-          break;
-        }
-
-        case 'x3dh_init': {
-          // Responder side: complete the X3DH exchange
-          if (envelope.ephemeralPublicKey && envelope.identityKey) {
-            this.completeIncomingHandshake(envelope);
-          }
-          break;
-        }
-
-        case 'x3dh_response': {
-          // Resolve any pending handshake
-          const pending = this.pendingHandshakes.get(envelope.senderId);
-          if (pending) {
-            pending.resolve();
-            this.pendingHandshakes.delete(envelope.senderId);
-          }
-          break;
-        }
-      }
-    } catch {
-      // Malformed handshake — drop
     }
   }
 
   private handleRouteRequestPacket(packet: Packet, source: string): void {
-    // Attempt to parse the route request from the payload
     try {
-      const requestStr = new TextDecoder().decode(packet.encryptedPayload);
-      const request = JSON.parse(requestStr);
+      const request = JSON.parse(new TextDecoder().decode(packet.encryptedPayload));
       const offer = this.router.handleRouteRequest(
         {
           destHash: new Uint8Array(request.destHash),
@@ -1520,33 +971,27 @@ export class MeshWhisper {
       );
 
       if (offer) {
-        // Send route offer back to the requesting peer
         const offerPayload = new TextEncoder().encode(JSON.stringify(offer));
-        const destHash = packet.destHash; // Reply to the requester's hash
         const senderEphId = this.identity.generateEphemeralId();
         const offerPacket: Packet = {
           version: PROTOCOL_VERSION,
           flags: PacketFlags.ROUTE_OFFER,
-          destHash,
+          destHash: packet.destHash,
           senderEphemeralId: senderEphId,
           ttl: packet.ttl,
           payloadLength: offerPayload.length,
           encryptedPayload: offerPayload,
         };
-
-        this.negotiator.send(offerPacket, source).catch(() => {
-          // Best effort
-        });
+        this.negotiator.send(offerPacket, source).catch(() => {});
       }
     } catch {
-      // Malformed route request — drop
+      // Malformed — drop
     }
   }
 
-  private handleRouteOfferPacket(packet: Packet, _source: string): void {
+  private handleRouteOfferPacket(packet: Packet): void {
     try {
-      const offerStr = new TextDecoder().decode(packet.encryptedPayload);
-      const offer = JSON.parse(offerStr);
+      const offer = JSON.parse(new TextDecoder().decode(packet.encryptedPayload));
       this.router.handleRouteOffer({
         requestId: new Uint8Array(offer.requestId),
         hopCount: offer.hopCount,
@@ -1554,7 +999,7 @@ export class MeshWhisper {
         offeredBy: offer.offeredBy,
       });
     } catch {
-      // Malformed route offer — drop
+      // Malformed — drop
     }
   }
 
@@ -1563,163 +1008,20 @@ export class MeshWhisper {
   // ================================================================
 
   private maybeRelay(packet: Packet, source: string): void {
-    // Check if the router thinks we should relay
-    if (!this.router.shouldRelay(packet)) {
-      return;
-    }
+    if (!this.router.shouldRelay(packet)) return;
+    if (!this.reciprocityLedger.shouldRelay(source)) return;
 
-    // Check reciprocity: should we relay for this peer?
-    if (!this.reciprocityLedger.shouldRelay(source)) {
-      return;
-    }
-
-    // Decrement TTL and forward
     const forwarded = this.router.decrementTTL(packet);
-
-    // Track reciprocity: we are relaying for this peer
     this.reciprocityLedger.recordRelayedForPeer(source, packet.encryptedPayload.length);
 
-    // Try to find a next hop
     const nextHop = this.router.getNextHop(packet.destHash);
     if (nextHop) {
       this.negotiator.send(forwarded, nextHop).catch(() => {
-        // If direct send fails, try store-and-forward
-        this.relayManager.storeForDelivery(
-          packet.destHash,
-          packet.encryptedPayload,
-          this.config.config?.storeTTL ?? 72,
-        );
+        this.relayManager.storeForDelivery(packet.destHash, packet.encryptedPayload, this.config.config?.storeTTL ?? 72);
       });
     } else {
-      // No route known — store for later delivery
-      this.relayManager.storeForDelivery(
-        packet.destHash,
-        packet.encryptedPayload,
-        this.config.config?.storeTTL ?? 72,
-      );
+      this.relayManager.storeForDelivery(packet.destHash, packet.encryptedPayload, this.config.config?.storeTTL ?? 72);
     }
-  }
-
-  // ================================================================
-  // Internal — Session Management (X3DH + Double Ratchet)
-  // ================================================================
-
-  private async ensureSession(recipientId: string): Promise<void> {
-    if (this.sessions.has(recipientId)) {
-      return;
-    }
-
-    // Check if we have a pre-key bundle for this peer
-    const bundle = this.peerPreKeyBundles.get(recipientId);
-    if (bundle) {
-      await this.initiateHandshake(recipientId, bundle);
-      return;
-    }
-
-    // No bundle available — request one via route discovery
-    throw new Error(
-      `No pre-key bundle for ${recipientId}. ` +
-      `Use acceptContact() or acceptContact(scannedQR) to establish first contact.`,
-    );
-  }
-
-  private async initiateHandshake(
-    peerId: string,
-    bundle: PreKeyBundle,
-  ): Promise<void> {
-    // Perform X3DH as the initiator
-    const aliceIdentity = {
-      publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity.getEdPrivateKey(),
-    };
-
-    const result = initiateKeyExchange(aliceIdentity, bundle);
-
-    // Initialize the Double Ratchet as sender
-    const ratchetState = initSender(result.sharedSecret, bundle.signedPreKey);
-    this.sessions.set(peerId, ratchetState);
-    this.persistSession(peerId, ratchetState).catch(() => {});
-
-    // Send handshake packet to the peer so they can complete their side
-    const handshakeEnvelope: HandshakeEnvelope = {
-      type: 'x3dh_init',
-      senderId: this.getLocalPeerId(),
-      ephemeralPublicKey: Array.from(result.ephemeralPublicKey),
-      identityKey: Array.from(this.identity.getEdPublicKey()),
-    };
-
-    const envelopeBytes = new TextEncoder().encode(JSON.stringify(handshakeEnvelope));
-    const recipientPublicKey = this.peerCache.getPeerPublicKey(peerId);
-    if (!recipientPublicKey) return;
-
-    const destHash = deriveDestHash(recipientPublicKey, getCurrentEpochHour());
-    const senderEphId = this.identity.generateEphemeralId();
-    const handshakePacket = createHandshakePacket(destHash, senderEphId, envelopeBytes);
-
-    await this.routeAndSend(handshakePacket, peerId);
-  }
-
-  private completeIncomingHandshake(envelope: HandshakeEnvelope): void {
-    if (!envelope.ephemeralPublicKey || !envelope.identityKey) return;
-
-    const aliceEphemeralKey = new Uint8Array(envelope.ephemeralPublicKey);
-    const aliceIdentityKey = new Uint8Array(envelope.identityKey);
-
-    // Use the stored signed pre-key pair. Falls back to the X25519 identity key
-    // pair only if no bundle has been generated yet (should not happen in practice
-    // since generatePreKeyBundle is called on start()).
-    const bobSignedPreKey = this.signedPreKeyPair ?? {
-      publicKey: this.identity.getPublicKey(),
-      privateKey: this.identity.getPrivateKey(),
-    };
-
-    const bobIdentity = {
-      publicKey: this.identity.getEdPublicKey(),
-      privateKey: this.identity.getEdPrivateKey(),
-    };
-
-    const sharedSecret = completeKeyExchange(
-      bobIdentity,
-      bobSignedPreKey,
-      null, // No one-time pre-key for now
-      aliceIdentityKey,
-      aliceEphemeralKey,
-    );
-
-    // Initialize the Double Ratchet as receiver
-    const ratchetState = initReceiver(sharedSecret, bobSignedPreKey);
-    this.sessions.set(envelope.senderId, ratchetState);
-    this.persistSession(envelope.senderId, ratchetState).catch(() => {});
-
-    // Cache and persist the peer's public key
-    this.peerCache.addPeer(envelope.senderId, new Uint8Array(envelope.identityKey));
-    this.storage?.set(
-      `peers/${envelope.senderId}`,
-      uint8ArrayToHex(new Uint8Array(envelope.identityKey)),
-    ).catch(() => {});
-
-    // Register the peer as a contact
-    this.permissionManager.addContact(envelope.senderId);
-    this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts()))
-      .catch(() => {});
-
-    // Send handshake response
-    const response: HandshakeEnvelope = {
-      type: 'x3dh_response',
-      senderId: this.getLocalPeerId(),
-    };
-
-    const responseBytes = new TextEncoder().encode(JSON.stringify(response));
-    const peerPublicKey = this.peerCache.getPeerPublicKey(envelope.senderId);
-    if (!peerPublicKey) return;
-
-    const destHash = deriveDestHash(peerPublicKey, getCurrentEpochHour());
-    const senderEphId = this.identity.generateEphemeralId();
-    const responsePacket = createHandshakePacket(destHash, senderEphId, responseBytes);
-
-    this.routeAndSend(responsePacket, envelope.senderId).catch(() => {
-      // Best effort
-    });
   }
 
   // ================================================================
@@ -1727,31 +1029,20 @@ export class MeshWhisper {
   // ================================================================
 
   private async routeAndSend(packet: Packet, recipientId: string): Promise<void> {
-    // Try direct send via the negotiator
     try {
       await this.negotiator.send(packet, recipientId);
       return;
-    } catch {
-      // Direct send failed — try routing
-    }
+    } catch { /* fall through to routing */ }
 
-    // Try next hop via the social graph router
     const nextHop = this.router.getNextHop(packet.destHash);
     if (nextHop) {
       try {
         await this.negotiator.send(packet, nextHop);
         return;
-      } catch {
-        // Next hop also failed
-      }
+      } catch { /* fall through to store-and-forward */ }
     }
 
-    // Fall back to store-and-forward
-    this.relayManager.storeForDelivery(
-      packet.destHash,
-      packet.encryptedPayload,
-      this.config.config?.storeTTL ?? 72,
-    );
+    this.relayManager.storeForDelivery(packet.destHash, packet.encryptedPayload, this.config.config?.storeTTL ?? 72);
   }
 
   // ================================================================
@@ -1763,93 +1054,47 @@ export class MeshWhisper {
     const previous = this.presenceRecords.get(peerId);
     const previousStatus = previous?.status ?? 'unknown';
 
-    this.presenceRecords.set(peerId, {
-      peerId,
-      status,
-      lastSeen: now,
-    });
+    this.presenceRecords.set(peerId, { peerId, status, lastSeen: now });
 
-    // Deliver any stored blobs for this peer coming online
     const peerPublicKey = this.peerCache.getPeerPublicKey(peerId);
     if (peerPublicKey) {
       const destHash = deriveDestHash(peerPublicKey, getCurrentEpochHour());
       const storedBlobs = this.relayManager.deliverStored(destHash);
       for (const blob of storedBlobs) {
-        // Re-inject stored blobs as incoming packets
         const storedPacket: Packet = {
           version: PROTOCOL_VERSION,
           flags: PacketFlags.DATA,
           destHash: blob.destHash,
-          senderEphemeralId: new Uint8Array(16), // Unknown sender eph ID
+          senderEphemeralId: new Uint8Array(16),
           ttl: 0,
           payloadLength: blob.encryptedPayload.length,
           encryptedPayload: blob.encryptedPayload,
         };
-
-        this.negotiator.send(storedPacket, peerId).catch(() => {
-          // Best effort
-        });
+        this.negotiator.send(storedPacket, peerId).catch(() => {});
       }
     }
 
-    // Notify the app if status changed
     if (status !== previousStatus && this.onPresenceHandler) {
       this.onPresenceHandler(peerId, status);
     }
   }
 
   // ================================================================
-  // Public API — Message History
+  // Internal — Contact establishment callback (from SessionManager)
   // ================================================================
 
-  /**
-   * Returns stored messages for a conversation, most recent last.
-   * Requires a `storage` backend in the config; returns [] without one.
-   *
-   * ```ts
-   * const messages = await MeshWhisper.getMessages(peerId, { limit: 50 });
-   * ```
-   */
-  static async getMessages(
-    peerId: string,
-    options?: { limit?: number; before?: number },
-  ): Promise<StoredMessage[]> {
-    return MeshWhisper.instance.getMessagesInstance(peerId, options);
+  private onContactEstablished(peerId: string): void {
+    this.permissionManager.addContact(peerId);
+    this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())).catch(() => {});
   }
 
-  async getMessagesInstance(
-    peerId: string,
-    options?: { limit?: number; before?: number },
-  ): Promise<StoredMessage[]> {
-    if (!this.storage) return [];
-    const raw = await this.storage.get(`messages/${peerId}`);
-    if (!raw) return [];
-    let messages: StoredMessage[] = JSON.parse(raw);
-    if (options?.before !== undefined) {
-      messages = messages.filter((m) => m.timestamp < options.before!);
-    }
-    if (options?.limit !== undefined) {
-      messages = messages.slice(-options.limit);
-    }
-    return messages;
-  }
+  // ================================================================
+  // Internal — Control messages
+  // ================================================================
 
-  /**
-   * Mark a received message as read and send a read receipt to the sender.
-   * Call this when the user views the conversation.
-   *
-   * ```ts
-   * await MeshWhisper.markRead(message.id, message.senderId);
-   * ```
-   */
-  static async markRead(messageId: string, peerId: string): Promise<void> {
-    return MeshWhisper.instance.markReadInstance(messageId, peerId);
-  }
-
-  async markReadInstance(messageId: string, peerId: string): Promise<void> {
-    this.assertRunning();
-    await this.updateMessageStatus(messageId, peerId, 'read');
-    this.sendControl(peerId, { __mw_ctrl: 'read', messageId });
+  private sendControl(peerId: string, payload: Record<string, unknown>): void {
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    this.sendMessage(peerId, bytes, { urgency: 'background' }).catch(() => {});
   }
 
   // ================================================================
@@ -1859,18 +1104,8 @@ export class MeshWhisper {
   private async loadPersistedState(): Promise<void> {
     if (!this.storage) return;
 
-    // Sessions
-    const sessionKeys = await this.storage.keys('sessions/');
-    for (const key of sessionKeys) {
-      const data = await this.storage.get(key);
-      if (!data) continue;
-      const peerId = key.replace(/^sessions\//, '');
-      try {
-        this.sessions.set(peerId, deserializeRatchetState(data));
-      } catch {
-        // Corrupted session — skip and let re-establishment handle it
-      }
-    }
+    await this.sessionManager.loadSessions();
+    await this.messageHandler.loadSeenIds();
 
     // Peer public keys
     const peerKeys = await this.storage.keys('peers/');
@@ -1881,64 +1116,11 @@ export class MeshWhisper {
       this.peerCache.addPeer(peerId, hexToUint8Array(hex));
     }
 
-    // Peer prekey bundles (needed for session re-establishment)
-    const prekeyKeys = await this.storage.keys('prekeys/');
-    for (const key of prekeyKeys) {
-      const b64 = await this.storage.get(key);
-      if (!b64) continue;
-      const peerId = key.replace(/^prekeys\//, '');
-      try {
-        const bundle = deserializePreKeyBundle(base64ToUint8Array(b64));
-        this.peerPreKeyBundles.set(peerId, bundle);
-      } catch {
-        // Corrupted bundle — skip
-      }
-    }
-
     // Contacts
     const contactsRaw = await this.storage.get('contacts');
     if (contactsRaw) {
       this.permissionManager.loadContacts(JSON.parse(contactsRaw) as string[]);
     }
-
-    // Seen message IDs (deduplication — rolling 24h window)
-    const seenRaw = await this.storage.get('seen_ids');
-    if (seenRaw) {
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-      const entries = JSON.parse(seenRaw) as Array<[string, number]>;
-      for (const [id, ts] of entries) {
-        if (ts > cutoff) this.seenMessageIds.set(id, ts);
-      }
-    }
-  }
-
-  /**
-   * Re-initiates X3DH sessions with all contacts whose prekey bundles are saved.
-   * Called on startup when session state is missing but contacts exist — handles
-   * storage wipe and new-device-with-same-identity-key scenarios.
-   */
-  private async reinitiateSessionsOnStartup(): Promise<void> {
-    const contacts = this.permissionManager.getContacts();
-    for (const contactId of contacts) {
-      const bundle = this.peerPreKeyBundles.get(contactId);
-      if (!bundle) continue; // no saved bundle — will recover when they next send us a message
-      try {
-        await this.initiateHandshake(contactId, bundle);
-      } catch {
-        // Best effort — peer may be offline, session will establish when they reconnect
-      }
-    }
-  }
-
-  private async persistSession(peerId: string, state: RatchetState): Promise<void> {
-    await this.storage?.set(`sessions/${peerId}`, serializeRatchetState(state));
-  }
-
-  private async persistPreKeyBundle(peerId: string, bundle: PreKeyBundle): Promise<void> {
-    await this.storage?.set(
-      `prekeys/${peerId}`,
-      uint8ArrayToBase64(serializePreKeyBundle(bundle)),
-    );
   }
 
   private async persistContacts(): Promise<void> {
@@ -1947,98 +1129,8 @@ export class MeshWhisper {
 
   private async persistPeers(): Promise<void> {
     if (!this.storage) return;
-    // Save any peers not yet written (incremental saves happen in completeIncomingHandshake)
-    // This is a belt-and-suspenders flush on shutdown
     for (const [peerId, pubKey] of (this.peerCache as any).peers as Map<string, Uint8Array>) {
       await this.storage.set(`peers/${peerId}`, uint8ArrayToHex(pubKey));
-    }
-  }
-
-  private async persistSeenIds(): Promise<void> {
-    if (!this.storage) return;
-    const entries = [...this.seenMessageIds.entries()];
-    await this.storage.set('seen_ids', JSON.stringify(entries));
-  }
-
-  private pruneSeenIds(): void {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    for (const [id, ts] of this.seenMessageIds) {
-      if (ts < cutoff) this.seenMessageIds.delete(id);
-    }
-  }
-
-  private async saveMessage(message: StoredMessage): Promise<void> {
-    if (!this.storage) return;
-    const key = `messages/${message.conversationId}`;
-    const raw = await this.storage.get(key);
-    const messages: StoredMessage[] = raw ? JSON.parse(raw) : [];
-    const existing = messages.findIndex((m) => m.id === message.id);
-    if (existing >= 0) {
-      messages[existing] = message; // update (e.g. status change)
-    } else {
-      messages.push(message);
-    }
-    await this.storage.set(key, JSON.stringify(messages));
-  }
-
-  private async updateMessageStatus(
-    messageId: string,
-    conversationId: string,
-    status: StoredMessage['status'],
-  ): Promise<void> {
-    if (!this.storage) return;
-    const key = `messages/${conversationId}`;
-    const raw = await this.storage.get(key);
-    if (!raw) return;
-    const messages: StoredMessage[] = JSON.parse(raw);
-    const msg = messages.find((m) => m.id === messageId);
-    if (!msg) return;
-    msg.status = status;
-    await this.storage.set(key, JSON.stringify(messages));
-    if (this.config.onMessageStatus) {
-      this.config.onMessageStatus(messageId, status);
-    }
-  }
-
-  // ================================================================
-  // Internal — Control messages (delivery receipts, typing, etc.)
-  // ================================================================
-
-  private sendControl(
-    peerId: string,
-    payload: Record<string, unknown>,
-  ): void {
-    const bytes = new TextEncoder().encode(JSON.stringify(payload));
-    this.sendMessage(peerId, bytes, { urgency: 'background' }).catch(() => {});
-  }
-
-  private handleControlMessage(
-    ctrl: ControlMessage,
-    fromPeerId: string,
-  ): void {
-    switch (ctrl.__mw_ctrl) {
-      case 'delivered':
-        if (ctrl.messageId) {
-          this.updateMessageStatus(ctrl.messageId, fromPeerId, 'delivered').catch(() => {});
-        }
-        break;
-      case 'read':
-        if (ctrl.messageId) {
-          this.updateMessageStatus(ctrl.messageId, fromPeerId, 'read').catch(() => {});
-        }
-        break;
-    }
-  }
-
-  // ================================================================
-  // Internal — Assertions
-  // ================================================================
-
-  private assertRunning(): void {
-    if (!this.running) {
-      throw new Error(
-        'MeshWhisper is not running. Call MeshWhisper.init() first.',
-      );
     }
   }
 
@@ -2053,125 +1145,32 @@ export class MeshWhisper {
       try {
         await this.sendMessage(item.recipientId, item.payload, item.options);
       } catch {
-        // Put it back at the front and stop — avoid thrashing on a broken session
         this.outboundQueue.unshift(item);
         break;
       }
     }
   }
-}
 
-// ============================================================
-// Control message helpers
-// ============================================================
+  // ================================================================
+  // Internal — Dest hashes (used by NodeTransport)
+  // ================================================================
 
-interface ControlMessage {
-  __mw_ctrl: 'delivered' | 'read' | 'typing_start' | 'typing_stop';
-  messageId?: string;
-}
-
-function tryParseControl(payload: Uint8Array): ControlMessage | null {
-  try {
-    const text = new TextDecoder().decode(payload);
-    if (!text.startsWith('{')) return null;
-    const obj = JSON.parse(text) as Record<string, unknown>;
-    if (typeof obj.__mw_ctrl !== 'string') return null;
-    return obj as unknown as ControlMessage;
-  } catch {
-    return null;
-  }
-}
-
-function isControlPayload(payload: Uint8Array): boolean {
-  return tryParseControl(payload) !== null;
-}
-
-// ============================================================
-// Utility Functions
-// ============================================================
-
-function uint8ArrayToHex(arr: Uint8Array): string {
-  let hex = '';
-  for (let i = 0; i < arr.length; i++) {
-    hex += arr[i].toString(16).padStart(2, '0');
-  }
-  return hex;
-}
-
-function hexToUint8Array(hex: string): Uint8Array {
-  const len = hex.length >>> 1;
-  const arr = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    arr[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return arr;
-}
-
-function uint8ArrayToBase64(arr: Uint8Array): string {
-  // Works in both Node.js and browser environments
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(arr).toString('base64');
-  }
-  let binary = '';
-  for (let i = 0; i < arr.length; i++) {
-    binary += String.fromCharCode(arr[i]);
-  }
-  return btoa(binary);
-}
-
-function base64ToUint8Array(b64: string): Uint8Array {
-  if (typeof Buffer !== 'undefined') {
-    return new Uint8Array(Buffer.from(b64, 'base64'));
-  }
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function generateMessageId(): string {
-  const bytes = randomBytes(16);
-  return uint8ArrayToHex(bytes);
-}
-
-// ============================================================
-// Ratchet Header Serialization
-//
-// Wire format:
-//   [32 bytes dhPublicKey] [4 bytes previousChainLength BE] [4 bytes messageNumber BE]
-// ============================================================
-
-const RATCHET_HEADER_SIZE = 40;
-
-function serializeRatchetHeader(header: RatchetHeader): Uint8Array {
-  const buf = new Uint8Array(RATCHET_HEADER_SIZE);
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-
-  buf.set(header.dhPublicKey, 0);
-  view.setUint32(32, header.previousChainLength, false);
-  view.setUint32(36, header.messageNumber, false);
-
-  return buf;
-}
-
-function deserializeRatchetHeader(
-  data: Uint8Array,
-): { header: RatchetHeader; ciphertextBody: Uint8Array } {
-  if (data.length < RATCHET_HEADER_SIZE) {
-    throw new Error('Data too short for ratchet header');
+  private getCurrentDestHashes(): string[] {
+    const xPub = this.identity.getPublicKey();
+    const hour = getCurrentEpochHour();
+    return [
+      uint8ArrayToHex(deriveDestHash(xPub, hour)),
+      uint8ArrayToHex(deriveDestHash(xPub, hour - 1)),
+    ];
   }
 
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  // ================================================================
+  // Internal — Assertions
+  // ================================================================
 
-  const header: RatchetHeader = {
-    dhPublicKey: data.slice(0, 32),
-    previousChainLength: view.getUint32(32, false),
-    messageNumber: view.getUint32(36, false),
-  };
-
-  const ciphertextBody = data.slice(RATCHET_HEADER_SIZE);
-
-  return { header, ciphertextBody };
+  private assertRunning(): void {
+    if (!this.running) {
+      throw new Error('MeshWhisper is not running. Call MeshWhisper.init() first.');
+    }
+  }
 }
