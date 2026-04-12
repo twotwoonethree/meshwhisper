@@ -22,6 +22,10 @@ jobs:
       - name: Install SDK dependencies
         run: npm ci
 
+      - name: Install relay dependencies (required by integration tests)
+        working-directory: node
+        run: npm ci
+
       - name: Type check
         run: npx tsc --noEmit
 
