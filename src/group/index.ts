@@ -639,21 +639,23 @@ export class GroupManager {
 
     const targets: Array<{ peerId: string; data: Uint8Array }> = [];
 
-    // Collect all descendants that should receive the relay
-    const _collectDescendants = (node: TreeNode): void => {
+    // Recursively collect all descendants in a subtree so the sender can deliver
+    // directly to every tree member. Each node is a direct relay connection (via
+    // the MeshWhisper Node), so direct delivery is always possible.
+    // NOTE: if hop-by-hop tree relay is ever implemented (incoming group relay
+    // packets), change this back to direct-children-only for the sender case.
+    const collectDescendants = (node: TreeNode): void => {
       for (const child of node.children) {
         if (child.peerId !== senderId) {
           targets.push({ peerId: child.peerId, data: ciphertext });
         }
-        _collectDescendants(child);
+        collectDescendants(child);
       }
     };
 
-    // If we are the sender, relay to all our tree children subtrees
+    // If we are the sender, deliver to all descendants in the relay tree.
     if (senderId === this.localPeerId) {
-      for (const child of localNode.children) {
-        targets.push({ peerId: child.peerId, data: ciphertext });
-      }
+      collectDescendants(localNode);
     } else {
       // We are relaying — forward to our children (excluding the sender direction)
       for (const child of localNode.children) {

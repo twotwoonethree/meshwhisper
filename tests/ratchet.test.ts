@@ -237,3 +237,100 @@ describe('initSender throws if no sending chain', () => {
     expect(() => ratchetEncrypt(bob, enc('hi'))).toThrow();
   });
 });
+
+// ---- Failure paths ----
+
+describe('replay attack', () => {
+  it('decrypting the same message twice throws', () => {
+    const secret = makeSharedSecret();
+    const bobKP = makeKeyPair();
+    const alice = initSender(secret, bobKP.publicKey);
+    let bob = initReceiver(secret, bobKP);
+
+    const { header, ciphertext } = ratchetEncrypt(alice, enc('once'));
+    const { state } = ratchetDecrypt(bob, header, ciphertext);
+    bob = state;
+
+    // Replaying the same (header, ciphertext) should throw — the message key
+    // is consumed on first use and the skipped-key store won't have it.
+    expect(() => ratchetDecrypt(bob, header, ciphertext)).toThrow();
+  });
+});
+
+describe('session state independence', () => {
+  it('two independent sessions with the same shared secret produce different ciphertexts', () => {
+    // Each session has its own ephemeral ratchet keys, so even identical
+    // plaintexts encrypted under the same initial secret diverge immediately.
+    const secret = makeSharedSecret();
+    const bobKP1 = makeKeyPair();
+    const bobKP2 = makeKeyPair();
+
+    const alice1 = initSender(secret, bobKP1.publicKey);
+    const alice2 = initSender(secret, bobKP2.publicKey);
+
+    const { ciphertext: ct1 } = ratchetEncrypt(alice1, enc('hello'));
+    const { ciphertext: ct2 } = ratchetEncrypt(alice2, enc('hello'));
+
+    expect(ct1).not.toEqual(ct2);
+  });
+
+  it('a message encrypted by one session cannot be decrypted by a receiver with a different shared secret', () => {
+    const secret1 = makeSharedSecret();
+    const secret2 = makeSharedSecret();
+    const bobKP = makeKeyPair();
+
+    const alice = initSender(secret1, bobKP.publicKey);
+    // Bob was initialized with a different secret
+    const bob = initReceiver(secret2, bobKP);
+
+    const { header, ciphertext } = ratchetEncrypt(alice, enc('secret'));
+    expect(() => ratchetDecrypt(bob, header, ciphertext)).toThrow();
+  });
+});
+
+describe('session loss recovery', () => {
+  it('mid-conversation state snapshot can resume decryption', () => {
+    // Simulate saving state after N messages and restoring it.
+    const secret = makeSharedSecret();
+    const bobKP = makeKeyPair();
+    let alice = initSender(secret, bobKP.publicKey);
+    let bob = initReceiver(secret, bobKP);
+
+    // Exchange a few messages to advance the ratchet
+    for (let i = 0; i < 3; i++) {
+      const { state: a, header, ciphertext } = ratchetEncrypt(alice, enc(`msg${i}`));
+      alice = a;
+      const { state: b } = ratchetDecrypt(bob, header, ciphertext);
+      bob = b;
+    }
+
+    // Snapshot Bob's state (shallow clone simulates persistence round-trip)
+    const bobSnapshot = { ...bob };
+
+    // Continue with more messages
+    const { state: a4, header: h4, ciphertext: ct4 } = ratchetEncrypt(alice, enc('msg3'));
+    alice = a4;
+
+    // Both the live and snapshot state should decrypt the next message
+    const { state: liveState, plaintext: liveText } = ratchetDecrypt(bob, h4, ct4);
+    const { plaintext: snapText } = ratchetDecrypt(bobSnapshot, h4, ct4);
+
+    expect(dec(liveText)).toBe('msg3');
+    expect(dec(snapText)).toBe('msg3');
+  });
+});
+
+describe('tampered header', () => {
+  it('wrong message counter in header causes decryption failure', () => {
+    const secret = makeSharedSecret();
+    const bobKP = makeKeyPair();
+    const alice = initSender(secret, bobKP.publicKey);
+    const bob = initReceiver(secret, bobKP);
+
+    const { header, ciphertext } = ratchetEncrypt(alice, enc('hi'));
+
+    // Corrupt the message counter — advances to a wrong key
+    const badHeader = { ...header, messageNumber: header.messageNumber + 100 };
+    expect(() => ratchetDecrypt(bob, badHeader, ciphertext)).toThrow();
+  });
+});

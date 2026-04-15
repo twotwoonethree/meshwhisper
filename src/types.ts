@@ -10,6 +10,22 @@ export interface KeyPair {
   privateKey: Uint8Array;
 }
 
+/**
+ * Ed25519 key pair — used for identity and signing only.
+ * Never pass to a DH function; convert via edwardsToMontgomeryPub/Priv first.
+ */
+export interface IdentityKeyPair extends KeyPair {
+  readonly keyType: 'identity';
+}
+
+/**
+ * X25519 key pair — used for Diffie-Hellman operations only.
+ * Never sign with this; use the corresponding IdentityKeyPair instead.
+ */
+export interface DHKeyPair extends KeyPair {
+  readonly keyType: 'dh';
+}
+
 export interface PreKeyBundle {
   identityKey: Uint8Array;
   signedPreKey: Uint8Array;

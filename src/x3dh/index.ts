@@ -5,7 +5,7 @@
 
 import { x25519, ed25519 } from '@noble/curves/ed25519';
 import { blake3 } from '@noble/hashes/blake3';
-import type { KeyPair, PreKeyBundle } from '../types.js';
+import type { KeyPair, IdentityKeyPair, DHKeyPair, PreKeyBundle } from '../types.js';
 
 // --- Constants ---
 
@@ -29,9 +29,9 @@ export interface GeneratedPreKeyBundle {
   /** The public bundle to distribute (gossip or directory). */
   bundle: PreKeyBundle;
   /** The X25519 signed pre-key pair. Store the private key. */
-  signedPreKeyPair: KeyPair;
+  signedPreKeyPair: DHKeyPair;
   /** The X25519 one-time pre-key pair. Store the private key. */
-  oneTimePreKeyPair: KeyPair;
+  oneTimePreKeyPair: DHKeyPair;
 }
 
 /**
@@ -49,7 +49,7 @@ export interface GeneratedPreKeyBundle {
  * @param identityKeyPair - Ed25519 identity key pair
  * @returns Bundle (public) plus the key pairs (private keys must be stored)
  */
-export function generatePreKeyBundle(identityKeyPair: KeyPair): GeneratedPreKeyBundle {
+export function generatePreKeyBundle(identityKeyPair: IdentityKeyPair | KeyPair): GeneratedPreKeyBundle {
   // Generate signed pre-key (X25519)
   const signedPreKeyPrivate = x25519.utils.randomSecretKey();
   const signedPreKeyPublic = x25519.getPublicKey(signedPreKeyPrivate);
@@ -71,10 +71,12 @@ export function generatePreKeyBundle(identityKeyPair: KeyPair): GeneratedPreKeyB
     signedPreKeyPair: {
       publicKey: signedPreKeyPublic,
       privateKey: signedPreKeyPrivate,
+      keyType: 'dh',
     },
     oneTimePreKeyPair: {
       publicKey: oneTimePreKeyPublic,
       privateKey: oneTimePreKeyPrivate,
+      keyType: 'dh',
     },
   };
 }
@@ -91,17 +93,17 @@ export function generatePreKeyBundle(identityKeyPair: KeyPair): GeneratedPreKeyB
  * @returns Array of X25519 key pairs
  */
 export function generateOneTimePreKeys(
-  _identityKeyPair: KeyPair,
+  _identityKeyPair: IdentityKeyPair | KeyPair,
   count: number,
-): KeyPair[] {
+): DHKeyPair[] {
   if (count < 0 || !Number.isInteger(count)) {
     throw new Error('count must be a non-negative integer');
   }
 
-  const keys: KeyPair[] = [];
+  const keys: DHKeyPair[] = [];
   for (let i = 0; i < count; i++) {
     const privateKey = x25519.utils.randomSecretKey();
-    keys.push({ privateKey, publicKey: x25519.getPublicKey(privateKey) });
+    keys.push({ privateKey, publicKey: x25519.getPublicKey(privateKey), keyType: 'dh' });
   }
   return keys;
 }

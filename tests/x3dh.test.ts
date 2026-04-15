@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ed25519 } from '@noble/curves/ed25519';
+import { ed25519, x25519 } from '@noble/curves/ed25519';
 import {
   generatePreKeyBundle,
   generateOneTimePreKeys,
@@ -230,5 +230,152 @@ describe('serializePreKeyBundle / deserializePreKeyBundle', () => {
     const serialized = serializePreKeyBundle(bundle);
     const deserialized = deserializePreKeyBundle(serialized);
     expect(verifyPreKeyBundle(deserialized)).toBe(true);
+  });
+});
+
+// ---- Failure paths ----
+
+describe('X3DH OPK mismatch', () => {
+  it('Alice uses OPK but Bob uses null → secrets do NOT match', () => {
+    // This is the bug that existed before the OPK pool was implemented:
+    // Alice sees an OPK in the bundle and does 4-DH; Bob passes null
+    // for the OPK private key and does 3-DH → shared secrets diverge.
+    const aliceId = makeIdentity();
+    const bobId = makeIdentity();
+    const { bundle: bobBundle, signedPreKeyPair: bobSPK, oneTimePreKeyPair: bobOPK } =
+      generatePreKeyBundle(bobId);
+
+    // Alice uses the OPK (4-DH)
+    const { sharedSecret: aliceSecret, ephemeralPublicKey } = initiateKeyExchange(
+      aliceId,
+      bobBundle,
+    );
+
+    // Bob incorrectly passes null for the OPK (3-DH fallback)
+    const bobSecret = completeKeyExchange(
+      bobId,
+      bobSPK,
+      null,           // ← wrong: Bob ignores the OPK
+      aliceId.publicKey,
+      ephemeralPublicKey,
+    );
+
+    expect(aliceSecret).not.toEqual(bobSecret);
+  });
+
+  it('Bob uses wrong OPK private key → secrets do NOT match', () => {
+    const aliceId = makeIdentity();
+    const bobId = makeIdentity();
+    const { bundle: bobBundle, signedPreKeyPair: bobSPK } = generatePreKeyBundle(bobId);
+
+    const { sharedSecret: aliceSecret, ephemeralPublicKey } = initiateKeyExchange(
+      aliceId,
+      bobBundle,
+    );
+
+    // Generate a different OPK — not the one Alice used
+    const wrongOPKPriv = x25519.utils.randomSecretKey();
+    const wrongOPK = { publicKey: x25519.getPublicKey(wrongOPKPriv), privateKey: wrongOPKPriv, keyType: 'dh' as const };
+
+    const bobSecret = completeKeyExchange(
+      bobId,
+      bobSPK,
+      wrongOPK,
+      aliceId.publicKey,
+      ephemeralPublicKey,
+    );
+
+    expect(aliceSecret).not.toEqual(bobSecret);
+  });
+});
+
+describe('X3DH identity key mismatch', () => {
+  it('Alice uses wrong identity key in DH → secrets do NOT match', () => {
+    const aliceId = makeIdentity();
+    const wrongAliceId = makeIdentity();
+    const bobId = makeIdentity();
+    const { bundle: bobBundle, signedPreKeyPair: bobSPK, oneTimePreKeyPair: bobOPK } =
+      generatePreKeyBundle(bobId);
+
+    // Alice initiates with her real identity
+    const { sharedSecret: aliceSecret, ephemeralPublicKey } = initiateKeyExchange(
+      aliceId,
+      bobBundle,
+    );
+
+    // Bob completes, but receives wrong Alice identity public key
+    const bobSecret = completeKeyExchange(
+      bobId,
+      bobSPK,
+      bobOPK,
+      wrongAliceId.publicKey,  // ← wrong identity key
+      ephemeralPublicKey,
+    );
+
+    expect(aliceSecret).not.toEqual(bobSecret);
+  });
+
+  it('Bob uses wrong signed pre-key → secrets do NOT match', () => {
+    const aliceId = makeIdentity();
+    const bobId = makeIdentity();
+    const { bundle: bobBundle, oneTimePreKeyPair: bobOPK } = generatePreKeyBundle(bobId);
+
+    const { sharedSecret: aliceSecret, ephemeralPublicKey } = initiateKeyExchange(
+      aliceId,
+      bobBundle,
+    );
+
+    // Bob uses a different signed pre-key private key (not matching the public key Alice used)
+    const { signedPreKeyPair: differentSPK } = generatePreKeyBundle(bobId);
+
+    const bobSecret = completeKeyExchange(
+      bobId,
+      differentSPK,  // ← wrong SPK
+      bobOPK,
+      aliceId.publicKey,
+      ephemeralPublicKey,
+    );
+
+    expect(aliceSecret).not.toEqual(bobSecret);
+  });
+});
+
+describe('X3DH replayed ephemeral key', () => {
+  it('replaying the same ephemeral key with a fresh bundle produces a different secret', () => {
+    // A replayed ephemeral key against a new OPK produces a different secret,
+    // since the OPK contribution changes. This ensures OPK consumption matters.
+    const aliceId = makeIdentity();
+    const bobId = makeIdentity();
+    const { bundle: bundle1, signedPreKeyPair: spk1, oneTimePreKeyPair: opk1 } =
+      generatePreKeyBundle(bobId);
+
+    const { sharedSecret: secret1, ephemeralPublicKey } = initiateKeyExchange(aliceId, bundle1);
+
+    // Bob regenerates — new OPK, different secret expected
+    const { bundle: bundle2, signedPreKeyPair: spk2, oneTimePreKeyPair: opk2 } =
+      generatePreKeyBundle(bobId);
+
+    // Manually complete as if Alice used the same ephemeral key but a fresh bundle
+    const secret2 = completeKeyExchange(
+      bobId,
+      spk2,
+      opk2,
+      aliceId.publicKey,
+      ephemeralPublicKey,
+    );
+
+    expect(secret1).not.toEqual(secret2);
+  });
+});
+
+describe('X3DH serialization malformed OPK flag', () => {
+  it('throws when OPK flag is set but data is too short', () => {
+    const id = makeIdentity();
+    const { bundle } = generatePreKeyBundle(id);
+    const serialized = serializePreKeyBundle(bundle);
+    // The OPK flag is in byte 1 (after version byte). Truncate the OPK bytes
+    // but leave the flag set — should throw on deserialize.
+    const truncated = serialized.slice(0, serialized.length - 16);
+    expect(() => deserializePreKeyBundle(truncated)).toThrow();
   });
 });
