@@ -1,4 +1,6 @@
 ---
+import ComingSoonModal from '../components/ComingSoonModal.astro';
+
 interface Props {
   title?: string;
   description?: string;
@@ -24,5 +26,6 @@ const {
   </head>
   <body class="bg-slate-950 text-slate-100 font-sans antialiased">
     <slot />
+    <ComingSoonModal />
   </body>
 </html>

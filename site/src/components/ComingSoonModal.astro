@@ -1,0 +1,55 @@
+<!-- Modal overlay — hidden by default, triggered by data-coming-soon links -->
+<div
+  id="coming-soon-modal"
+  class="fixed inset-0 z-50 flex items-center justify-center p-6 hidden"
+  aria-modal="true"
+  role="dialog"
+>
+  <!-- Backdrop -->
+  <div id="coming-soon-backdrop" class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"></div>
+
+  <!-- Panel -->
+  <div class="relative bg-slate-900 border border-slate-700 rounded-2xl p-8 max-w-sm w-full text-center shadow-2xl">
+    <div class="w-12 h-12 rounded-full bg-brand-900 border border-brand-700 flex items-center justify-center mx-auto mb-4">
+      <svg class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+      </svg>
+    </div>
+    <h2 class="text-white font-semibold text-lg mb-2">Coming soon</h2>
+    <p class="text-slate-400 text-sm leading-relaxed mb-6">
+      We're working on it. In the meantime, the relay is live and the SDK is available on npm.
+    </p>
+    <button
+      id="coming-soon-close"
+      class="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors w-full"
+    >
+      Got it
+    </button>
+  </div>
+</div>
+
+<script>
+  const modal = document.getElementById('coming-soon-modal');
+  const backdrop = document.getElementById('coming-soon-backdrop');
+  const closeBtn = document.getElementById('coming-soon-close');
+
+  function openModal() {
+    modal?.classList.remove('hidden');
+  }
+  function closeModal() {
+    modal?.classList.add('hidden');
+  }
+
+  closeBtn?.addEventListener('click', closeModal);
+  backdrop?.addEventListener('click', closeModal);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  document.querySelectorAll('[data-coming-soon]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      openModal();
+    });
+  });
+</script>

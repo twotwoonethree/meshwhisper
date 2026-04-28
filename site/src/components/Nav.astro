@@ -7,7 +7,7 @@ const { current } = Astro.props;
 const links = [
   { href: '/how-it-works', label: 'How it works' },
   { href: '/security', label: 'Security' },
-  { href: 'https://github.com/antonmannering/meshwhisper/blob/main/docs/api.md', label: 'Docs', external: true },
+  { href: '#', label: 'Docs', comingSoon: true },
 ];
 ---
 
@@ -15,16 +15,16 @@ const links = [
   <nav class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
     <a href="/" class="text-white font-semibold tracking-tight text-lg">MeshWhisper</a>
     <div class="flex items-center gap-6 text-sm">
-      {links.map(({ href, label, external }) => (
+      {links.map(({ href, label, comingSoon }) => (
         <a
           href={href}
-          target={external ? '_blank' : undefined}
+          data-coming-soon={comingSoon ? '' : undefined}
           class={`transition-colors ${current === label ? 'text-white' : 'text-slate-400 hover:text-white'}`}
         >
           {label}
         </a>
       ))}
-      <a href="https://github.com/antonmannering/meshwhisper" class="text-slate-400 hover:text-white transition-colors">
+      <a href="#" data-coming-soon class="text-slate-400 hover:text-white transition-colors">
         GitHub
       </a>
       <a href="/#integrate" class="bg-brand-500 hover:bg-brand-400 text-white px-4 py-1.5 rounded-md font-medium transition-colors">
