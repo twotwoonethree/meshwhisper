@@ -156,10 +156,13 @@ In the future, node operators can choose to **peer** with other nodes for redund
 
 ## Security model
 
+- Key exchange uses **PQXDH** — a hybrid of X3DH (X25519) and ML-KEM-768. Sessions are post-quantum secure from the first message.
+- Session encryption uses the **Double Ratchet** algorithm. Each message uses a fresh key; compromise of one key does not expose past or future messages.
 - Your Node sees only encrypted ciphertext and anonymous destination hashes. It cannot identify senders or read content.
 - Destination hashes rotate every hour, limiting traffic-analysis windows.
 - The push service receives a device token and a destination hash — no message content.
 - Identity keys are generated on-device and never transmitted. Private keys are stored only in the device's configured storage backend.
 - Media is encrypted locally before upload. The Node stores ciphertext. The decryption key travels through the ratchet-encrypted message channel — never through the Node's HTTP API.
+- **Safety numbers** — both parties can verify a 60-digit code out-of-band to confirm no MITM. Computed from a sorted BLAKE3 hash of both Ed25519 identity keys.
 
 For a detailed technical overview see **[docs/codebase-overview.md](docs/codebase-overview.md)**.

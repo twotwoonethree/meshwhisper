@@ -12,7 +12,7 @@ Import from the right entry point for your environment:
 |---|---|
 | Browser / PWA | `@meshwhisper/sdk` *(auto-detected)* or `@meshwhisper/sdk/browser` |
 | Node.js | `@meshwhisper/sdk` *(auto-detected)* or `@meshwhisper/sdk/node` |
-| React Native | `@meshwhisper/sdk` + custom `StorageBackend` |
+| React Native | `@meshwhisper/sdk/react-native` + custom `StorageBackend` |
 
 ---
 
@@ -27,6 +27,7 @@ const mw = await MeshWhisper.init(config: MeshWhisperConfig): Promise<MeshWhispe
 **Auto-detection behaviour:**
 - In a browser (`window` + `indexedDB` present): uses `IDBStorage` and `BrowserTransport` automatically. No storage or transport configuration needed.
 - In Node.js: uses `NodeTransport`. Storage is `null` unless you pass `storage: new NodeStorage(path)`.
+- In React Native: uses the native WebSocket API via `BrowserTransport`. You must provide a `StorageBackend` explicitly (no IndexedDB).
 
 ### `MeshWhisperConfig`
 
@@ -34,6 +35,7 @@ const mw = await MeshWhisper.init(config: MeshWhisperConfig): Promise<MeshWhispe
 interface MeshWhisperConfig {
   namespace: string;
   node?: string | string[];
+  username?: string;
   developerKey?: string;
   permissionModel?: 'open' | 'mutual' | 'introduction' | 'transactional' | 'custom';
   push?: PushConfig;
@@ -41,6 +43,9 @@ interface MeshWhisperConfig {
   onMessage?: (message: Message) => void;
   onPresence?: (peerId: string, status: PresenceStatus) => void;
   onMessageStatus?: (messageId: string, status: MessageStatus) => void;
+  onTyping?: (peerId: string, isTyping: boolean) => void;
+  onContactRequest?: (peerId: string, introducedBy: string, username?: string) => void | Promise<void>;
+  onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>;
   config?: {
     relayWillingness?: 'auto' | 'eager' | 'willing' | 'reluctant' | 'unavailable';
     chaffRate?: 'low' | 'normal' | 'high';
@@ -54,6 +59,7 @@ interface MeshWhisperConfig {
 |---|---|---|---|
 | `namespace` | Yes | — | Your app bundle ID, e.g. `"com.example.myapp"`. Namespaces identities so users of different apps can't message each other accidentally. |
 | `node` | No | `"mesh"` | Relay URL(s). `"mesh"` uses Foundation-hosted relays. Pass `"wss://relay.myapp.com"` for self-hosted, or an array for redundancy. |
+| `username` | No | — | Human-readable username registered with the relay alongside your pre-key bundle. Other users can add you with `addContactByKey('@alice')` instead of a raw public key. Usernames are scoped to the namespace; first-registered wins. |
 | `developerKey` | No | random | Base64-encoded developer public key. Tie to a stable key in production so sessions survive app updates. |
 | `permissionModel` | No | `"open"` | Who can send messages. `"open"` = anyone. `"mutual"` = only existing contacts. |
 | `push` | No | — | Push notification configuration. Required for offline delivery. See [`PushConfig`](#pushconfig). |
@@ -61,6 +67,9 @@ interface MeshWhisperConfig {
 | `onMessage` | No | — | Called when a message is received. |
 | `onPresence` | No | — | Called when a peer's online status changes. |
 | `onMessageStatus` | No | — | Called when an outbound message's delivery status changes (`sent` → `delivered` → `read`). |
+| `onTyping` | No | — | Called when a peer starts or stops typing. `isTyping` is `true` for start, `false` for stop. Ephemeral — not stored or reliable. |
+| `onContactRequest` | No | — | Called when a mutual contact introduces a new peer to you. Call `addContactByKey(peerId)` from this handler to accept. |
+| `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
 
 ---
 
@@ -90,9 +99,19 @@ interface SendOptions {
 await MeshWhisper.send(
   bobId,
   new TextEncoder().encode('Hello!'),
-  { urgency: 'normal' },
+  { urgency: 'normal', expiry: 86400 },  // expires in 24 hours
 );
 ```
+
+### `MeshWhisper.sendTypingIndicator(peerId, isTyping)`
+
+Send an ephemeral typing indicator to a peer. Not stored, not reliable.
+
+```ts
+MeshWhisper.sendTypingIndicator(peerId: string, isTyping: boolean): void
+```
+
+The recipient's `onTyping` callback fires with `isTyping: true` (start) or `isTyping: false` (stop).
 
 ### `MeshWhisper.onMessage` (config callback)
 
@@ -111,6 +130,8 @@ interface Message {
   timestamp: number;         // Unix ms (sender's clock)
   urgency: MessageUrgency;
   expiry?: number;
+  groupId?: string;          // set when the message was sent to a group
+  groupSenderId?: string;    // original sender within the group
 }
 ```
 
@@ -120,7 +141,11 @@ const mw = await MeshWhisper.init({
   namespace: 'com.example.app',
   onMessage: (message) => {
     const text = new TextDecoder().decode(new Uint8Array(message.payload));
-    console.log(`[${message.senderId}]: ${text}`);
+    if (message.groupId) {
+      console.log(`[group ${message.groupId}] ${message.groupSenderId}: ${text}`);
+    } else {
+      console.log(`[${message.senderId}]: ${text}`);
+    }
   },
 });
 ```
@@ -161,6 +186,30 @@ const history = await MeshWhisper.getMessages(peerId, { limit: 50 });
 for (const msg of history.reverse()) {
   renderMessage(msg);
 }
+```
+
+### `MeshWhisper.getConversations()`
+
+Returns all conversations, sorted by most recent message first.
+
+```ts
+const conversations = await MeshWhisper.getConversations(): Promise<Conversation[]>
+```
+
+```ts
+interface Conversation {
+  id: string;              // peer ID or group ID
+  lastMessage?: StoredMessage;
+  unreadCount: number;
+}
+```
+
+### `MeshWhisper.deleteMessage(messageId, conversationId)`
+
+Delete a stored message by ID.
+
+```ts
+await MeshWhisper.deleteMessage(messageId: string, conversationId: string): Promise<void>
 ```
 
 ### `MeshWhisper.markRead(messageId, peerId)`
@@ -236,6 +285,48 @@ onMessage: async (message) => {
 
 ## Contacts
 
+### `MeshWhisper.addContactByKey(query)`
+
+Add a contact by peer ID (hex public key) or `@username`. Fetches their pre-key bundle from the relay directory and initiates X3DH.
+
+```ts
+const ok = await MeshWhisper.addContactByKey(query: string): Promise<boolean>
+```
+
+Returns `true` if the contact was found and added, `false` if the username could not be resolved.
+
+```ts
+// By raw peer ID
+await MeshWhisper.addContactByKey(bobId);
+
+// By username (relay directory lookup)
+await MeshWhisper.addContactByKey('@alice');
+```
+
+### `MeshWhisper.removeContact(peerId)`
+
+Remove a contact. Clears the stored session and pre-key bundle for that peer.
+
+```ts
+await MeshWhisper.removeContact(peerId: string): Promise<void>
+```
+
+### `MeshWhisper.getContacts()`
+
+Returns all contacts.
+
+```ts
+const contacts = MeshWhisper.getContacts(): string[]
+```
+
+### `MeshWhisper.introduceContacts(peerA, peerB)`
+
+Introduce two of your contacts to each other. Both peers receive an `onContactRequest` callback with `introducedBy` set to your peer ID.
+
+```ts
+await MeshWhisper.introduceContacts(peerA: string, peerB: string): Promise<void>
+```
+
 ### `MeshWhisper.generateContactQR()`
 
 Returns a QR code payload string (the local peer ID) for sharing as a contact.
@@ -250,6 +341,100 @@ Accept a contact from a scanned QR code. Initiates X3DH key exchange.
 
 ```ts
 await MeshWhisper.acceptContact(scannedQRData: string): Promise<void>
+```
+
+---
+
+## Groups
+
+### `MeshWhisper.createGroup(options)`
+
+Create a group and invite initial members. Each member receives an `onGroupInvite` callback.
+
+```ts
+const group = MeshWhisper.createGroup({
+  name: 'Team Chat',
+  members?: string[],          // peer IDs to invite immediately
+  permissionModel?: 'open',
+}): GroupHandle
+```
+
+### `MeshWhisper.getGroup(groupId)`
+
+```ts
+const group = MeshWhisper.getGroup(groupId: string): GroupHandle | null
+```
+
+### `MeshWhisper.getGroups()`
+
+Returns all groups you are a member of.
+
+```ts
+const groups = MeshWhisper.getGroups(): GroupHandle[]
+```
+
+### `MeshWhisper.sendToGroup(groupId, payload)`
+
+Send an encrypted message to all members of a group.
+
+```ts
+await MeshWhisper.sendToGroup(groupId: string, payload: Uint8Array): Promise<void>
+```
+
+### `MeshWhisper.acceptGroupInvite(groupId)`
+
+Accept a pending group invitation received via `onGroupInvite`.
+
+```ts
+MeshWhisper.acceptGroupInvite(groupId: string): void
+```
+
+### `MeshWhisper.getPendingGroupInvites()`
+
+Returns group invitations that have not yet been accepted or declined.
+
+```ts
+const invites = MeshWhisper.getPendingGroupInvites(): Array<{
+  groupId: string;
+  groupName: string;
+  invitedBy: string;
+  members: string[];
+}>
+```
+
+### `GroupHandle`
+
+```ts
+group.id: string
+group.name: string
+group.members: string[]
+await group.send(payload: Uint8Array): Promise<void>
+group.addMember(peerId: string): void
+group.removeMember(peerId: string): void
+group.leave(): void
+```
+
+---
+
+## Safety numbers
+
+### `MeshWhisper.getSafetyNumber(peerId)`
+
+Returns a 60-digit safety number for the conversation with `peerId`. Both parties compute the same number — compare out-of-band to verify no MITM.
+
+```ts
+const number = MeshWhisper.getSafetyNumber(peerId: string): string
+// e.g. "12345 67890 12345 67890 12345 67890 12345 67890 12345 67890 12345 67890"
+```
+
+The number is derived from a sorted BLAKE3 hash of both parties' Ed25519 identity keys, formatted as 12 groups of 5 decimal digits. It is identical regardless of who calls it first.
+
+### `MeshWhisper.verifySafetyNumber(peerId, candidate)`
+
+Returns `true` if `candidate` matches the computed safety number for `peerId`.
+
+```ts
+const ok = MeshWhisper.verifySafetyNumber(peerId: string, candidate: string): boolean
 ```
 
 ---
@@ -321,7 +506,6 @@ const mw = await MeshWhisper.init({
 
 **APNs (iOS):**
 ```ts
-// Get device token from native layer
 const mw = await MeshWhisper.init({
   namespace: 'com.example.app',
   push: {
@@ -382,9 +566,10 @@ Filesystem key-value store. Files are written atomically (temp → rename) with 
 
 ### React Native
 
-Wrap `AsyncStorage` or `SQLCipher`:
+Import from `@meshwhisper/sdk/react-native` and wrap `AsyncStorage` or `SQLCipher`:
 
 ```ts
+import { MeshWhisper } from '@meshwhisper/sdk/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { StorageBackend } from '@meshwhisper/sdk';
 
@@ -401,30 +586,7 @@ const rnStorage: StorageBackend = {
 const mw = await MeshWhisper.init({ namespace: 'com.example.app', storage: rnStorage });
 ```
 
----
-
-## Groups
-
-### `MeshWhisper.createGroup(options)`
-
-```ts
-const group = MeshWhisper.createGroup({
-  name: 'Team Chat',
-  members: [aliceId, bobId],
-  permissionModel: 'open',
-}): GroupHandle
-```
-
-### `GroupHandle`
-
-```ts
-group.id: string
-group.name: string
-group.members: string[]
-await group.send(payload: Uint8Array): Promise<void>
-group.addMember(peerId: string): void
-group.removeMember(peerId: string): void
-```
+The React Native entry point re-exports the full SDK and automatically uses the native WebSocket API rather than the Node.js `ws` package.
 
 ---
 
@@ -477,7 +639,6 @@ npm run build
 ```ts
 import { MeshWhisper } from '@meshwhisper/sdk';
 
-// Helper: convert VAPID public key for pushManager.subscribe
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -488,42 +649,49 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
 const VAPID_PUBLIC_KEY = 'BExamplePublicKeyBase64url...';
 
 async function startMessaging() {
-  // Register service worker
   const registration = await navigator.serviceWorker.register('/meshwhisper-sw.js');
 
-  // Subscribe to Web Push
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
   });
 
-  // Initialize SDK
   const mw = await MeshWhisper.init({
     namespace: 'com.example.myapp',
     node: 'wss://relay.myapp.com',
+    username: 'alice',
     push: {
       platform: 'webpush',
       subscription: subscription.toJSON() as WebPushSubscription,
     },
     onMessage: async (message) => {
-      // Try media first
       const media = await MeshWhisper.downloadMedia(message);
       if (media) {
         displayMedia(media);
         await MeshWhisper.markRead(message.id, message.senderId);
         return;
       }
-
-      // Plain text
       const text = new TextDecoder().decode(new Uint8Array(message.payload));
       displayMessage({ from: message.senderId, text, id: message.id });
       await MeshWhisper.markRead(message.id, message.senderId);
     },
     onMessageStatus: (messageId, status) => {
-      updateMessageStatus(messageId, status); // update UI tick marks
+      updateMessageStatus(messageId, status);
     },
     onPresence: (peerId, status) => {
       updatePresenceIndicator(peerId, status);
+    },
+    onTyping: (peerId, isTyping) => {
+      updateTypingIndicator(peerId, isTyping);
+    },
+    onGroupInvite: async (groupId, groupName, invitedBy, members) => {
+      const accepted = await showConfirmDialog(`${invitedBy} invited you to "${groupName}"`);
+      if (accepted) MeshWhisper.acceptGroupInvite(groupId);
+    },
+    onContactRequest: async (peerId, introducedBy, username) => {
+      const display = username ?? peerId.slice(0, 8);
+      const accepted = await showConfirmDialog(`${introducedBy} wants to introduce you to ${display}`);
+      if (accepted) await MeshWhisper.addContactByKey(peerId);
     },
   });
 

@@ -17,16 +17,17 @@ The intended use case is a developer who wants to add messaging to their existin
 ```
 /
 ├── src/                        @meshwhisper/sdk — client library
-│   ├── sdk/index.ts            Main public API (1994 lines)
+│   ├── sdk/index.ts            Main public API (~1700 lines)
 │   ├── types.ts                All shared TypeScript interfaces
 │   ├── crypto/                 AES-256-GCM, BLAKE3, X25519, Ed25519
-│   ├── x3dh/                   X3DH key exchange (Signal protocol)
+│   ├── x3dh/                   X3DH / PQXDH key exchange
 │   ├── ratchet/                Double Ratchet algorithm
 │   ├── packet/                 Wire format, compression, chaff
+│   ├── fingerprint/            Safety numbers (Signal-style 60-digit codes)
 │   ├── namespace/              Identity management, LocalIdentity
 │   ├── permissions/            Permission model, contact list
 │   ├── persistence/            StorageBackend interface + implementations
-│   │   ├── types.ts            StorageBackend interface, StoredMessage type
+│   │   ├── types.ts            StorageBackend interface, StoredMessage, Conversation types
 │   │   ├── idb-storage.ts      IndexedDB backend (browser/PWA)
 │   │   ├── node-storage.ts     Filesystem backend (Node.js)
 │   │   └── serialization.ts    RatchetState JSON serialization
@@ -47,10 +48,11 @@ The intended use case is a developer who wants to add messaging to their existin
 │   ├── sybil/                  Entropy challenges, ZK relay reputation
 │   ├── compliance/             Audit hooks (enterprise)
 │   ├── browser/index.ts        @meshwhisper/sdk/browser entry point
-│   └── node/index.ts           @meshwhisper/sdk/node entry point
+│   ├── node/index.ts           @meshwhisper/sdk/node entry point
+│   └── react-native/index.ts   @meshwhisper/sdk/react-native entry point
 │
 ├── node/                       @meshwhisper/node — relay server
-│   └── src/index.ts            Single-file HTTP + WebSocket server (662 lines)
+│   └── src/index.ts            Single-file HTTP + WebSocket server (~880 lines)
 │
 ├── push-service/               @meshwhisper/push-service
 │   └── src/
@@ -66,16 +68,23 @@ The intended use case is a developer who wants to add messaging to their existin
 │   └── src/index.ts            PWA push event handler
 │
 ├── tests/
-│   ├── crypto.test.ts          26 tests — primitives
-│   ├── x3dh.test.ts            22 tests — key exchange
-│   ├── ratchet.test.ts         15 tests — Double Ratchet
-│   └── packet.test.ts          24 tests — wire format
+│   ├── crypto.test.ts          27 tests — primitives
+│   ├── x3dh.test.ts            34 tests — X3DH + PQXDH key exchange
+│   ├── ratchet.test.ts         20 tests — Double Ratchet
+│   ├── packet.test.ts          24 tests — wire format
+│   ├── fingerprint.test.ts     13 tests — safety numbers
+│   ├── conversations.test.ts   8 tests  — conversation list + deleteMessage
+│   ├── message-features.test.ts 13 tests — expiry, typing, delivery receipts
+│   ├── groups-contacts.test.ts 7 tests  — groups + contact management
+│   └── integration.test.ts     4 tests  — full-stack SDK ↔ relay ↔ SDK
 │
 └── docs/
     ├── getting-started.md      Step-by-step integration guide
     ├── api.md                  Full SDK API reference
     ├── self-hosting.md         Deployment guide, all env vars
-    └── shipping.md             Internal build plan (phases 1-3)
+    ├── shipping.md             Internal build plan (phases 1-3)
+    ├── whitepaper.md           Protocol whitepaper
+    └── pq3-ratchet-spec.md     PQXDH ratchet spec notes
 ```
 
 ---
@@ -90,19 +99,21 @@ The intended use case is a developer who wants to add messaging to their existin
 - Destination hash derivation (truncated BLAKE3, rotates hourly)
 - 26 passing tests covering all primitives
 
-### X3DH Key Exchange (`src/x3dh/`)
-- Full Signal X3DH implementation
-- Generates identity key, signed pre-key, one-time pre-keys
+### X3DH / PQXDH Key Exchange (`src/x3dh/`)
+- Full Signal X3DH implementation (3-DH and 4-DH with one-time pre-key)
+- Hybrid PQXDH: X3DH + ML-KEM-768 encapsulation. When Bob's bundle includes a `pqPublicKey`, Alice encapsulates to it and the final shared secret mixes all X25519 DH outputs with the ML-KEM shared secret under BLAKE3 domain separation. Matches Signal's PQXDH specification.
+- Bundle version byte: `0x01` = classical X3DH, `0x02` = PQXDH
 - `generatePreKeyBundle()` returns private keys (bug fixed — they were previously discarded)
 - `initiateKeyExchange()` and `completeKeyExchange()` both sides implemented
-- Pre-key bundle serialization/deserialization
-- 22 passing tests covering both sides of the handshake
+- Pre-key bundle serialization/deserialization for both bundle versions
+- 34 passing tests covering classical and PQ paths, both sides of the handshake, and bundle serialization
 
 ### Double Ratchet (`src/ratchet/`)
 - Full Signal Double Ratchet implementation
 - `initSender()`, `initReceiver()`, `ratchetEncrypt()`, `ratchetDecrypt()`
 - DH ratchet step, symmetric-key ratchet, message key derivation
-- 15 passing tests including bidirectional message exchange
+- Skipped-message-key store, MAX_SKIP DoS guard, out-of-order delivery
+- 20 passing tests including bidirectional exchange and out-of-order delivery
 
 ### Packet layer (`src/packet/`)
 - Binary wire format: version, flags, destHash, senderEphemeralId, TTL, payload
@@ -112,16 +123,24 @@ The intended use case is a developer who wants to add messaging to their existin
 - 24 passing tests
 
 ### SDK public API (`src/sdk/index.ts`)
-- `MeshWhisper.init(config)` — singleton initialisation, auto-detects browser vs Node.js
-- `MeshWhisper.send(recipientId, payload)` — E2EE send, auto-initiates X3DH on first contact
-- `MeshWhisper.onMessage` — decrypted inbound message callback
+- `MeshWhisper.init(config)` — singleton initialisation, auto-detects browser / Node.js / React Native
+- `MeshWhisper.send(recipientId, payload, options?)` — E2EE send, auto-initiates X3DH on first contact; `options.expiry` sets message TTL
+- `MeshWhisper.onMessage` — decrypted inbound message callback; `message.groupId` + `message.groupSenderId` set for group messages
 - `MeshWhisper.sendMedia()` / `downloadMedia()` — two-part encrypted media upload
 - `MeshWhisper.getMessages(peerId, options)` — message history from storage
+- `MeshWhisper.getConversations()` — all conversations sorted by recency
+- `MeshWhisper.deleteMessage(messageId, conversationId)` — delete stored message
 - `MeshWhisper.markRead(messageId, peerId)` — read receipts
 - `MeshWhisper.getLocalPeerId()` — stable peer ID (hex Ed25519 public key)
 - `MeshWhisper.getPresence()`, `onPresence` — presence tracking
-- `MeshWhisper.generateContactQR()`, `acceptContact()` — contact exchange
-- `MeshWhisper.createGroup()` — group messaging
+- `MeshWhisper.sendTypingIndicator(peerId, isTyping)` — ephemeral typing events; `onTyping` callback
+- `MeshWhisper.generateContactQR()`, `acceptContact()` — QR-based contact exchange
+- `MeshWhisper.addContactByKey(query)` — add contact by peer ID or `@username` (relay directory lookup)
+- `MeshWhisper.removeContact(peerId)`, `getContacts()` — contact list management
+- `MeshWhisper.introduceContacts(peerA, peerB)` — mutual introduction; triggers `onContactRequest` on both peers
+- `MeshWhisper.createGroup()`, `getGroup()`, `getGroups()`, `sendToGroup()` — group messaging
+- `MeshWhisper.acceptGroupInvite(groupId)`, `getPendingGroupInvites()` — group invite flow; `onGroupInvite` callback
+- `MeshWhisper.getSafetyNumber(peerId)`, `verifySafetyNumber(peerId, candidate)` — Signal-style safety numbers
 - `MeshWhisper.shutdown()` — graceful stop + state persistence
 
 ### Persistence (`src/persistence/`)
@@ -188,9 +207,17 @@ The intended use case is a developer who wants to add messaging to their existin
 - Prints `.env` block and SDK init snippet
 - For self-hosted: generates `docker-compose.yml` with Node + push services
 
-### Browser/PWA support
+### Safety numbers (`src/fingerprint/`)
+- Signal-style 60-digit verification codes derived from a sorted BLAKE3 hash of two Ed25519 identity keys
+- Format: 12 groups of 5 decimal digits, space-separated
+- Identical regardless of which peer calls it first (sorted before hashing)
+- `computeFingerprint(keyA, keyB)` and `verifySafetyNumber(peerId, candidate)` exported from `src/fingerprint/index.ts`
+- 13 passing tests
+
+### Browser/PWA and React Native support
 - Zero-config: `MeshWhisper.init()` auto-detects `window` + `indexedDB`, selects `IDBStorage` + `BrowserTransport`
-- No `ws`, `fs`, `dgram`, or `net` in browser bundles — all Node.js-only imports are dynamic
+- React Native: `@meshwhisper/sdk/react-native` entry point. Auto-detected via absence of both `window.indexedDB` and `process.versions.node`. Uses native WebSocket API (`BrowserTransport`). Requires explicit `StorageBackend` (no IndexedDB).
+- No `ws`, `fs`, `dgram`, or `net` in browser/RN bundles — all Node.js-only imports are dynamic
 - Packet serialization extracted to `websocket/serialize.ts` — shared, no platform dependencies
 - All `Buffer.from()` calls replaced with browser-compatible hex/base64 helpers
 - `PushConfig` is a discriminated union: `apns | fcm | webpush`
@@ -214,17 +241,15 @@ These modules exist with correct interfaces and reasonable implementations but h
 
 ### Critical for production
 
-1. **No end-to-end integration tests** — 87 unit tests covering crypto, X3DH, ratchet, and packet layers. No test exercises the full stack: SDK → Node → push service → SDK.
-
-2. **No multi-device support** — the same identity key on two devices is not handled. Device 2 would generate a different identity and appear as a different user.
+1. **No multi-device support** — the same identity key on two devices is not handled. Device 2 would generate a different identity and appear as a different user.
 
 ### Minor
 
-3. **`ws` is an optional dependency** — moved from `dependencies` to `optionalDependencies`. In some environments this may not install automatically for Node.js users who need `NodeTransport`.
+2. **`ws` is an optional dependency** — moved from `dependencies` to `optionalDependencies`. In some environments this may not install automatically for Node.js users who need `NodeTransport`.
 
-4. **Service worker requires manual copy** — `dist/meshwhisper-sw.js` must be copied to the public directory manually. No automated step.
+3. **Service worker requires manual copy** — `dist/meshwhisper-sw.js` must be copied to the public directory manually. No automated step.
 
-5. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
+4. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
 
 ---
 
@@ -244,7 +269,7 @@ These modules exist with correct interfaces and reasonable implementations but h
 
 | Concern | Choice | Reason |
 |---|---|---|
-| Crypto primitives | `@noble/curves`, `@noble/ciphers`, `@noble/hashes` | Audited, pure JS, browser + Node.js compatible, no WASM |
+| Crypto primitives | `@noble/curves`, `@noble/ciphers`, `@noble/hashes`, `@noble/post-quantum` | Audited, pure JS, browser + Node.js compatible, no WASM |
 | Compression | `lz4js` | Fast, browser-compatible |
 | Node.js WebSocket | `ws` | Mature, widely used |
 | Node persistence | `better-sqlite3` | Embedded, single-file, no external service, survives restarts |
@@ -260,12 +285,12 @@ These modules exist with correct interfaces and reasonable implementations but h
 
 | File | Lines |
 |---|---|
-| `src/sdk/index.ts` | 1994 |
-| `node/src/index.ts` | ~530 (was 662 before SQLite refactor) |
+| `src/sdk/index.ts` | ~1700 |
+| `node/src/index.ts` | ~880 |
 | `src/transport/websocket/index.ts` | ~620 |
 | `src/transport/local/index.ts` | ~400 |
 | `src/ratchet/index.ts` | ~350 |
-| `src/x3dh/index.ts` | ~300 |
+| `src/x3dh/index.ts` | ~330 |
 | All SDK source combined | ~11,000 |
 | All packages combined | ~14,000 |
 
