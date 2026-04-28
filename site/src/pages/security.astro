@@ -9,168 +9,183 @@ import Nav from '../components/Nav.astro';
 >
   <Nav current="Security" />
 
-  <!-- Page header -->
-  <div class="border-b border-slate-800 bg-slate-900/40">
-    <div class="max-w-6xl mx-auto px-6 py-16 text-center">
-      <h1 class="text-4xl font-bold text-white mb-4">Security</h1>
-      <p class="text-lg text-slate-400 max-w-xl mx-auto">
+  <main>
+
+    <!-- Intro -->
+    <section class="max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
+      <h1 class="text-5xl font-bold text-white tracking-tight leading-tight mb-6">
+        Security
+      </h1>
+      <p class="text-xl text-slate-400 max-w-2xl mx-auto leading-relaxed">
         Every app that integrates MeshWhisper gets post-quantum E2EE without having to understand
         or implement cryptography. These are the primitives underneath.
       </p>
-    </div>
-  </div>
+    </section>
 
-  <main class="max-w-6xl mx-auto px-6 py-20">
-    <div class="max-w-2xl mx-auto space-y-20">
-
-      <!-- Level table -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-6">Security levels</h2>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-slate-800">
-                <th class="text-left text-slate-500 font-medium py-3 px-5 w-16">Level</th>
-                <th class="text-left text-slate-500 font-medium py-3 px-5">What's protected</th>
-                <th class="text-left text-slate-500 font-medium py-3 px-5 w-28">Status</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800">
-              <tr>
-                <td class="py-3 px-5 text-white font-medium">1</td>
-                <td class="py-3 px-5 text-slate-400">Classical E2EE — AES-256-GCM per message</td>
-                <td class="py-3 px-5 text-brand-400 text-xs font-medium uppercase tracking-wide">Done</td>
-              </tr>
-              <tr>
-                <td class="py-3 px-5 text-white font-medium">2</td>
-                <td class="py-3 px-5 text-slate-400">Post-quantum at session establishment (PQXDH)</td>
-                <td class="py-3 px-5 text-brand-400 text-xs font-medium uppercase tracking-wide">Done</td>
-              </tr>
-              <tr>
-                <td class="py-3 px-5 text-white font-medium">3</td>
-                <td class="py-3 px-5 text-slate-400">Post-quantum healing within live sessions (PQ3 ratchet)</td>
-                <td class="py-3 px-5 text-yellow-500 text-xs font-medium uppercase tracking-wide">Roadmap</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="text-slate-600 text-xs mt-3">
+    <!-- Level table -->
+    <section class="border-t border-slate-800 bg-slate-900/40">
+      <div class="max-w-6xl mx-auto px-6 py-20">
+        <h2 class="text-3xl font-bold text-white text-center mb-4">Security levels</h2>
+        <p class="text-slate-400 text-center max-w-xl mx-auto mb-12">
           Level classification matches Apple's iMessage PQ3 security levels. Signal is Level 2. Apple iMessage is Level 3.
         </p>
-      </section>
-
-      <!-- PQXDH -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">PQXDH — post-quantum initial key exchange</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          Session establishment uses a hybrid of X3DH and ML-KEM-768. When Bob's pre-key bundle includes an
-          ML-KEM-768 public key, Alice encapsulates to it during the handshake. The final shared secret mixes
-          all X25519 DH outputs with the ML-KEM shared secret under a BLAKE3 domain separation context —
-          matching Signal's PQXDH specification.
-        </p>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          The protection: an adversary recording encrypted traffic today cannot decrypt it with a future
-          quantum computer, because the session key was derived from an ML-KEM encapsulation that resists
-          quantum attack. This addresses the "harvest now, decrypt later" threat model.
-        </p>
-        <p class="text-slate-400 leading-relaxed">
-          The limitation: if ratchet state is compromised after establishment, future messages can be decrypted
-          with classical compute. This is what Level 3 ratchet healing addresses.
-        </p>
-      </section>
-
-      <!-- Double Ratchet -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">Double Ratchet</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          Session encryption uses the Signal Double Ratchet. Every message uses a fresh key via a
-          symmetric-key ratchet. When a new message arrives from the other side, a DH ratchet step
-          advances the root chain using a fresh X25519 key exchange — providing forward secrecy and
-          break-in recovery simultaneously.
-        </p>
-        <p class="text-slate-400 leading-relaxed">
-          The implementation handles out-of-order delivery via a skipped-message-key store with a MAX_SKIP
-          cap of 2,000 — sized to cover the relay's 72-hour store-and-forward TTL.
-        </p>
-      </section>
-
-      <!-- PQ3 roadmap -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">PQ3 ratchet healing — Level 3</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          Level 3 adds periodic ML-KEM injection into the running Double Ratchet. Every 50 messages —
-          or every 24 hours — one side advertises a new ML-KEM-768 public key in the message header.
-          The other side encapsulates to it and includes the ciphertext in the next reply. Both sides
-          mix the resulting shared secret into the root key.
-        </p>
-        <p class="text-slate-400 leading-relaxed mb-6">
-          The effect: even if ratchet state is compromised mid-conversation, post-quantum forward secrecy
-          is restored at the next injection point. The exposure window is bounded by the injection cadence,
-          not the session lifetime.
-        </p>
-        <div class="bg-slate-900 border border-yellow-800/40 rounded-xl p-5 text-sm text-slate-400">
-          <span class="text-yellow-500 font-medium">Roadmap.</span> The spec is written —
-          <a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/pq3-ratchet-spec.md" class="text-brand-400 hover:text-brand-300 transition-colors">docs/pq3-ratchet-spec.md</a>.
-          This is the next security milestone.
-        </div>
-      </section>
-
-      <!-- Safety numbers -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">Safety numbers</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          Both parties can verify a 60-digit safety number out-of-band to confirm no man-in-the-middle.
-          Computed as a sorted BLAKE3 hash of both Ed25519 identity keys, formatted as 12 groups of 5
-          decimal digits. Identical regardless of which party calls it first.
-        </p>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 font-mono text-sm text-slate-500">
-          mw.getSafetyNumber(peerId)<br />
-          <span class="text-slate-400">→ "12345 67890 12345 67890 12345 67890 ..."</span>
-        </div>
-      </section>
-
-      <!-- Threat model -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">What the node knows</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          A node operator can observe: source IPs of connected devices, push tokens for offline delivery,
-          destination hashes (rotating hourly), and traffic timing. It cannot read message content,
-          identify senders or recipients, or correlate traffic across namespaces.
-        </p>
-        <p class="text-slate-400 leading-relaxed">
-          Private keys are generated on-device and never transmitted. The node never holds session keys
-          or any key material from the Double Ratchet or PQXDH handshake. Media is encrypted locally
-          before upload — the node stores ciphertext only.
-        </p>
-      </section>
-
-      <!-- Primitives -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-6">Primitives</h2>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl divide-y divide-slate-800">
+        <div class="grid sm:grid-cols-3 gap-6">
           {[
-            ['@noble/curves', 'X25519, Ed25519 — elliptic curve operations'],
-            ['@noble/ciphers', 'AES-256-GCM — authenticated encryption'],
-            ['@noble/hashes', 'BLAKE3 — KDF, destination hashes, safety numbers'],
-            ['@noble/post-quantum', 'ML-KEM-768 — NIST FIPS 203, PQXDH encapsulation'],
-          ].map(([pkg, desc]) => (
-            <div class="flex gap-4 items-baseline px-5 py-3.5">
-              <code class="text-brand-300 text-sm w-44 shrink-0">{pkg}</code>
-              <span class="text-slate-400 text-sm">{desc}</span>
+            { level: '1', label: 'Done', active: true, title: 'Classical E2EE', body: 'AES-256-GCM per message. Every message encrypted and authenticated before it leaves the device.' },
+            { level: '2', label: 'Done', active: true, title: 'Post-quantum session establishment', body: 'PQXDH — hybrid X3DH + ML-KEM-768. Protects against "harvest now, decrypt later" quantum attacks. Matches Signal\'s PQXDH specification.' },
+            { level: '3', label: 'Roadmap', active: false, title: 'Post-quantum ratchet healing', body: 'Periodic ML-KEM injection into the live Double Ratchet. Even if ratchet state is compromised, PQ forward secrecy is restored at the next injection point.' },
+          ].map(({ level, label, active, title, body }) => (
+            <div class={`bg-slate-900 rounded-xl p-6 border ${active ? 'border-brand-800/50' : 'border-slate-800'}`}>
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-slate-500 text-sm">Level {level}</span>
+                <span class={`text-xs font-medium uppercase tracking-wide ${active ? 'text-brand-400' : 'text-yellow-500'}`}>{label}</span>
+              </div>
+              <h3 class="text-white font-semibold mb-2">{title}</h3>
+              <p class="text-slate-400 text-sm leading-relaxed">{body}</p>
             </div>
           ))}
         </div>
-        <p class="text-slate-600 text-xs mt-3">
-          Audited pure JavaScript — no WASM, no native bindings. Identical in browser, Node.js, and React Native.
-        </p>
-      </section>
+      </div>
+    </section>
 
-      <div class="border-t border-slate-800 pt-8 flex justify-between text-sm">
-        <a href="/how-it-works" class="text-slate-500 hover:text-slate-300 transition-colors">← How it works</a>
-        <a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/pq3-ratchet-spec.md" class="text-brand-400 hover:text-brand-300 transition-colors">PQ3 spec →</a>
+    <!-- PQXDH + Double Ratchet -->
+    <section class="max-w-6xl mx-auto px-6 py-20">
+      <h2 class="text-3xl font-bold text-white text-center mb-4">Key exchange and session encryption</h2>
+      <p class="text-slate-400 text-center max-w-xl mx-auto mb-12">
+        The Signal protocol, extended with post-quantum key encapsulation.
+      </p>
+      <div class="grid sm:grid-cols-2 gap-6">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Level 2</div>
+          <h3 class="text-white font-semibold mb-3">PQXDH</h3>
+          <p class="text-slate-400 text-sm leading-relaxed mb-3">
+            Session establishment uses a hybrid of X3DH and ML-KEM-768. Alice encapsulates to Bob's
+            ML-KEM public key during the handshake. The final shared secret mixes all X25519 DH outputs
+            with the ML-KEM shared secret under a BLAKE3 domain separation context.
+          </p>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            An adversary recording encrypted traffic today cannot decrypt it with a future quantum computer.
+            The limitation: if ratchet state is compromised after establishment, future traffic can be
+            decrypted classically. That is what Level 3 addresses.
+          </p>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Level 1 + 2</div>
+          <h3 class="text-white font-semibold mb-3">Double Ratchet</h3>
+          <p class="text-slate-400 text-sm leading-relaxed mb-3">
+            Every message uses a fresh key via a symmetric-key ratchet. When a new message arrives from
+            the other side, a DH ratchet step advances the root chain using fresh X25519 — providing
+            forward secrecy and break-in recovery simultaneously.
+          </p>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Out-of-order delivery is handled via a skipped-message-key store with a MAX_SKIP cap of 2,000 —
+            sized to cover the relay's 72-hour store-and-forward TTL.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- PQ3 + safety numbers -->
+    <section class="border-t border-slate-800 bg-slate-900/40">
+      <div class="max-w-6xl mx-auto px-6 py-20 grid sm:grid-cols-2 gap-8">
+        <div>
+          <div class="text-yellow-500 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Roadmap — Level 3</div>
+          <h2 class="text-xl font-bold text-white mb-3">PQ3 ratchet healing</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            Every 50 messages — or every 24 hours — one side advertises a new ML-KEM-768 public key
+            in the message header. The other side encapsulates to it and includes the ciphertext in the
+            next reply. Both sides mix the resulting shared secret into the root key.
+          </p>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            The exposure window is bounded by the injection cadence rather than the session lifetime.
+            The spec is written —
+            <a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/pq3-ratchet-spec.md" class="text-brand-400 hover:text-brand-300 transition-colors">docs/pq3-ratchet-spec.md</a>.
+          </p>
+        </div>
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Implemented</div>
+          <h2 class="text-xl font-bold text-white mb-3">Safety numbers</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            Both parties can verify a 60-digit safety number out-of-band to confirm no man-in-the-middle.
+            Computed as a sorted BLAKE3 hash of both Ed25519 identity keys, formatted as 12 groups of
+            5 decimal digits. Identical regardless of which party calls it first.
+          </p>
+          <div class="bg-slate-950 border border-slate-700 rounded-lg p-4 font-mono text-xs text-slate-400">
+            mw.getSafetyNumber(peerId)<br />
+            <span class="text-slate-500">→ "12345 67890 12345 67890 ..."</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Threat model + primitives -->
+    <section class="max-w-6xl mx-auto px-6 py-20">
+      <h2 class="text-3xl font-bold text-white text-center mb-4">What the node knows</h2>
+      <p class="text-slate-400 text-center max-w-xl mx-auto mb-12">
+        The threat model is explicit. The node is an ISP carrying encrypted traffic, not a party to the conversation.
+      </p>
+      <div class="grid sm:grid-cols-2 gap-6 mb-12">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h3 class="text-white font-semibold mb-3">What the node can see</h3>
+          <ul class="space-y-2 text-slate-400 text-sm">
+            {['Source IPs of connected devices', 'Push tokens for offline delivery', 'Destination hashes (rotating hourly)', 'Traffic timing and volume'].map(item => (
+              <li class="flex gap-2"><span class="text-slate-600">—</span>{item}</li>
+            ))}
+          </ul>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h3 class="text-white font-semibold mb-3">What the node cannot see</h3>
+          <ul class="space-y-2 text-slate-400 text-sm">
+            {['Message content', 'Sender or recipient identity', 'Which application a packet belongs to', 'Session keys or any key material'].map(item => (
+              <li class="flex gap-2"><span class="text-brand-700">—</span>{item}</li>
+            ))}
+          </ul>
+        </div>
       </div>
 
-    </div>
+      <h2 class="text-3xl font-bold text-white text-center mb-12">Primitives</h2>
+      <div class="grid sm:grid-cols-2 gap-6">
+        {[
+          ['@noble/curves', 'X25519, Ed25519', 'Elliptic curve key exchange and signing'],
+          ['@noble/ciphers', 'AES-256-GCM', 'Authenticated encryption'],
+          ['@noble/hashes', 'BLAKE3', 'KDF, destination hash derivation, safety numbers'],
+          ['@noble/post-quantum', 'ML-KEM-768', 'NIST FIPS 203 — PQXDH encapsulation'],
+        ].map(([pkg, algo, desc]) => (
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+            <code class="text-brand-300 text-sm">{pkg}</code>
+            <div class="text-white font-medium text-sm mt-1 mb-1">{algo}</div>
+            <p class="text-slate-400 text-sm">{desc}</p>
+          </div>
+        ))}
+      </div>
+      <p class="text-slate-600 text-xs text-center mt-6">
+        Audited pure JavaScript — no WASM, no native bindings. Identical in browser, Node.js, and React Native.
+      </p>
+    </section>
+
   </main>
+
+  <footer class="border-t border-slate-800">
+    <div class="max-w-6xl mx-auto px-6 py-12 flex flex-col sm:flex-row justify-between gap-6 text-sm text-slate-500">
+      <div>
+        <div class="text-white font-semibold mb-1">MeshWhisper</div>
+        <div>MIT licensed. Self-hosting always free.</div>
+      </div>
+      <div class="flex gap-8">
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Learn</div>
+          <div><a href="/how-it-works" class="hover:text-white transition-colors">How it works</a></div>
+          <div><a href="/security" class="text-white transition-colors">Security</a></div>
+          <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/whitepaper.md" class="hover:text-white transition-colors">Whitepaper</a></div>
+        </div>
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Developers</div>
+          <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/api.md" class="hover:text-white transition-colors">API reference</a></div>
+          <div><a href="https://github.com/antonmannering/meshwhisper" class="hover:text-white transition-colors">GitHub</a></div>
+          <div><a href="https://relay.meshwhisper.org/health" class="hover:text-white transition-colors">Relay status</a></div>
+        </div>
+      </div>
+    </div>
+  </footer>
 
 </Layout>

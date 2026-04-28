@@ -9,151 +9,151 @@ import Nav from '../components/Nav.astro';
 >
   <Nav current="How it works" />
 
-  <!-- Page header -->
-  <div class="border-b border-slate-800 bg-slate-900/40">
-    <div class="max-w-6xl mx-auto px-6 py-16 text-center">
-      <h1 class="text-4xl font-bold text-white mb-4">How it works</h1>
-      <p class="text-lg text-slate-400 max-w-xl mx-auto">
-        The core insight is simple. The consequences are significant.
+  <main>
+
+    <!-- Intro -->
+    <section class="max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
+      <h1 class="text-5xl font-bold text-white tracking-tight leading-tight mb-6">
+        How it works
+      </h1>
+      <p class="text-xl text-slate-400 max-w-2xl mx-auto leading-relaxed">
+        The relay mesh is shared across all participating applications.
+        The application namespaces are isolated. These two properties together are what make the economics work.
       </p>
-    </div>
-  </div>
+    </section>
 
-  <main class="max-w-6xl mx-auto px-6 py-20">
-    <div class="max-w-2xl mx-auto space-y-20">
-
-      <!-- Core insight -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">The core insight</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          A relay does not need to read a message to forward it. If messages are encrypted before they leave
-          the sending device, a relay is just a pipe. It receives an opaque blob, identifies the intended
-          recipient by a hash, and forwards it. The message arrives at the recipient's device and is decrypted
-          there, locally, with a key the relay never held.
-        </p>
-        <p class="text-slate-400 leading-relaxed mb-6">
-          The consequence is that the relay infrastructure for one application is identical — in every
-          technical respect — to the relay infrastructure for every other application. A relay forwarding
-          encrypted packets for a fitness app is indistinguishable from one forwarding for a marketplace.
-          The relay cannot tell them apart. They use the same relay.
-        </p>
-        <div class="bg-slate-900 border border-slate-700 rounded-xl px-6 py-4 font-mono text-brand-300 text-sm text-center">
-          Relay promiscuously. Connect selectively.
+    <!-- Core insight + namespace isolation -->
+    <section class="border-t border-slate-800 bg-slate-900/40">
+      <div class="max-w-6xl mx-auto px-6 py-20 grid sm:grid-cols-2 gap-8">
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">The core insight</div>
+          <h2 class="text-xl font-bold text-white mb-3">The relay doesn't read</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            If messages are encrypted before they leave the sending device, a relay is just a pipe.
+            It receives an opaque blob, identifies the recipient by a hash, and forwards it.
+            It cannot read the content. The relay infrastructure for one app is identical —
+            in every technical respect — to the relay infrastructure for every other app.
+          </p>
+          <div class="bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 font-mono text-brand-300 text-xs">
+            Relay promiscuously. Connect selectively.
+          </div>
         </div>
-      </section>
-
-      <!-- Namespace isolation -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">Namespace isolation</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          Applications sharing relay infrastructure are isolated cryptographically, not by access control.
-          Each application is identified by a namespace derived from the developer's public key and the
-          application bundle identifier. Destination hashes — the routing identifiers on every packet — are
-          computed as:
-        </p>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 font-mono text-sm text-brand-300 my-6 text-center">
-          BLAKE3(namespace_id || peer_key || epoch_hour)
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Namespace isolation</div>
+          <h2 class="text-xl font-bold text-white mb-3">Cryptographic, not by access control</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            Applications sharing relay infrastructure are isolated cryptographically.
+            Destination hashes — the routing identifiers on every packet — are computed as:
+          </p>
+          <div class="bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 font-mono text-brand-300 text-xs mb-4">
+            BLAKE3(namespace_id || peer_key || epoch_hour)
+          </div>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            A relay cannot determine which application a packet belongs to, cannot inject into any namespace
+            without knowing the identifier, and cannot correlate traffic across namespaces.
+            Hashes rotate every hour, limiting traffic-analysis windows.
+          </p>
         </div>
-        <p class="text-slate-400 leading-relaxed">
-          A relay node cannot determine which application a packet belongs to, cannot inject into any namespace
-          without knowing the identifier, and cannot correlate traffic across namespaces even under active
-          observation. The isolation is structural. Hashes rotate every hour, limiting traffic-analysis windows.
-        </p>
-      </section>
-
-      <!-- Node layer -->
-      <section id="node-layer">
-        <h2 class="text-2xl font-bold text-white mb-4">The node layer</h2>
-        <p class="text-slate-400 leading-relaxed mb-6">
-          The node layer is the backbone. When a developer integrates the SDK, they deploy a MeshWhisper Node —
-          a single lightweight binary providing four functions in one container:
-        </p>
-        <div class="space-y-3 mb-6">
-          {[
-            ['Packet relay and store-and-forward', 'Routes encrypted packets to connected clients. Queues blobs for offline recipients with a configurable TTL (default 72 hours).'],
-            ['Push notification forwarding', 'When a message arrives for an offline device, fires a silent content-free wake signal via APNs, FCM, or Web Push. The signal contains no message content.'],
-            ['Encrypted media storage', 'Accepts and serves opaque encrypted blobs for media messages. Never holds a decryption key. TTL-based expiry.'],
-            ['Prekey directory', 'Stores public pre-key bundles for X3DH first contact. Allows strangers to initiate a session without prior communication.'],
-          ].map(([title, body]) => (
-            <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
-              <div class="text-white font-medium text-sm mb-1">{title}</div>
-              <div class="text-slate-400 text-sm leading-relaxed">{body}</div>
-            </div>
-          ))}
-        </div>
-        <p class="text-slate-400 leading-relaxed">
-          The node handles what phones cannot: always on, always connectable, holds messages for offline
-          recipients. It is a post box, not a postman.
-        </p>
-      </section>
-
-      <!-- Device layer -->
-      <section id="mesh">
-        <h2 class="text-2xl font-bold text-white mb-4">The device layer</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          Every device running any SDK-embedded application is simultaneously a potential relay for every
-          other such device. The mesh emerges from participation — it is not deployed, it accumulates.
-        </p>
-        <p class="text-slate-400 leading-relaxed mb-6">
-          When two devices are nearby they relay directly using platform-native P2P (Apple Multipeer
-          Connectivity on iOS, Google Nearby Connections on Android). When further apart but on the same
-          network, they relay over the local subnet. Over the internet, connectable devices — laptops on
-          broadband, desktops — act as peers. Phones on cellular maintain outbound connections to their
-          deployed node.
-        </p>
-        <div class="bg-slate-900 border border-yellow-800/40 rounded-xl p-5 text-sm text-slate-400">
-          <span class="text-yellow-500 font-medium">Roadmap.</span> The device mesh layer is specified and
-          partially scaffolded in the SDK. The node layer is fully implemented and live.
-          The mesh emerges in Stage 3 as SDK adoption grows.
-        </div>
-      </section>
-
-      <!-- Privacy -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">Privacy that strengthens with adoption</h2>
-        <p class="text-slate-400 leading-relaxed mb-6">
-          This is the inverse of centralised messaging, where scale concentrates metadata.
-          In MeshWhisper, scale distributes it.
-        </p>
-        <div class="space-y-4 mb-6">
-          {[
-            ['Low density', 'Messages route Alice → Alice\'s node → Bob\'s node → Bob. Each node sees one end of the path. Privacy is roughly equivalent to a messaging service provider\'s view.'],
-            ['High density', 'Messages route through multiple intermediate nodes. No single relay can correlate sender and recipient. Privacy approaches a backbone ISP\'s view: aware that traffic flows, unable to say meaningfully between whom.'],
-            ['Always', 'Every active device generates a continuous stream of random encrypted packets — chaff — at a constant rate regardless of real message activity. A node operator cannot distinguish real messages from noise.'],
-          ].map(([label, body]) => (
-            <div class="flex gap-4">
-              <div class="text-slate-600 font-mono text-xs w-24 shrink-0 pt-0.5">{label}</div>
-              <p class="text-slate-400 text-sm leading-relaxed">{body}</p>
-            </div>
-          ))}
-        </div>
-        <p class="text-slate-500 text-sm leading-relaxed">
-          MeshWhisper is not anonymous communication in the strong sense — it is not Tor.
-          The protocol's privacy properties are real, bounded, and transparent about what they don't provide.
-        </p>
-      </section>
-
-      <!-- Bootstrap -->
-      <section>
-        <h2 class="text-2xl font-bold text-white mb-4">The bootstrap problem, honestly</h2>
-        <p class="text-slate-400 leading-relaxed mb-4">
-          The node layer has value from the first integration — a developer who deploys a node gets working
-          E2EE relay infrastructure immediately, before the mesh exists. That is a real outcome.
-        </p>
-        <p class="text-slate-400 leading-relaxed">
-          The distinctive value is in the mesh layer, and the mesh requires adoption that does not exist on
-          day one. This is the BitTorrent dynamic honestly applied. What the architecture ensures is that
-          each stage of adoption delivers real, usable value. The ceiling scales with adoption;
-          the floor is set by the node layer on day one.
-        </p>
-      </section>
-
-      <div class="border-t border-slate-800 pt-8 flex justify-between text-sm">
-        <a href="/" class="text-slate-500 hover:text-slate-300 transition-colors">← Home</a>
-        <a href="/security" class="text-brand-400 hover:text-brand-300 transition-colors">Security →</a>
       </div>
+    </section>
 
-    </div>
+    <!-- Node layer -->
+    <section class="max-w-6xl mx-auto px-6 py-20">
+      <h2 class="text-3xl font-bold text-white text-center mb-4">The node layer</h2>
+      <p class="text-slate-400 text-center max-w-xl mx-auto mb-12">
+        The backbone. One Docker container. Always on. Always connectable. Never holds a decryption key.
+      </p>
+      <div class="grid sm:grid-cols-2 gap-6">
+        {[
+          ['Packet relay and store-and-forward', 'Routes encrypted packets to connected clients. Queues blobs for offline recipients with a configurable TTL (default 72 hours).'],
+          ['Push notification forwarding', 'When a message arrives for an offline device, fires a silent content-free wake signal via APNs, FCM, or Web Push. The signal contains no message content.'],
+          ['Encrypted media storage', 'Accepts and serves opaque encrypted blobs. Never holds a decryption key. The decryption key travels through the message channel, never through the Node API.'],
+          ['Prekey directory', 'Stores public pre-key bundles for PQXDH first contact. Allows strangers to initiate an encrypted session without prior communication.'],
+        ].map(([title, body]) => (
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+            <h3 class="text-white font-semibold mb-2">{title}</h3>
+            <p class="text-slate-400 text-sm leading-relaxed">{body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <!-- Device mesh + privacy -->
+    <section class="border-t border-slate-800 bg-slate-900/40">
+      <div class="max-w-6xl mx-auto px-6 py-20 grid sm:grid-cols-2 gap-8">
+        <div>
+          <div class="text-slate-500 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Device layer — roadmap</div>
+          <h2 class="text-xl font-bold text-white mb-3">The mesh</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            Every device running any SDK-embedded app is a potential relay for every other.
+            Platform-native P2P when nearby (Apple Multipeer, Google Nearby), local subnet
+            when on the same network, direct connection over the internet for connectable devices.
+          </p>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            A fitness app's users are part of the relay backbone for a marketplace app's users.
+            The infrastructure is built by participation, not by investment.
+          </p>
+        </div>
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Privacy</div>
+          <h2 class="text-xl font-bold text-white mb-3">Strengthens with adoption</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            At low mesh density, a node sees one end of a path — Alice's node sees Alice, Bob's sees Bob,
+            neither sees both. At high density, messages route through multiple independent nodes;
+            no single relay can correlate sender and recipient.
+          </p>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Every active device also generates a constant stream of random encrypted chaff packets
+            regardless of real activity. A node operator cannot distinguish real messages from noise
+            or infer from traffic volume whether a conversation is active.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bootstrap honest -->
+    <section class="max-w-6xl mx-auto px-6 py-20">
+      <h2 class="text-3xl font-bold text-white text-center mb-4">The bootstrap problem, honestly</h2>
+      <p class="text-slate-400 text-center max-w-xl mx-auto mb-12">
+        The whitepaper states this directly. Each stage has independent value.
+      </p>
+      <div class="grid sm:grid-cols-3 gap-6">
+        {[
+          ['The floor', 'The node layer delivers working E2EE relay infrastructure on day one, before the mesh exists. One developer, one node, one user base — that is a real outcome.'],
+          ['The ceiling', 'The distinctive value is in the mesh layer, and the mesh requires adoption. Multi-node routing, ambient relay capacity, and privacy-improves-with-scale are all functions of network participation.'],
+          ['The dynamic', 'This is BitTorrent honestly applied. BitTorrent had no peers for the first torrent. What the architecture ensures is that each stage of adoption delivers real, usable value. The ceiling scales with adoption.'],
+        ].map(([title, body]) => (
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+            <h3 class="text-white font-semibold mb-2">{title}</h3>
+            <p class="text-slate-400 text-sm leading-relaxed">{body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
   </main>
+
+  <footer class="border-t border-slate-800">
+    <div class="max-w-6xl mx-auto px-6 py-12 flex flex-col sm:flex-row justify-between gap-6 text-sm text-slate-500">
+      <div>
+        <div class="text-white font-semibold mb-1">MeshWhisper</div>
+        <div>MIT licensed. Self-hosting always free.</div>
+      </div>
+      <div class="flex gap-8">
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Learn</div>
+          <div><a href="/how-it-works" class="text-white transition-colors">How it works</a></div>
+          <div><a href="/security" class="hover:text-white transition-colors">Security</a></div>
+          <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/whitepaper.md" class="hover:text-white transition-colors">Whitepaper</a></div>
+        </div>
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Developers</div>
+          <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/api.md" class="hover:text-white transition-colors">API reference</a></div>
+          <div><a href="https://github.com/antonmannering/meshwhisper" class="hover:text-white transition-colors">GitHub</a></div>
+          <div><a href="https://relay.meshwhisper.org/health" class="hover:text-white transition-colors">Relay status</a></div>
+        </div>
+      </div>
+    </div>
+  </footer>
 
 </Layout>
