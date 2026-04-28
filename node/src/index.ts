@@ -69,6 +69,11 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+// Migrate existing prekey_bundles table if columns are missing (added for username support)
+for (const col of ['username', 'namespace']) {
+  try { db.exec(`ALTER TABLE prekey_bundles ADD COLUMN ${col} TEXT`); } catch { /* already exists */ }
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS blobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,8 +92,10 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS prekey_bundles (
-    key    TEXT PRIMARY KEY,
-    bundle TEXT NOT NULL
+    key       TEXT PRIMARY KEY,
+    bundle    TEXT NOT NULL,
+    username  TEXT,
+    namespace TEXT
   );
 
   CREATE TABLE IF NOT EXISTS media (
@@ -105,6 +112,9 @@ db.exec(`
     UNIQUE (identity_key, opk_public)
   );
   CREATE INDEX IF NOT EXISTS opks_identity_key ON opks (identity_key);
+  CREATE UNIQUE INDEX IF NOT EXISTS prekey_username_idx
+    ON prekey_bundles (namespace, username)
+    WHERE username IS NOT NULL;
 `);
 
 // Prepared statements
@@ -157,11 +167,17 @@ const stmts = {
 
   // prekey bundles
   upsertPrekey: db.prepare(
-    `INSERT INTO prekey_bundles (key, bundle) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET bundle = excluded.bundle`,
+    `INSERT INTO prekey_bundles (key, bundle, username, namespace) VALUES (?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       bundle    = excluded.bundle,
+       username  = COALESCE(excluded.username, username),
+       namespace = COALESCE(excluded.namespace, namespace)`,
   ),
   getPrekey: db.prepare<[string]>(
-    'SELECT bundle FROM prekey_bundles WHERE key = ?',
+    'SELECT bundle, username FROM prekey_bundles WHERE key = ?',
+  ),
+  getPrekeyByUsername: db.prepare<[string, string]>(
+    'SELECT key, bundle FROM prekey_bundles WHERE namespace = ? AND username = ?',
   ),
   countPrekeys: db.prepare(
     'SELECT COUNT(*) AS cnt FROM prekey_bundles',
@@ -378,15 +394,53 @@ function directoryKey(namespace: string, publicKey: string): string {
   return `${namespace}:${publicKey}`;
 }
 
-function registerPrekey(namespace: string, publicKey: string, bundle: string): void {
-  stmts.upsertPrekey.run(directoryKey(namespace, publicKey), bundle);
+const USERNAME_RE = /^[a-z0-9_-]{3,30}$/;
+
+function validateUsername(raw: string): string | null {
+  const u = raw.toLowerCase().trim();
+  return USERNAME_RE.test(u) ? u : null;
 }
 
-function lookupPrekey(namespace: string, publicKey: string): string | null {
+/** Returns false if the username is already claimed by a different public key. */
+const registerPrekeyTx = db.transaction((
+  namespace: string,
+  publicKey: string,
+  bundle: string,
+  username: string | null,
+): boolean => {
+  const key = directoryKey(namespace, publicKey);
+  if (username) {
+    const existing = stmts.getPrekeyByUsername.get(namespace, username) as
+      | { key: string; bundle: string }
+      | undefined;
+    if (existing && existing.key !== key) return false;
+  }
+  stmts.upsertPrekey.run(key, bundle, username, namespace);
+  return true;
+});
+
+function lookupPrekeyByPublicKey(
+  namespace: string,
+  publicKey: string,
+): { bundle: string; username?: string } | null {
   const row = stmts.getPrekey.get(directoryKey(namespace, publicKey)) as
-    | { bundle: string }
+    | { bundle: string; username: string | null }
     | undefined;
-  return row?.bundle ?? null;
+  if (!row) return null;
+  return { bundle: row.bundle, ...(row.username ? { username: row.username } : {}) };
+}
+
+function lookupPrekeyByUsername(
+  namespace: string,
+  username: string,
+): { bundle: string; publicKey: string } | null {
+  const row = stmts.getPrekeyByUsername.get(namespace, username) as
+    | { key: string; bundle: string }
+    | undefined;
+  if (!row) return null;
+  // key format is "namespace:publicKey"
+  const publicKey = row.key.slice(namespace.length + 1);
+  return { bundle: row.bundle, publicKey };
 }
 
 // ============================================================
@@ -626,13 +680,13 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   // Register prekey bundle
-  // POST /directory  { namespace, publicKey, bundle }
+  // POST /directory  { namespace, publicKey, bundle, username? }
   if (url.pathname === '/directory' && method === 'POST') {
     if (!checkRateLimit(getClientIp(req), 'dir', RATE_LIMIT_DIR)) {
       sendJson(res, 429, { error: 'Too many requests' });
       return;
     }
-    let body: { namespace?: string; publicKey?: string; bundle?: string };
+    let body: { namespace?: string; publicKey?: string; bundle?: string; username?: string };
     try {
       body = JSON.parse(await parseBody(req));
     } catch {
@@ -650,29 +704,63 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       return;
     }
 
-    registerPrekey(namespace, publicKey, bundle);
+    let username: string | null = null;
+    if (typeof body.username === 'string' && body.username) {
+      username = validateUsername(body.username);
+      if (!username) {
+        sendJson(res, 400, { error: 'Invalid username: 3–30 chars, a–z 0–9 _ -' });
+        return;
+      }
+    }
+
+    const ok = registerPrekeyTx(namespace, publicKey, bundle, username);
+    if (!ok) {
+      sendJson(res, 409, { error: 'Username already taken' });
+      return;
+    }
     sendJson(res, 200, { ok: true });
     return;
   }
 
   // Lookup prekey bundle
   // GET /directory?namespace=&publicKey=
+  // GET /directory?namespace=&username=alice
   if (url.pathname === '/directory' && method === 'GET') {
     const namespace = url.searchParams.get('namespace');
-    const publicKey = url.searchParams.get('publicKey');
+    const usernameParam = url.searchParams.get('username');
+    const publicKeyParam = url.searchParams.get('publicKey');
 
-    if (!namespace || !publicKey) {
-      sendJson(res, 400, { error: 'Missing query params: namespace, publicKey' });
+    if (!namespace) {
+      sendJson(res, 400, { error: 'Missing query param: namespace' });
       return;
     }
 
-    const bundle = lookupPrekey(namespace, publicKey);
-    if (!bundle) {
+    if (usernameParam) {
+      const username = validateUsername(usernameParam);
+      if (!username) {
+        sendJson(res, 400, { error: 'Invalid username' });
+        return;
+      }
+      const result = lookupPrekeyByUsername(namespace, username);
+      if (!result) {
+        sendJson(res, 404, { error: 'User not found' });
+        return;
+      }
+      sendJson(res, 200, { bundle: result.bundle, publicKey: result.publicKey, username });
+      return;
+    }
+
+    if (!publicKeyParam) {
+      sendJson(res, 400, { error: 'Missing query param: publicKey or username' });
+      return;
+    }
+
+    const result = lookupPrekeyByPublicKey(namespace, publicKeyParam);
+    if (!result) {
       sendJson(res, 404, { error: 'Prekey bundle not found' });
       return;
     }
-
-    sendJson(res, 200, { bundle });
+    sendJson(res, 200, { bundle: result.bundle, ...(result.username ? { username: result.username } : {}) });
     return;
   }
 
