@@ -4,3 +4,11 @@ dist/
 .env
 video/out/
 video/node_modules/
+
+# LaTeX build artifacts
+docs/*.aux
+docs/*.log
+docs/*.nav
+docs/*.out
+docs/*.snm
+docs/*.toc
