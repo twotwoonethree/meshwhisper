@@ -1,224 +1,110 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
 ---
 
 <Layout>
-
-  <!-- Nav -->
-  <header class="border-b border-slate-800">
-    <nav class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-      <span class="text-white font-semibold tracking-tight text-lg">MeshWhisper</span>
-      <div class="flex items-center gap-6 text-sm text-slate-400">
-        <a href="https://relay.meshwhisper.org/health" class="hover:text-white transition-colors">Status</a>
-        <a href="https://github.com/antonmannering/meshwhisper" class="hover:text-white transition-colors">GitHub</a>
-        <a href="#get-started" class="bg-brand-500 hover:bg-brand-400 text-white px-4 py-1.5 rounded-md font-medium transition-colors">Get started</a>
-      </div>
-    </nav>
-  </header>
+  <Nav />
 
   <main>
 
     <!-- Hero -->
-    <section class="max-w-6xl mx-auto px-6 pt-24 pb-20 text-center">
-      <div class="inline-flex items-center gap-2 bg-brand-950/60 border border-brand-800/50 text-brand-300 text-xs font-medium px-3 py-1.5 rounded-full mb-8">
-        <span class="w-1.5 h-1.5 rounded-full bg-brand-400"></span>
-        Post-quantum secure · X3DH + ML-KEM-768 + Double Ratchet
-      </div>
-
+    <section class="max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
       <h1 class="text-5xl sm:text-6xl font-bold text-white tracking-tight leading-tight mb-6">
-        Encrypted messaging<br />your app <em class="not-italic text-brand-400">cannot read</em>
+        A relay doesn't need to read<br />a message to forward it
       </h1>
 
-      <p class="text-xl text-slate-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-        Add end-to-end encrypted messaging to any app — PWA, React Native, or Node.js —
-        with a few lines of code and one Docker container you run yourself.
-        Messages are encrypted on the device. Your server forwards opaque ciphertext. That's all it can do.
+      <p class="text-xl text-slate-400 max-w-2xl mx-auto mb-8 leading-relaxed">
+        MeshWhisper is messaging infrastructure built on this observation.
+        Encrypted on the device. Forwarded as an opaque blob. Decrypted on the other end.
+        The relay never holds a key. It doesn't need to.
       </p>
+
+      <div class="inline-block bg-slate-900 border border-slate-700 rounded-xl px-6 py-3 font-mono text-brand-300 text-sm mb-10">
+        Relay promiscuously. Connect selectively.
+      </div>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center">
-        <a href="#get-started" class="bg-brand-500 hover:bg-brand-400 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-          Get started
+        <a href="#integrate" class="bg-brand-500 hover:bg-brand-400 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
+          Integrate the SDK
         </a>
-        <a href="https://relay.meshwhisper.org/health" class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-          Live relay ↗
+        <a href="/how-it-works" class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white px-6 py-3 rounded-lg font-semibold transition-colors">
+          How it works →
         </a>
       </div>
     </section>
 
-    <!-- Comparison callout -->
-    <section class="border-y border-slate-800 bg-slate-900/40">
-      <div class="max-w-6xl mx-auto px-6 py-12 grid sm:grid-cols-3 gap-8 text-center">
-        <div>
-          <div class="text-3xl font-bold text-white mb-1">~€4<span class="text-slate-500 text-lg font-normal">/mo</span></div>
-          <div class="text-slate-400 text-sm">Your VPS. Not our servers.</div>
-        </div>
-        <div>
-          <div class="text-3xl font-bold text-white mb-1">3 lines</div>
-          <div class="text-slate-400 text-sm">To add messaging to your app</div>
-        </div>
-        <div>
-          <div class="text-3xl font-bold text-white mb-1">0 messages</div>
-          <div class="text-slate-400 text-sm">We can read. Structurally impossible.</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- How it works -->
-    <section class="max-w-6xl mx-auto px-6 py-24">
-      <h2 class="text-3xl font-bold text-white text-center mb-4">How it works</h2>
-      <p class="text-slate-400 text-center max-w-xl mx-auto mb-16">
-        The protocol is Signal-grade end-to-end encryption. Your node is a dumb forwarder — it moves encrypted blobs and nothing more.
-      </p>
-
-      <div class="grid sm:grid-cols-3 gap-8">
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <div class="w-10 h-10 rounded-lg bg-brand-900 border border-brand-700 flex items-center justify-center text-brand-300 font-bold mb-4">1</div>
-          <h3 class="text-white font-semibold mb-2">Install the SDK</h3>
-          <p class="text-slate-400 text-sm leading-relaxed">
-            Add <code class="text-brand-300 bg-slate-800 px-1 py-0.5 rounded">@meshwhisper/sdk</code> to your app.
-            Call <code class="text-brand-300 bg-slate-800 px-1 py-0.5 rounded">MeshWhisper.init()</code>.
-            The SDK handles key generation, X3DH handshakes, and the Double Ratchet automatically.
-          </p>
-        </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <div class="w-10 h-10 rounded-lg bg-brand-900 border border-brand-700 flex items-center justify-center text-brand-300 font-bold mb-4">2</div>
-          <h3 class="text-white font-semibold mb-2">Run your node</h3>
-          <p class="text-slate-400 text-sm leading-relaxed">
-            One Docker container on a €4/month VPS. It routes encrypted packets, queues messages for offline users,
-            and wakes devices via push notifications. It cannot decrypt anything.
-          </p>
-        </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <div class="w-10 h-10 rounded-lg bg-brand-900 border border-brand-700 flex items-center justify-center text-brand-300 font-bold mb-4">3</div>
-          <h3 class="text-white font-semibold mb-2">Your users message</h3>
-          <p class="text-slate-400 text-sm leading-relaxed">
-            Messages are encrypted on the sender's device and decrypted on the recipient's device.
-            Your server — and ours — never see plaintext. Not by policy. By mathematics.
-          </p>
-        </div>
-      </div>
-    </section>
-
-    <!-- Architecture diagram -->
-    <section class="max-w-4xl mx-auto px-6 pb-24">
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-8 font-mono text-sm">
-        <div class="text-slate-500 mb-4 text-xs">// What the node sees</div>
-        <div class="grid gap-3 text-slate-300">
-          <div class="flex items-center gap-4">
-            <span class="text-brand-400 w-28 shrink-0">Alice's device</span>
-            <span class="text-slate-600">→</span>
-            <span class="text-slate-400">encrypt("Hello Bob")</span>
-            <span class="text-slate-600">→</span>
-            <span class="text-slate-500 italic">0x4f8a2c...</span>
-          </div>
-          <div class="flex items-center gap-4">
-            <span class="text-yellow-400 w-28 shrink-0">Your node</span>
-            <span class="text-slate-600">→</span>
-            <span class="text-slate-400">forward(</span>
-            <span class="text-slate-500 italic">0x4f8a2c...</span>
-            <span class="text-slate-400">)</span>
-            <span class="text-slate-600 ml-2">← that's all</span>
-          </div>
-          <div class="flex items-center gap-4">
-            <span class="text-brand-400 w-28 shrink-0">Bob's device</span>
-            <span class="text-slate-600">→</span>
-            <span class="text-slate-400">decrypt(</span>
-            <span class="text-slate-500 italic">0x4f8a2c...</span>
-            <span class="text-slate-400">)</span>
-            <span class="text-slate-600 mx-2">→</span>
-            <span class="text-green-400">"Hello Bob"</span>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Why different -->
+    <!-- Two-layer summary -->
     <section class="border-t border-slate-800 bg-slate-900/40">
-      <div class="max-w-6xl mx-auto px-6 py-24">
-        <h2 class="text-3xl font-bold text-white text-center mb-4">Why not just use Sendbird?</h2>
-        <p class="text-slate-400 text-center max-w-xl mx-auto mb-16">
-          Hosted messaging services can read everything your users send. MeshWhisper cannot — and neither can you.
-        </p>
-
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-slate-800">
-                <th class="text-left text-slate-500 font-medium py-3 pr-8 w-40"></th>
-                <th class="text-center text-white font-semibold py-3 px-4">MeshWhisper</th>
-                <th class="text-center text-slate-400 font-medium py-3 px-4">Sendbird / Stream</th>
-                <th class="text-center text-slate-400 font-medium py-3 px-4">Build yourself</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800/60">
-              {[
-                ['Monthly cost', '~€4 (your VPS)', '$2,000+', 'Engineers × months'],
-                ['Can read messages', '✗ Impossible', '✓ Yes', 'Depends on you'],
-                ['Time to integrate', '2–4 hours', '1–2 days', 'Months'],
-                ['Push notifications', '✓ Included', 'Add-on', 'Build separately'],
-                ['Message history', '✓ Included', '✓ Included', 'Build separately'],
-                ['Post-quantum crypto', '✓ ML-KEM-768', '✗ No', 'Very hard'],
-                ['You own the data', '✓ Always', '✗ Their servers', '✓ Always'],
-              ].map(([feature, mw, sb, diy]) => (
-                <tr>
-                  <td class="py-3 pr-8 text-slate-400">{feature}</td>
-                  <td class="py-3 px-4 text-center text-white font-medium">{mw}</td>
-                  <td class="py-3 px-4 text-center text-slate-500">{sb}</td>
-                  <td class="py-3 px-4 text-center text-slate-500">{diy}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <div class="max-w-6xl mx-auto px-6 py-20 grid sm:grid-cols-2 gap-8">
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Node layer — live now</div>
+          <h2 class="text-xl font-bold text-white mb-3">The backbone</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            One Docker container. Packet relay, store-and-forward, push notifications, media storage,
+            and a prekey directory. Always on. Always connectable. Never holds a decryption key.
+          </p>
+          <a href="/how-it-works#node-layer" class="text-brand-400 text-sm hover:text-brand-300 transition-colors">How the node works →</a>
+        </div>
+        <div>
+          <div class="text-slate-500 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Device layer — roadmap</div>
+          <h2 class="text-xl font-bold text-white mb-3">The mesh</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            Every device running any SDK-embedded app is a potential relay for every other.
+            The relay infrastructure is shared across all participating applications.
+            The relay mesh is shared. The application namespaces are isolated.
+          </p>
+          <a href="/how-it-works#mesh" class="text-slate-500 text-sm hover:text-slate-400 transition-colors">Read more →</a>
         </div>
       </div>
     </section>
 
-    <!-- Use cases -->
-    <section class="max-w-6xl mx-auto px-6 py-24">
-      <h2 class="text-3xl font-bold text-white text-center mb-4">Who it's for</h2>
-      <p class="text-slate-400 text-center max-w-xl mx-auto mb-16">
-        Any app where your users' privacy matters and you want to prove it structurally, not just claim it in a privacy policy.
-      </p>
-
-      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        {[
-          {
-            icon: '🏥',
-            title: 'Healthcare',
-            body: 'Patient–doctor messaging where you structurally cannot access patient communications. E2EE is your compliance argument.',
-          },
-          {
-            icon: '⚖️',
-            title: 'Legal',
-            body: 'Lawyer–client communications where privilege requires confidentiality. No subpoena can produce what the server never stored.',
-          },
-          {
-            icon: '💼',
-            title: 'Finance',
-            body: 'Advisor–client messaging under increasing regulatory pressure toward E2EE. Tell clients their data is safe — and prove it.',
-          },
-          {
-            icon: '📱',
-            title: 'Any app',
-            body: 'Adding messaging to your product? Skip the six-month build and the privacy liability. Your users deserve E2EE by default.',
-          },
-        ].map(({ icon, title, body }) => (
-          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-            <div class="text-3xl mb-3">{icon}</div>
-            <h3 class="text-white font-semibold mb-2">{title}</h3>
-            <p class="text-slate-400 text-sm leading-relaxed">{body}</p>
+    <!-- Where we are -->
+    <section class="max-w-6xl mx-auto px-6 py-20">
+      <div class="grid sm:grid-cols-3 gap-6">
+        <div class="bg-slate-900 border border-brand-800/50 rounded-xl p-6">
+          <div class="flex items-center gap-2 mb-3">
+            <div class="w-2 h-2 rounded-full bg-brand-400"></div>
+            <div class="text-brand-400 text-xs font-medium uppercase tracking-widest">Stage 1 — Now</div>
           </div>
-        ))}
+          <h3 class="text-white font-semibold mb-2">Foundation node live</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            The relay is running at <code class="text-brand-300">relay.meshwhisper.org</code>.
+            Prudence — the reference PWA — is being built on the SDK.
+          </p>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <div class="flex items-center gap-2 mb-3">
+            <div class="w-2 h-2 rounded-full bg-slate-600"></div>
+            <div class="text-slate-500 text-xs font-medium uppercase tracking-widest">Stage 2</div>
+          </div>
+          <h3 class="text-white font-semibold mb-2">Developer adoption</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Other developers deploy nodes. Multi-node privacy routing becomes real.
+            No single operator sees both ends of a conversation.
+          </p>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <div class="flex items-center gap-2 mb-3">
+            <div class="w-2 h-2 rounded-full bg-slate-600"></div>
+            <div class="text-slate-500 text-xs font-medium uppercase tracking-widest">Stage 3</div>
+          </div>
+          <h3 class="text-white font-semibold mb-2">Mesh density</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Device-layer relay becomes meaningful. Privacy strengthens automatically
+            as a side effect of adoption — the inverse of centralised messaging.
+          </p>
+        </div>
       </div>
     </section>
 
-    <!-- Get started -->
-    <section id="get-started" class="border-t border-slate-800 bg-slate-900/40">
+    <!-- Integrate -->
+    <section id="integrate" class="border-t border-slate-800 bg-slate-900/40">
       <div class="max-w-4xl mx-auto px-6 py-24">
-        <h2 class="text-3xl font-bold text-white text-center mb-4">Get started</h2>
-        <p class="text-slate-400 text-center mb-16">
-          You can use the Foundation-hosted relay at <code class="text-brand-300">wss://relay.meshwhisper.org</code> for development.
-          Run your own node in production.
+        <h2 class="text-3xl font-bold text-white text-center mb-4">Integrate the SDK</h2>
+        <p class="text-slate-400 text-center mb-12">
+          Use the relay at <code class="text-brand-300">wss://relay.meshwhisper.org</code> during development.
+          Deploy your own node in production.
         </p>
 
         <div class="space-y-6">
@@ -236,58 +122,29 @@ import Layout from '../layouts/Layout.astro';
               <span class="text-brand-400">const</span> <span class="text-white">mw</span> <span class="text-slate-400">=</span> <span class="text-brand-400">await</span> <span class="text-yellow-300">MeshWhisper</span><span class="text-slate-300">.</span><span class="text-blue-300">init</span><span class="text-slate-300">({'({'}</span><br />
               <span class="text-slate-300">&nbsp;&nbsp;namespace</span><span class="text-slate-400">:</span> <span class="text-green-400">'com.example.myapp'</span><span class="text-slate-300">,</span><br />
               <span class="text-slate-300">&nbsp;&nbsp;node</span><span class="text-slate-400">:</span> <span class="text-green-400">'wss://relay.meshwhisper.org'</span><span class="text-slate-300">,</span><br />
-              <span class="text-slate-300">&nbsp;&nbsp;onMessage</span><span class="text-slate-400">:</span> <span class="text-slate-300">(msg)</span> <span class="text-brand-400">=&gt;</span> <span class="text-yellow-300">console</span><span class="text-slate-300">.</span><span class="text-blue-300">log</span><span class="text-slate-300">(msg),</span><br />
+              <span class="text-slate-300">&nbsp;&nbsp;onMessage</span><span class="text-slate-400">:</span> <span class="text-slate-300">(msg)</span> <span class="text-brand-400">=&gt;</span> <span class="text-yellow-300">display</span><span class="text-slate-300">(msg),</span><br />
               <span class="text-slate-300">{'})'}</span><span class="text-slate-300">;</span><br /><br />
-              <span class="text-slate-500">// X3DH key exchange happens automatically on first contact</span><br />
+              <span class="text-slate-500">// PQXDH key exchange happens automatically on first contact</span><br />
               <span class="text-brand-400">await</span> <span class="text-yellow-300">MeshWhisper</span><span class="text-slate-300">.</span><span class="text-blue-300">send</span><span class="text-slate-300">(contactId, payload);</span>
             </div>
           </div>
 
           <div>
-            <div class="text-slate-500 text-xs font-medium mb-2 font-mono">3. Deploy your node (production)</div>
+            <div class="text-slate-500 text-xs font-medium mb-2 font-mono">3. Deploy your node</div>
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 font-mono text-sm leading-relaxed">
               <span class="text-slate-500">$</span> <span class="text-white">docker run -d \</span><br />
-              <span class="text-white">&nbsp;&nbsp;-p 8080:8080 \</span><br />
               <span class="text-white">&nbsp;&nbsp;-v meshwhisper_data:/data \</span><br />
               <span class="text-white">&nbsp;&nbsp;-e BASE_URL=https://relay.myapp.com \</span><br />
               <span class="text-white">&nbsp;&nbsp;ghcr.io/meshwhisper/node:latest</span>
             </div>
           </div>
         </div>
-      </div>
-    </section>
 
-    <!-- Security section -->
-    <section class="max-w-6xl mx-auto px-6 py-24">
-      <h2 class="text-3xl font-bold text-white text-center mb-4">The cryptography</h2>
-      <p class="text-slate-400 text-center max-w-xl mx-auto mb-16">
-        Built on audited, peer-reviewed primitives. No homebrew crypto.
-      </p>
-
-      <div class="grid sm:grid-cols-2 gap-6">
-        {[
-          {
-            title: 'Post-quantum key exchange (PQXDH)',
-            body: 'Hybrid X3DH + ML-KEM-768. Sessions are secure against both classical and quantum adversaries from the first message. Matches Signal\'s PQXDH specification.',
-          },
-          {
-            title: 'Double Ratchet',
-            body: 'Every message uses a fresh key. Compromise of one key exposes neither past nor future messages. Implemented to the Signal specification with out-of-order delivery support.',
-          },
-          {
-            title: 'Safety numbers',
-            body: 'Signal-style 60-digit verification codes. Both parties compute the same number from their Ed25519 identity keys. Compare out-of-band to verify no MITM.',
-          },
-          {
-            title: 'Audited primitives',
-            body: '@noble/curves, @noble/ciphers, @noble/hashes, @noble/post-quantum. Pure JavaScript, no WASM, no native bindings. Runs identically in browser, Node.js, and React Native.',
-          },
-        ].map(({ title, body }) => (
-          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-            <h3 class="text-white font-semibold mb-2">{title}</h3>
-            <p class="text-slate-400 text-sm leading-relaxed">{body}</p>
-          </div>
-        ))}
+        <div class="mt-8 text-center text-sm text-slate-500">
+          <a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/api.md" class="hover:text-slate-300 transition-colors">Full API reference →</a>
+          <span class="mx-3">·</span>
+          <a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/self-hosting.md" class="hover:text-slate-300 transition-colors">Self-hosting guide →</a>
+        </div>
       </div>
     </section>
 
@@ -298,18 +155,20 @@ import Layout from '../layouts/Layout.astro';
     <div class="max-w-6xl mx-auto px-6 py-12 flex flex-col sm:flex-row justify-between gap-6 text-sm text-slate-500">
       <div>
         <div class="text-white font-semibold mb-1">MeshWhisper</div>
-        <div>End-to-end encrypted messaging for any app.</div>
+        <div>MIT licensed. Self-hosting always free.</div>
       </div>
       <div class="flex gap-8">
         <div class="space-y-2">
-          <div class="text-slate-400 font-medium">Developers</div>
-          <div><a href="https://github.com/antonmannering/meshwhisper" class="hover:text-white transition-colors">GitHub</a></div>
-          <div><a href="https://relay.meshwhisper.org/health" class="hover:text-white transition-colors">Relay status</a></div>
+          <div class="text-slate-400 font-medium">Learn</div>
+          <div><a href="/how-it-works" class="hover:text-white transition-colors">How it works</a></div>
+          <div><a href="/security" class="hover:text-white transition-colors">Security</a></div>
+          <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/whitepaper.md" class="hover:text-white transition-colors">Whitepaper</a></div>
         </div>
         <div class="space-y-2">
-          <div class="text-slate-400 font-medium">Protocol</div>
-          <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/whitepaper.md" class="hover:text-white transition-colors">Whitepaper</a></div>
+          <div class="text-slate-400 font-medium">Developers</div>
           <div><a href="https://github.com/antonmannering/meshwhisper/blob/main/docs/api.md" class="hover:text-white transition-colors">API reference</a></div>
+          <div><a href="https://github.com/antonmannering/meshwhisper" class="hover:text-white transition-colors">GitHub</a></div>
+          <div><a href="https://relay.meshwhisper.org/health" class="hover:text-white transition-colors">Relay status</a></div>
         </div>
       </div>
     </div>

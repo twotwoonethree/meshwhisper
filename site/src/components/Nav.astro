@@ -1,0 +1,35 @@
+---
+interface Props {
+  current?: string;
+}
+const { current } = Astro.props;
+
+const links = [
+  { href: '/how-it-works', label: 'How it works' },
+  { href: '/security', label: 'Security' },
+  { href: 'https://github.com/antonmannering/meshwhisper/blob/main/docs/api.md', label: 'Docs', external: true },
+];
+---
+
+<header class="border-b border-slate-800">
+  <nav class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+    <a href="/" class="text-white font-semibold tracking-tight text-lg">MeshWhisper</a>
+    <div class="flex items-center gap-6 text-sm">
+      {links.map(({ href, label, external }) => (
+        <a
+          href={href}
+          target={external ? '_blank' : undefined}
+          class={`transition-colors ${current === label ? 'text-white' : 'text-slate-400 hover:text-white'}`}
+        >
+          {label}
+        </a>
+      ))}
+      <a href="https://github.com/antonmannering/meshwhisper" class="text-slate-400 hover:text-white transition-colors">
+        GitHub
+      </a>
+      <a href="/#integrate" class="bg-brand-500 hover:bg-brand-400 text-white px-4 py-1.5 rounded-md font-medium transition-colors">
+        Get started
+      </a>
+    </div>
+  </nav>
+</header>
