@@ -5,6 +5,11 @@ dist/
 video/out/
 video/node_modules/
 
+# Site build output
+site/dist/
+site/node_modules/
+site/.astro/
+
 # LaTeX build artifacts
 docs/*.aux
 docs/*.log
