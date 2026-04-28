@@ -19,6 +19,7 @@ import type {
   MeshWhisperConfig,
   StorageBackend,
   StoredMessage,
+  Conversation,
   Transport as MWTransport,
 } from '../types.js';
 import { PacketFlags } from '../types.js';
@@ -36,6 +37,10 @@ import {
   serializePreKeyBundle,
   deserializePreKeyBundle,
 } from '../x3dh/index.js';
+import {
+  computeFingerprint,
+  verifySafetyNumber,
+} from '../fingerprint/index.js';
 import {
   ratchetEncrypt,
 } from '../ratchet/index.js';
@@ -100,7 +105,7 @@ export interface MediaMessage {
 
 export interface CreateGroupOptions {
   name: string;
-  members: string[];
+  members?: string[];
   permissionModel?: PermissionModel;
 }
 
@@ -136,6 +141,10 @@ export class GroupHandle {
 
   removeMember(peerId: string): void {
     this.sdk['groupManager'].removeMember(this.group.id, peerId);
+  }
+
+  leave(): void {
+    this.sdk['groupManager'].leaveGroup(this.group.id);
   }
 }
 
@@ -191,6 +200,10 @@ export class MeshWhisper {
 
   // --- Event handlers ---
   private onPresenceHandler: ((peerId: string, status: PresenceStatus) => void) | null = null;
+  private onTypingHandler: ((peerId: string, isTyping: boolean) => void) | null = null;
+  private onContactRequestHandler: ((peerId: string, introducedBy: string, username?: string) => void | Promise<void>) | null = null;
+  private onGroupInviteHandler: ((groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>) | null = null;
+  private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
   // --- Connection state & offline queue ---
@@ -300,9 +313,21 @@ export class MeshWhisper {
       (peerId, payload) => this.sendControl(peerId, payload),
       this.cluster,
       (ctrl, fromPeerId) => this.handleSybilControl(ctrl, fromPeerId),
+      () => this.sessionManager.scheduleReestablishment(),
+      (groupId, groupSenderId, ciphertext) => {
+        try {
+          const plaintext = this.groupManager.decryptFromGroup(groupId, groupSenderId, ciphertext);
+          return { plaintext };
+        } catch {
+          return null;
+        }
+      },
     );
 
     this.onPresenceHandler = config.onPresence ?? null;
+    this.onTypingHandler = config.onTyping ?? null;
+    this.onContactRequestHandler = config.onContactRequest ?? null;
+    this.onGroupInviteHandler = config.onGroupInvite ?? null;
   }
 
   // ================================================================
@@ -316,6 +341,12 @@ export class MeshWhisper {
 
     const isBrowser =
       typeof window !== 'undefined' && typeof indexedDB !== 'undefined';
+    const isNode =
+      typeof process !== 'undefined' && !!process.versions?.node;
+    // React Native: WebSocket is available globally but neither browser APIs
+    // nor Node.js process are present. Behaves like browser transport-wise
+    // but requires an explicit storage backend (no IndexedDB).
+    const isReactNative = !isBrowser && !isNode;
 
     // Storage
     let storage: StorageBackend | null = config.storage ?? null;
@@ -369,7 +400,7 @@ export class MeshWhisper {
       }
     };
 
-    if (isBrowser) {
+    if (isBrowser || isReactNative) {
       const [{ NoOpTransport }, { BrowserTransport }] = await Promise.all([
         import('../transport/noop/index.js'),
         import('../transport/browser/index.js'),
@@ -437,7 +468,7 @@ export class MeshWhisper {
     }
 
     const bundle = this.sessionManager.getOrCreatePreKeyBundle();
-    this.sessionManager.publishPreKeyBundle(bundle).catch(() => {});
+    this.sessionManager.publishPreKeyBundle(bundle, this.config.username).catch(() => {});
 
     this.chaffGenerator.onChaffGenerated((packet: Packet) => {
       this.negotiator.broadcast(packet).catch(() => {});
@@ -573,6 +604,7 @@ export class MeshWhisper {
 
     const isControl = isControlPayload(payload);
     if (!isControl) {
+      const expiresAt = options?.expiry ? envelope.timestamp + options.expiry * 1000 : undefined;
       await this.messageHandler.saveMessage({
         id: messageId,
         conversationId: recipientId,
@@ -582,7 +614,45 @@ export class MeshWhisper {
         timestamp: envelope.timestamp,
         direction: 'outbound',
         status: 'sent',
+        expiresAt,
       });
+    }
+  }
+
+  /** Like sendMessage but skips the outbound persistence step. Used by sendToGroup
+   *  which manages its own storage under the group conversation ID. */
+  private async sendMessageRaw(recipientId: string, payload: Uint8Array): Promise<void> {
+    await this.sessionManager.ensureSession(recipientId);
+    const session = this.sessionManager.getSession(recipientId);
+    if (!session) throw new Error(`No session for ${recipientId}`);
+
+    const envelope = {
+      id: generateMessageId(),
+      senderId: this.getLocalPeerId(),
+      recipientId,
+      payload: Array.from(payload),
+      timestamp: Date.now(),
+      urgency: 'normal',
+    };
+
+    const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));
+    const compressed = compressPayload(envelopeBytes);
+    const { state: newState, header, ciphertext } = ratchetEncrypt(session, compressed);
+    this.sessionManager.setSession(recipientId, newState);
+
+    const headerBytes = serializeRatchetHeader(header);
+    const fullPayload = concat(headerBytes, ciphertext);
+
+    const recipientPublicKey = this.peerCache.getPeerPublicKey(recipientId);
+    if (!recipientPublicKey) throw new Error(`No public key for recipient ${recipientId}`);
+
+    const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
+    const senderEphId = this.identity.generateEphemeralId();
+    const packet = createDataPacket(destHash, senderEphId, fullPayload);
+
+    const burst = this.chaffGenerator.camouflageRealMessage(packet);
+    for (const p of burst) {
+      await this.routeAndSend(p, recipientId);
     }
   }
 
@@ -669,37 +739,143 @@ export class MeshWhisper {
 
   createGroupInstance(options: CreateGroupOptions): GroupHandle {
     this.assertRunning();
-    const group = this.groupManager.createGroup(options.name, options.members, options.permissionModel ?? 'open');
+    const group = this.groupManager.createGroup(options.name, options.members ?? [], options.permissionModel ?? 'open');
+
+    // Send an invite to each initial member over their pairwise encrypted channel
+    const members = this.groupManager.getMembers(group.id);
+    const senderKeysRecord: Record<string, number[]> = {};
+    for (const m of members) {
+      const key = this.groupManager.getSenderKey(group.id, m.id);
+      if (key) senderKeysRecord[m.id] = Array.from(key);
+    }
+    for (const m of members) {
+      if (m.id === this.getLocalPeerId()) continue;
+      this.sendControl(m.id, {
+        __mw_ctrl: 'group_invite',
+        groupInvite: {
+          groupId: group.id,
+          groupName: group.name,
+          invitedBy: this.getLocalPeerId(),
+          members: members.map((mem) => mem.id),
+          senderKeys: senderKeysRecord,
+        },
+      });
+    }
+
     return new GroupHandle(group, this);
   }
 
-  getGroup(groupId: string): GroupHandle | null {
+  static getGroup(groupId: string): GroupHandle | null {
+    return MeshWhisper.instance.getGroupInstance(groupId);
+  }
+
+  getGroupInstance(groupId: string): GroupHandle | null {
     const group = this.groupManager.getGroup(groupId);
     if (!group) return null;
     return new GroupHandle(group, this);
   }
 
-  getGroups(): GroupHandle[] {
+  static getGroups(): GroupHandle[] {
+    return MeshWhisper.instance.getGroupsInstance();
+  }
+
+  getGroupsInstance(): GroupHandle[] {
     return this.groupManager.getGroups().map(g => new GroupHandle(g, this));
+  }
+
+  /** Returns the peer IDs of all pending (not yet accepted) group invites. */
+  static getPendingGroupInvites(): Array<{ groupId: string; groupName: string; invitedBy: string; members: string[] }> {
+    return MeshWhisper.instance.getPendingGroupInvitesInstance();
+  }
+
+  getPendingGroupInvitesInstance(): Array<{ groupId: string; groupName: string; invitedBy: string; members: string[] }> {
+    return [...this.pendingGroupInvites.values()].map((inv) => ({
+      groupId: inv.groupId,
+      groupName: inv.groupName,
+      invitedBy: inv.invitedBy,
+      members: inv.members,
+    }));
+  }
+
+  /** Returns the local peer's hex-encoded Ed25519 public key (their "address"). */
+  static getLocalPeerId(): string {
+    return MeshWhisper.instance.getLocalPeerId();
+  }
+
+  getGroup(groupId: string): GroupHandle | null {
+    return this.getGroupInstance(groupId);
+  }
+
+  getGroups(): GroupHandle[] {
+    return this.getGroupsInstance();
   }
 
   async sendToGroup(groupId: string, payload: Uint8Array): Promise<void> {
     this.assertRunning();
     const { ciphertext, senderId } = this.groupManager.encryptForGroup(groupId, payload);
-    const targets = this.groupManager.routeGroupMessage(groupId, ciphertext, senderId);
+    const members = this.groupManager.getMembers(groupId);
 
-    await Promise.allSettled(targets.map(async (target) => {
-      try {
-        const recipientPublicKey = this.peerCache.getPeerPublicKey(target.peerId);
-        if (!recipientPublicKey) return;
-        const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
-        const senderEphId = this.identity.generateEphemeralId();
-        const packet = createDataPacket(destHash, senderEphId, target.data);
-        await this.routeAndSend(packet, target.peerId);
-      } catch {
-        // Best effort per member
-      }
-    }));
+    // Wrap in a group envelope so receivers can identify it and decrypt with
+    // the sender key. Delivered pairwise (Double Ratchet) to each member.
+    // The GROUP_ENVELOPE_MARKER prefix lets MessageHandler detect and route it.
+    const envelopePayload = new TextEncoder().encode(
+      JSON.stringify({ __mw_grp: groupId, sid: senderId, d: Array.from(ciphertext) }),
+    );
+
+    // Store the outbound message once under the group conversation ID.
+    const messageId = this.messageHandler.createMessageId();
+    const now = Date.now();
+    await this.messageHandler.saveMessage({
+      id: messageId,
+      conversationId: groupId,
+      senderId: this.getLocalPeerId(),
+      recipientId: groupId,
+      payload: Array.from(payload),
+      timestamp: now,
+      direction: 'outbound',
+      status: 'sent',
+      groupId,
+      groupSenderId: this.getLocalPeerId(),
+    });
+
+    await Promise.allSettled(
+      members
+        .filter((m) => m.id !== this.getLocalPeerId())
+        .map(async (m) => {
+          try {
+            // Pass the group envelope as a raw payload, skipping the auto-save
+            // in sendMessage (which would store it under m.id, not groupId).
+            await this.sendMessageRaw(m.id, envelopePayload);
+          } catch {
+            // Best effort per member
+          }
+        }),
+    );
+  }
+
+  // ================================================================
+  // Public API — Group invites
+  // ================================================================
+
+  /**
+   * Accepts a pending group invite. Joins the group and makes it available
+   * for messaging. The invite must have been received via `onGroupInvite`.
+   */
+  static acceptGroupInvite(groupId: string): void {
+    MeshWhisper.instance.acceptGroupInviteInstance(groupId);
+  }
+
+  acceptGroupInviteInstance(groupId: string): void {
+    this.assertRunning();
+    const invite = this.pendingGroupInvites.get(groupId);
+    if (!invite) throw new Error(`No pending invite for group ${groupId}`);
+    this.groupManager.joinGroup(groupId, invite);
+    this.pendingGroupInvites.delete(groupId);
+  }
+
+  /** Discards a pending group invite without joining. */
+  static declineGroupInvite(groupId: string): void {
+    MeshWhisper.instance.pendingGroupInvites.delete(groupId);
   }
 
   // ================================================================
@@ -790,7 +966,7 @@ export class MeshWhisper {
   generateContactQRInstance(): string {
     this.assertRunning();
     const bundle = this.sessionManager.getOrCreatePreKeyBundle();
-    this.sessionManager.publishPreKeyBundle(bundle).catch(() => {});
+    this.sessionManager.publishPreKeyBundle(bundle, this.config.username).catch(() => {});
 
     const serialized = serializePreKeyBundle(bundle);
     const peerIdBytes = new TextEncoder().encode(this.getLocalPeerId());
@@ -843,12 +1019,12 @@ export class MeshWhisper {
     return MeshWhisper.instance.addContactByKeyInstance(publicKey);
   }
 
-  async addContactByKeyInstance(publicKey: string): Promise<boolean> {
+  async addContactByKeyInstance(query: string): Promise<boolean> {
     this.assertRunning();
-    const bundle = await this.sessionManager.lookupPreKeyBundle(publicKey);
-    if (!bundle) return false;
+    const result = await this.sessionManager.lookupPreKeyBundle(query);
+    if (!result) return false;
 
-    // Derive the peer ID (X25519 public key hex) from the Ed25519 public key
+    const { bundle, publicKey } = result;
     const edPubBytes = hexToUint8Array(publicKey);
     const x25519PubBytes = edwardsToMontgomeryPub(edPubBytes);
     const peerId = uint8ArrayToHex(x25519PubBytes);
@@ -877,19 +1053,65 @@ export class MeshWhisper {
 
     const pubKeyA = this.peerCache.getPeerPublicKey(peerA);
     const pubKeyB = this.peerCache.getPeerPublicKey(peerB);
+    const myId = this.getLocalPeerId();
 
     if (pubKeyA && pubKeyB) {
+      const usernameA = await this.resolveUsername(peerA);
+      const usernameB = await this.resolveUsername(peerB);
       await Promise.allSettled([
-        this.sendMessage(peerA, new TextEncoder().encode(JSON.stringify({
-          type: 'introduction', introducedPeerId: peerB,
-          introducedPublicKey: Array.from(pubKeyB), introducedBy: this.getLocalPeerId(),
-        }))),
-        this.sendMessage(peerB, new TextEncoder().encode(JSON.stringify({
-          type: 'introduction', introducedPeerId: peerA,
-          introducedPublicKey: Array.from(pubKeyA), introducedBy: this.getLocalPeerId(),
-        }))),
+        this.sendControl(peerA, {
+          __mw_ctrl: 'contact_request',
+          contactRequest: {
+            introducedPeerId: peerB,
+            introducedPublicKey: Array.from(pubKeyB),
+            introducedBy: myId,
+            ...(usernameB ? { username: usernameB } : {}),
+          },
+        }),
+        this.sendControl(peerB, {
+          __mw_ctrl: 'contact_request',
+          contactRequest: {
+            introducedPeerId: peerA,
+            introducedPublicKey: Array.from(pubKeyA),
+            introducedBy: myId,
+            ...(usernameA ? { username: usernameA } : {}),
+          },
+        }),
       ]);
     }
+  }
+
+  // ================================================================
+  // Public API — Contact management
+  // ================================================================
+
+  /** Returns all peer IDs that have been added as contacts. */
+  static getContacts(): string[] {
+    return MeshWhisper.instance.permissionManager.getContacts();
+  }
+
+  /** Removes a contact. The session is preserved but the peer loses contact
+   *  privileges (e.g. in 'mutual' permission model they can no longer send). */
+  static removeContact(peerId: string): void {
+    MeshWhisper.instance.permissionManager.removeContact(peerId);
+    MeshWhisper.instance.storage?.set(
+      'contacts',
+      JSON.stringify(MeshWhisper.instance.permissionManager.getContacts()),
+    ).catch(() => {});
+  }
+
+  /** Blocks a peer. Blocked peers' packets are dropped on arrival. */
+  static blockPeer(peerId: string): void {
+    const inst = MeshWhisper.instance;
+    inst.permissionManager.blockPeer(peerId);
+    inst.storage?.set('blocked', JSON.stringify(inst.permissionManager.getBlocked())).catch(() => {});
+  }
+
+  /** Unblocks a previously blocked peer. */
+  static unblockPeer(peerId: string): void {
+    const inst = MeshWhisper.instance;
+    inst.permissionManager.unblockPeer(peerId);
+    inst.storage?.set('blocked', JSON.stringify(inst.permissionManager.getBlocked())).catch(() => {});
   }
 
   // ================================================================
@@ -937,6 +1159,14 @@ export class MeshWhisper {
     return this.messageHandler.getMessages(peerId, options);
   }
 
+  static async getConversations(): Promise<Conversation[]> {
+    return MeshWhisper.instance.getConversationsInstance();
+  }
+
+  async getConversationsInstance(): Promise<Conversation[]> {
+    return this.messageHandler.getConversations();
+  }
+
   static async markRead(messageId: string, peerId: string): Promise<void> {
     return MeshWhisper.instance.markReadInstance(messageId, peerId);
   }
@@ -945,6 +1175,84 @@ export class MeshWhisper {
     this.assertRunning();
     await this.messageHandler.updateMessageStatus(messageId, peerId, 'read');
     this.sendControl(peerId, { __mw_ctrl: 'read', messageId });
+  }
+
+  /**
+   * Deletes a message locally and sends a delete request to the other party.
+   * `conversationId` is the peer ID for DMs or the group ID for group messages.
+   */
+  static async deleteMessage(messageId: string, conversationId: string): Promise<void> {
+    return MeshWhisper.instance.deleteMessageInstance(messageId, conversationId);
+  }
+
+  async deleteMessageInstance(messageId: string, conversationId: string): Promise<void> {
+    this.assertRunning();
+    await this.messageHandler.removeMessage(messageId, conversationId);
+    // Best-effort remote delete — works for DMs; for groups we'd need to fan out
+    if (this.permissionManager.isContact(conversationId)) {
+      this.sendControl(conversationId, { __mw_ctrl: 'delete', messageId });
+    } else {
+      // Group: send to all members
+      const members = this.groupManager.getMembers(conversationId);
+      for (const m of members) {
+        if (m.id !== this.getLocalPeerId()) {
+          this.sendControl(m.id, { __mw_ctrl: 'delete', messageId });
+        }
+      }
+    }
+  }
+
+  static sendTyping(peerId: string): void {
+    MeshWhisper.instance.sendControl(peerId, { __mw_ctrl: 'typing_start' });
+  }
+
+  static stopTyping(peerId: string): void {
+    MeshWhisper.instance.sendControl(peerId, { __mw_ctrl: 'typing_stop' });
+  }
+
+  // ================================================================
+  // Public API — Key Verification
+  // ================================================================
+
+  /**
+   * Returns the safety number for the session with `peerId`.
+   *
+   * A safety number is a 60-digit string (12 groups of 5 digits) derived
+   * from both parties' long-term Ed25519 identity keys. It is identical on
+   * both sides — Alice and Bob compute the same number independently.
+   *
+   * Show this in the UI and ask the user to compare it with their contact
+   * out-of-band (in person, over a phone call, or via QR code). A match
+   * confirms the session has not been intercepted via the relay directory.
+   *
+   * Throws if no identity key is known for the peer yet (session not established).
+   */
+  static getSafetyNumber(peerId: string): string {
+    return MeshWhisper.instance.getSafetyNumberInstance(peerId);
+  }
+
+  getSafetyNumberInstance(peerId: string): string {
+    const localKey = this.identity.getEdPublicKey();
+    const peerKey = this.sessionManager.getPeerEdKey(peerId);
+    if (!peerKey) {
+      throw new Error(`No identity key known for peer ${peerId} — session not yet established`);
+    }
+    return computeFingerprint(localKey, peerKey);
+  }
+
+  /**
+   * Returns true if `candidate` matches the expected safety number for `peerId`.
+   * Tolerates extra whitespace, dashes, or other separators.
+   */
+  static verifySafetyNumber(peerId: string, candidate: string): boolean {
+    return MeshWhisper.instance.verifySafetyNumberInstance(peerId, candidate);
+  }
+
+  verifySafetyNumberInstance(peerId: string, candidate: string): boolean {
+    const localKey = this.identity.getEdPublicKey();
+    const peerKey = this.sessionManager.getPeerEdKey(peerId);
+    if (!peerKey) return false;
+    return verifySafetyNumber(localKey, peerKey, candidate);
   }
 
   // ================================================================
@@ -1211,6 +1519,43 @@ export class MeshWhisper {
         this.sybilManager.acceptReputationProof(ctrl.reputationProof, fromPeerId, peerEdPubKey);
         break;
       }
+
+      case 'typing_start':
+        this.onTypingHandler?.(fromPeerId, true);
+        break;
+
+      case 'typing_stop':
+        this.onTypingHandler?.(fromPeerId, false);
+        break;
+
+      case 'contact_request': {
+        const cr = ctrl.contactRequest;
+        if (!cr || !this.onContactRequestHandler) break;
+        this.onContactRequestHandler(cr.introducedPeerId, cr.introducedBy, cr.username)
+          ?.catch(() => {});
+        break;
+      }
+
+      case 'group_invite': {
+        const inv = ctrl.groupInvite;
+        if (!inv) break;
+        // Reconstruct senderKeys map
+        const senderKeys = new Map<string, Uint8Array>();
+        for (const [id, arr] of Object.entries(inv.senderKeys)) {
+          senderKeys.set(id, new Uint8Array(arr));
+        }
+        const invite: import('../group/index.js').GroupInvite = {
+          groupId: inv.groupId,
+          groupName: inv.groupName,
+          invitedBy: inv.invitedBy,
+          senderKeys,
+          members: inv.members,
+        };
+        this.pendingGroupInvites.set(inv.groupId, invite);
+        this.onGroupInviteHandler?.(inv.groupId, inv.groupName, inv.invitedBy, inv.members)
+          ?.catch(() => {});
+        break;
+      }
     }
   }
 
@@ -1218,6 +1563,14 @@ export class MeshWhisper {
    * Regenerates our relay reputation proof from the current ledger state
    * and sends it to all contacts we have sessions with.
    */
+  /** Resolves a peer's registered username from the relay directory, or undefined. */
+  private async resolveUsername(peerId: string): Promise<string | undefined> {
+    const edKey = this.sessionManager.getPeerEdKey(peerId);
+    if (!edKey) return undefined;
+    const result = await this.sessionManager.lookupPreKeyBundle(uint8ArrayToHex(edKey));
+    return result?.username;
+  }
+
   private broadcastReputationProof(): void {
     const proof = this.sybilManager.buildLocalProof(
       this.reciprocityLedger,
@@ -1249,6 +1602,7 @@ export class MeshWhisper {
 
     await this.sessionManager.loadSessions();
     await this.messageHandler.loadSeenIds();
+    await this.messageHandler.purgeExpiredMessages();
 
     // Peer public keys
     const peerKeys = await this.storage.keys('peers/');
@@ -1263,6 +1617,14 @@ export class MeshWhisper {
     const contactsRaw = await this.storage.get('contacts');
     if (contactsRaw) {
       this.permissionManager.loadContacts(JSON.parse(contactsRaw) as string[]);
+    }
+
+    // Blocked peers
+    const blockedRaw = await this.storage.get('blocked');
+    if (blockedRaw) {
+      for (const peerId of JSON.parse(blockedRaw) as string[]) {
+        this.permissionManager.blockPeer(peerId);
+      }
     }
   }
 

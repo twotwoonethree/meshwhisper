@@ -11,6 +11,7 @@
 // ============================================================
 
 import { edwardsToMontgomeryPub } from '@noble/curves/ed25519';
+import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 import type { KeyPair, Packet, PreKeyBundle, StorageBackend } from '../types.js';
 import {
   deriveDestHash,
@@ -58,6 +59,12 @@ export class SessionManager {
   // Double Ratchet session state, keyed by peer ID
   private readonly sessions: Map<string, RatchetState> = new Map();
 
+  // Re-establishment debounce — prevents spamming handshakes on bursts of
+  // undecryptable packets and enforces a 60s cooldown between attempts.
+  private reestablishTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastReestablishAt = 0;
+  private static readonly REESTABLISH_COOLDOWN_MS = 60_000;
+
   // Peer pre-key bundles (needed for initiating X3DH and re-establishment)
   private readonly peerPreKeyBundles: Map<string, PreKeyBundle> = new Map();
 
@@ -83,6 +90,12 @@ export class SessionManager {
   // Must survive restarts so incoming X3DH handshakes can be completed with
   // the same key that was published in the pre-key bundle / contact QR.
   private signedPreKeyPair: KeyPair | null = null;
+
+  // ML-KEM-768 key pair for PQXDH. Generated alongside the signed pre-key
+  // and persisted in storage. Public key is included in the pre-key bundle;
+  // secret key is used to decapsulate incoming handshakes.
+  private pqSecretKey: Uint8Array | null = null;
+  private pqPublicKey: Uint8Array | null = null;
 
   // Pool of one-time pre-keys, keyed by public key hex. Maintained locally;
   // public keys are uploaded to the relay so initiators can claim one atomically.
@@ -175,16 +188,26 @@ export class SessionManager {
           privateKey: hexToUint8Array(privHex!),
         };
       }
+      const savedPQSK = await this.storage.get('pq_secret_key');
+      const savedPQPK = await this.storage.get('pq_public_key');
+      if (savedPQSK && savedPQPK) {
+        this.pqSecretKey = hexToUint8Array(savedPQSK);
+        this.pqPublicKey = hexToUint8Array(savedPQPK);
+      }
     }
 
     if (!this.signedPreKeyPair) {
-      const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
+      const { signedPreKeyPair, pqSecretKey, bundle } = generatePreKeyBundle(edKeyPair);
       this.signedPreKeyPair = signedPreKeyPair;
+      this.pqSecretKey = pqSecretKey;
+      this.pqPublicKey = bundle.pqPublicKey!;
       if (this.storage) {
         await this.storage.set(
           'signed_pre_key',
           `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
         );
+        await this.storage.set('pq_secret_key', uint8ArrayToHex(pqSecretKey));
+        await this.storage.set('pq_public_key', uint8ArrayToHex(bundle.pqPublicKey!));
       }
     }
 
@@ -309,6 +332,31 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Schedules a re-establishment attempt with all known contacts.
+   * Debounced: waits 2s after the first trigger, then enforces a 60s cooldown
+   * so a burst of undecryptable packets doesn't flood the network with handshakes.
+   */
+  scheduleReestablishment(): void {
+    if (this.reestablishTimer !== null) return; // already pending
+    if (Date.now() - this.lastReestablishAt < SessionManager.REESTABLISH_COOLDOWN_MS) return;
+    this.reestablishTimer = setTimeout(() => {
+      this.reestablishTimer = null;
+      this.lastReestablishAt = Date.now();
+      this.reestablishAllSessions().catch(() => {});
+    }, 2_000);
+  }
+
+  private async reestablishAllSessions(): Promise<void> {
+    for (const [peerId, bundle] of this.peerPreKeyBundles) {
+      try {
+        await this.initiateHandshake(peerId, bundle);
+      } catch {
+        // Peer offline — try again on next decrypt failure after cooldown
+      }
+    }
+  }
+
   // ----------------------------------------------------------------
   // Pre-key bundle (QR / directory)
   // ----------------------------------------------------------------
@@ -325,13 +373,17 @@ export class SessionManager {
         publicKey: this.identity.getEdPublicKey(),
         privateKey: this.identity.getEdPrivateKey(),
       };
-      const { signedPreKeyPair } = generatePreKeyBundle(edKeyPair);
+      const { signedPreKeyPair, pqSecretKey, bundle } = generatePreKeyBundle(edKeyPair);
       this.signedPreKeyPair = signedPreKeyPair;
+      this.pqSecretKey = pqSecretKey;
+      this.pqPublicKey = bundle.pqPublicKey!;
       if (this.storage) {
         this.storage.set(
           'signed_pre_key',
           `${uint8ArrayToHex(signedPreKeyPair.publicKey)}:${uint8ArrayToHex(signedPreKeyPair.privateKey)}`,
         ).catch(() => {});
+        this.storage.set('pq_secret_key', uint8ArrayToHex(pqSecretKey)).catch(() => {});
+        this.storage.set('pq_public_key', uint8ArrayToHex(bundle.pqPublicKey!)).catch(() => {});
       }
     }
 
@@ -339,16 +391,21 @@ export class SessionManager {
       identityKey: this.identity.getEdPublicKey(),
       signedPreKey: this.signedPreKeyPair.publicKey,
       signedPreKeySignature: this.identity.signData(this.signedPreKeyPair.publicKey),
+      pqPublicKey: this.pqPublicKey ?? undefined,
       // OPKs are distributed via the relay /opks pool, not embedded in the bundle.
-      // Initiators claim one atomically from the relay before starting X3DH.
     };
   }
 
   /**
    * Looks up a peer's pre-key bundle from the relay's /directory endpoint.
-   * Returns null if the peer has not published a bundle or is not found.
+   *
+   * `query` may be:
+   *   - a hex Ed25519 public key (64 chars)
+   *   - a `@username` string (relay resolves to public key)
+   *
+   * Returns null if the peer is not found or the relay is unreachable.
    */
-  async lookupPreKeyBundle(publicKey: string): Promise<PreKeyBundle | null> {
+  async lookupPreKeyBundle(query: string): Promise<{ bundle: PreKeyBundle; publicKey: string; username?: string } | null> {
     const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
     const primaryWsUrl = wsUrls[0];
     if (!primaryWsUrl || primaryWsUrl === 'mesh') return null;
@@ -357,22 +414,31 @@ export class SessionManager {
       .replace(/^wss:\/\//, 'https://')
       .replace(/^ws:\/\//, 'http://');
 
+    const param = query.startsWith('@') ? 'username' : 'publicKey';
     const res = await fetch(
-      `${httpUrl}/directory?namespace=${encodeURIComponent(this.namespace)}&publicKey=${encodeURIComponent(publicKey)}`,
+      `${httpUrl}/directory?namespace=${encodeURIComponent(this.namespace)}&${param}=${encodeURIComponent(query)}`,
     );
     if (!res.ok) return null;
 
-    const json = await res.json() as { bundle?: string };
+    const json = await res.json() as { bundle?: string; publicKey?: string; username?: string };
     if (!json.bundle) return null;
 
-    return deserializePreKeyBundle(base64ToUint8Array(json.bundle));
+    const resolvedKey = json.publicKey ?? (param === 'publicKey' ? query : null);
+    if (!resolvedKey) return null;
+
+    return {
+      bundle: deserializePreKeyBundle(base64ToUint8Array(json.bundle)),
+      publicKey: resolvedKey,
+      username: json.username,
+    };
   }
 
   /**
    * Publishes the pre-key bundle to the relay's /directory endpoint so peers
    * can initiate contact without an out-of-band QR exchange.
+   * If `username` is provided it is registered alongside the bundle.
    */
-  async publishPreKeyBundle(bundle: PreKeyBundle): Promise<void> {
+  async publishPreKeyBundle(bundle: PreKeyBundle, username?: string): Promise<void> {
     const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
     const primaryWsUrl = wsUrls[0];
     if (!primaryWsUrl || primaryWsUrl === 'mesh') return;
@@ -388,6 +454,7 @@ export class SessionManager {
         namespace: this.namespace,
         publicKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
         bundle: uint8ArrayToBase64(serializePreKeyBundle(bundle)),
+        ...(username ? { username } : {}),
       }),
     });
   }
@@ -461,8 +528,8 @@ export class SessionManager {
     if (edKey) {
       const fresh = await this.lookupPreKeyBundle(uint8ArrayToHex(edKey));
       if (fresh) {
-        this.setBundle(recipientId, fresh);
-        await this.initiateHandshake(recipientId, fresh);
+        this.setBundle(recipientId, fresh.bundle);
+        await this.initiateHandshake(recipientId, fresh.bundle);
         return;
       }
     }
@@ -499,10 +566,12 @@ export class SessionManager {
       ephemeralPublicKey: Array.from(result.ephemeralPublicKey),
       identityKey: Array.from(this.identity.getEdPublicKey()),
       // Tell Bob which OPK we consumed so he can look up the private key.
-      // Must reference bundleWithOPK (the claimed OPK was injected there),
-      // not the original `bundle` which never carried the OPK field.
       ...(result.usedOneTimePreKey && bundleWithOPK.oneTimePreKey
         ? { usedOneTimePreKeyPublic: Array.from(bundleWithOPK.oneTimePreKey) }
+        : {}),
+      // Include ML-KEM-768 ciphertext when PQXDH was used.
+      ...(result.pqCiphertext
+        ? { pqCiphertext: Array.from(result.pqCiphertext) }
         : {}),
     };
 
@@ -570,12 +639,18 @@ export class SessionManager {
       // layer prevents in practice.
     }
 
+    const pqCiphertext = envelope.pqCiphertext
+      ? new Uint8Array(envelope.pqCiphertext)
+      : undefined;
+
     const sharedSecret = completeKeyExchange(
       bobIdentity,
       bobSignedPreKey,
       bobOPK,
       aliceIdentityKey,
       aliceEphemeralKey,
+      pqCiphertext,
+      this.pqSecretKey ?? undefined,
     );
 
     const ratchetState = initReceiver(sharedSecret, bobSignedPreKey);

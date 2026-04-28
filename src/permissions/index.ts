@@ -157,6 +157,10 @@ export class PermissionManager {
     return this.blocked.has(peerId);
   }
 
+  getBlocked(): string[] {
+    return [...this.blocked];
+  }
+
   // ------------------------------------------------------------------
   // Permission checks
   // ------------------------------------------------------------------

@@ -1,65 +1,80 @@
 // ============================================================
-// MeshWhisper SDK — X3DH Key Exchange Module
-// Extended Triple Diffie-Hellman adapted for serverless P2P
+// MeshWhisper SDK — X3DH / PQXDH Key Exchange Module
+//
+// Classical path:  X3DH (3 or 4 DH operations over X25519)
+// Post-quantum:    PQXDH — X3DH + ML-KEM-768 encapsulation
+//
+// When Bob's PreKeyBundle includes a `pqPublicKey` (ML-KEM-768),
+// Alice encapsulates to it and includes the ciphertext in her
+// handshake envelope. The final shared secret mixes all X25519 DH
+// outputs with the ML-KEM shared secret under a BLAKE3 domain
+// separation context. This matches the hybrid approach used by
+// Signal's PQXDH specification.
 // ============================================================
 
 import { x25519, ed25519 } from '@noble/curves/ed25519';
 import { blake3 } from '@noble/hashes/blake3';
+import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 import type { KeyPair, IdentityKeyPair, DHKeyPair, PreKeyBundle } from '../types.js';
 
 // --- Constants ---
 
-/** Protocol version for serialized pre-key bundles. */
-const BUNDLE_VERSION = 0x01;
+/** Bundle version: classical X3DH only. */
+const BUNDLE_VERSION_CLASSICAL = 0x01;
 
-/** Length of an X25519/Ed25519 public key in bytes. */
+/** Bundle version: PQXDH (X3DH + ML-KEM-768). */
+const BUNDLE_VERSION_PQXDH = 0x02;
+
+/** X25519 / Ed25519 key length in bytes. */
 const KEY_LENGTH = 32;
 
-/** Length of an Ed25519 signature in bytes. */
+/** Ed25519 signature length in bytes. */
 const SIGNATURE_LENGTH = 64;
+
+/** ML-KEM-768 public key length in bytes. */
+const PQ_PUBLIC_KEY_LENGTH = 1184;
+
+/** ML-KEM-768 secret key length in bytes. */
+const PQ_SECRET_KEY_LENGTH = 2400;
+
+/** ML-KEM-768 ciphertext length in bytes. */
+export const PQ_CIPHERTEXT_LENGTH = 1088;
+
+/** BLAKE3 domain-separation context for PQXDH key derivation. */
+const PQXDH_KDF_CONTEXT = 'meshwhisper pqxdh v1 2026';
 
 // --- Key Generation ---
 
-/**
- * The result of generating a pre-key bundle. The bundle is the public
- * portion distributed to peers; the key pairs must be stored locally
- * so that X3DH can be completed on the responder side.
- */
 export interface GeneratedPreKeyBundle {
-  /** The public bundle to distribute (gossip or directory). */
+  /** Public bundle to distribute (gossip or directory). */
   bundle: PreKeyBundle;
-  /** The X25519 signed pre-key pair. Store the private key. */
+  /** X25519 signed pre-key pair. Store the private key. */
   signedPreKeyPair: DHKeyPair;
-  /** The X25519 one-time pre-key pair. Store the private key. */
+  /** X25519 one-time pre-key pair. Store the private key. */
   oneTimePreKeyPair: DHKeyPair;
+  /** ML-KEM-768 secret key (2400 bytes). Store this to decapsulate. */
+  pqSecretKey: Uint8Array;
 }
 
 /**
- * Generates a full PreKeyBundle for distribution to peers.
+ * Generates a full PQXDH-capable PreKeyBundle for distribution to peers.
  *
- * The bundle contains:
- * - Identity key (Ed25519 public key from the provided key pair)
- * - Signed pre-key (X25519, signed by the identity key)
- * - One-time pre-key (X25519, single-use)
- *
- * The returned `signedPreKeyPair` and `oneTimePreKeyPair` private keys
- * must be stored by the caller — they are required to complete X3DH on
- * the responder side when a handshake arrives.
- *
- * @param identityKeyPair - Ed25519 identity key pair
- * @returns Bundle (public) plus the key pairs (private keys must be stored)
+ * Includes an ML-KEM-768 public key alongside the classical X25519 keys.
+ * The caller must persist `signedPreKeyPair`, `oneTimePreKeyPair.privateKey`,
+ * and `pqSecretKey` — all are required to complete an incoming handshake.
  */
 export function generatePreKeyBundle(identityKeyPair: IdentityKeyPair | KeyPair): GeneratedPreKeyBundle {
-  // Generate signed pre-key (X25519)
+  // Classical X25519 signed pre-key
   const signedPreKeyPrivate = x25519.utils.randomSecretKey();
   const signedPreKeyPublic = x25519.getPublicKey(signedPreKeyPrivate);
-
-  // Sign the signed pre-key's public key with the Ed25519 identity key
   const signature = ed25519.sign(signedPreKeyPublic, identityKeyPair.privateKey);
 
-  // Generate one-time pre-key (X25519)
+  // Classical X25519 one-time pre-key
   const oneTimePreKeyPrivate = x25519.utils.randomSecretKey();
   const oneTimePreKeyPublic = x25519.getPublicKey(oneTimePreKeyPrivate);
+
+  // ML-KEM-768 post-quantum key pair
+  const { publicKey: pqPublicKey, secretKey: pqSecretKey } = ml_kem768.keygen();
 
   return {
     bundle: {
@@ -67,6 +82,7 @@ export function generatePreKeyBundle(identityKeyPair: IdentityKeyPair | KeyPair)
       signedPreKey: signedPreKeyPublic,
       signedPreKeySignature: signature,
       oneTimePreKey: oneTimePreKeyPublic,
+      pqPublicKey,
     },
     signedPreKeyPair: {
       publicKey: signedPreKeyPublic,
@@ -78,19 +94,13 @@ export function generatePreKeyBundle(identityKeyPair: IdentityKeyPair | KeyPair)
       privateKey: oneTimePreKeyPrivate,
       keyType: 'dh',
     },
+    pqSecretKey,
   };
 }
 
 /**
  * Generates a batch of one-time pre-keys for replenishment.
- *
- * Returns full KeyPairs — the caller must store the private keys.
- * Only public keys are distributed in the prekey bundle; private keys
- * are required locally to complete X3DH when a matching handshake arrives.
- *
- * @param _identityKeyPair - Unused; kept for API consistency
- * @param count - Number of one-time pre-keys to generate
- * @returns Array of X25519 key pairs
+ * Returns full KeyPairs — caller must store the private keys.
  */
 export function generateOneTimePreKeys(
   _identityKeyPair: IdentityKeyPair | KeyPair,
@@ -99,7 +109,6 @@ export function generateOneTimePreKeys(
   if (count < 0 || !Number.isInteger(count)) {
     throw new Error('count must be a non-negative integer');
   }
-
   const keys: DHKeyPair[] = [];
   for (let i = 0; i < count; i++) {
     const privateKey = x25519.utils.randomSecretKey();
@@ -111,96 +120,82 @@ export function generateOneTimePreKeys(
 // --- Key Exchange: Initiator (Alice) ---
 
 export interface KeyExchangeResult {
-  /** Derived shared secret (BLAKE3 hash of concatenated DH outputs). */
+  /** Derived shared secret. */
   sharedSecret: Uint8Array;
   /** Ephemeral X25519 public key Alice used — must be sent to Bob. */
   ephemeralPublicKey: Uint8Array;
-  /** Whether a one-time pre-key was consumed in the exchange. */
+  /** Whether a one-time pre-key was consumed. */
   usedOneTimePreKey: boolean;
+  /**
+   * ML-KEM-768 ciphertext (1088 bytes). Present when Bob's bundle had a
+   * `pqPublicKey`. Alice must include this in the handshake envelope so
+   * Bob can decapsulate to recover the same shared secret.
+   */
+  pqCiphertext?: Uint8Array;
 }
 
 /**
- * Performs the initiator side (Alice) of the X3DH key exchange.
+ * Performs the initiator (Alice) side of X3DH or PQXDH.
  *
- * Executes 3 or 4 DH operations:
- *   DH1 = DH(IK_A, SPK_B) — Alice's identity key with Bob's signed pre-key
- *   DH2 = DH(EK_A, IK_B)  — Alice's ephemeral key with Bob's identity key
- *   DH3 = DH(EK_A, SPK_B) — Alice's ephemeral key with Bob's signed pre-key
- *   DH4 = DH(EK_A, OPK_B) — Alice's ephemeral key with Bob's one-time pre-key (optional)
+ * Classical DH operations:
+ *   DH1 = DH(IK_A, SPK_B)
+ *   DH2 = DH(EK_A, IK_B)
+ *   DH3 = DH(EK_A, SPK_B)
+ *   DH4 = DH(EK_A, OPK_B)  — optional
  *
- * The shared secret is derived as BLAKE3(DH1 || DH2 || DH3 [|| DH4]).
+ * If Bob's bundle has a `pqPublicKey`, additionally:
+ *   PQ  = ML-KEM-768 encapsulate(pqPublicKey) → (ciphertext, pq_ss)
  *
- * @param aliceIdentity - Alice's Ed25519 identity key pair
- * @param bobPreKeyBundle - Bob's published PreKeyBundle
- * @returns The derived shared secret, ephemeral public key, and OPK usage flag
- * @throws If the pre-key bundle signature is invalid
+ * Shared secret derivation:
+ *   Classical: BLAKE3(DH1 || DH2 || DH3 [|| DH4])
+ *   PQXDH:    BLAKE3(DH1 || DH2 || DH3 [|| DH4] || pq_ss,
+ *                    context: "meshwhisper pqxdh v1 2026")
  */
 export function initiateKeyExchange(
   aliceIdentity: KeyPair,
   bobPreKeyBundle: PreKeyBundle,
 ): KeyExchangeResult {
-  // Verify Bob's signed pre-key before proceeding
   if (!verifyPreKeyBundle(bobPreKeyBundle)) {
     throw new Error('Invalid pre-key bundle: signed pre-key signature verification failed');
   }
 
-  // Convert Alice's Ed25519 identity key to X25519 for DH operations
   const aliceIdentityX25519Private = ed25519.utils.toMontgomerySecret(aliceIdentity.privateKey);
-
-  // Convert Bob's Ed25519 identity public key to X25519
   const bobIdentityX25519Public = ed25519.utils.toMontgomery(bobPreKeyBundle.identityKey);
 
-  // Generate Alice's ephemeral X25519 key pair
   const ephemeralPrivate = x25519.utils.randomSecretKey();
   const ephemeralPublic = x25519.getPublicKey(ephemeralPrivate);
 
-  // DH1: DH(IK_A, SPK_B)
   const dh1 = x25519.getSharedSecret(aliceIdentityX25519Private, bobPreKeyBundle.signedPreKey);
-
-  // DH2: DH(EK_A, IK_B)
   const dh2 = x25519.getSharedSecret(ephemeralPrivate, bobIdentityX25519Public);
-
-  // DH3: DH(EK_A, SPK_B)
   const dh3 = x25519.getSharedSecret(ephemeralPrivate, bobPreKeyBundle.signedPreKey);
 
-  // DH4: DH(EK_A, OPK_B) — optional
   const usedOneTimePreKey = bobPreKeyBundle.oneTimePreKey != null;
-  let dhConcat: Uint8Array;
-
+  const dhParts: Uint8Array[] = [dh1, dh2, dh3];
   if (usedOneTimePreKey) {
-    const dh4 = x25519.getSharedSecret(ephemeralPrivate, bobPreKeyBundle.oneTimePreKey!);
-    dhConcat = concatBytes(dh1, dh2, dh3, dh4);
-  } else {
-    dhConcat = concatBytes(dh1, dh2, dh3);
+    dhParts.push(x25519.getSharedSecret(ephemeralPrivate, bobPreKeyBundle.oneTimePreKey!));
   }
 
-  // Derive shared secret via BLAKE3
-  const sharedSecret = blake3(dhConcat);
+  // PQXDH: encapsulate if Bob published a ML-KEM-768 public key
+  if (bobPreKeyBundle.pqPublicKey) {
+    const { cipherText, sharedSecret: pqSS } = ml_kem768.encapsulate(bobPreKeyBundle.pqPublicKey);
+    dhParts.push(pqSS);
+    const sharedSecret = blake3(concatBytes(...dhParts), { context: PQXDH_KDF_CONTEXT });
+    return { sharedSecret, ephemeralPublicKey: ephemeralPublic, usedOneTimePreKey, pqCiphertext: cipherText };
+  }
 
-  return {
-    sharedSecret,
-    ephemeralPublicKey: ephemeralPublic,
-    usedOneTimePreKey,
-  };
+  // Classical fallback
+  const sharedSecret = blake3(concatBytes(...dhParts));
+  return { sharedSecret, ephemeralPublicKey: ephemeralPublic, usedOneTimePreKey };
 }
 
 // --- Key Exchange: Responder (Bob) ---
 
 /**
- * Performs the responder side (Bob) of the X3DH key exchange.
+ * Performs the responder (Bob) side of X3DH or PQXDH.
  *
- * Mirrors the initiator's DH operations to derive the same shared secret:
- *   DH1 = DH(SPK_B, IK_A) — Bob's signed pre-key with Alice's identity key
- *   DH2 = DH(IK_B, EK_A)  — Bob's identity key with Alice's ephemeral key
- *   DH3 = DH(SPK_B, EK_A) — Bob's signed pre-key with Alice's ephemeral key
- *   DH4 = DH(OPK_B, EK_A) — Bob's one-time pre-key with Alice's ephemeral key (optional)
- *
- * @param bobIdentity - Bob's Ed25519 identity key pair
- * @param bobSignedPreKey - Bob's X25519 signed pre-key pair
- * @param bobOneTimePreKey - Bob's X25519 one-time pre-key pair (null if not used)
- * @param aliceIdentityKey - Alice's Ed25519 identity public key
- * @param aliceEphemeralKey - Alice's X25519 ephemeral public key
- * @returns The derived shared secret (same as Alice's if inputs are correct)
+ * If `pqCiphertext` and `pqSecretKey` are provided, decapsulates the
+ * ML-KEM ciphertext and mixes the result into the shared secret using
+ * the same PQXDH KDF. Must match the path Alice took.
  */
 export function completeKeyExchange(
   bobIdentity: KeyPair,
@@ -208,47 +203,33 @@ export function completeKeyExchange(
   bobOneTimePreKey: KeyPair | null,
   aliceIdentityKey: Uint8Array,
   aliceEphemeralKey: Uint8Array,
+  pqCiphertext?: Uint8Array,
+  pqSecretKey?: Uint8Array,
 ): Uint8Array {
-  // Convert Alice's Ed25519 identity public key to X25519
   const aliceIdentityX25519Public = ed25519.utils.toMontgomery(aliceIdentityKey);
-
-  // Convert Bob's Ed25519 identity key to X25519
   const bobIdentityX25519Private = ed25519.utils.toMontgomerySecret(bobIdentity.privateKey);
 
-  // DH1: DH(SPK_B, IK_A) — mirrors Alice's DH(IK_A, SPK_B)
   const dh1 = x25519.getSharedSecret(bobSignedPreKey.privateKey, aliceIdentityX25519Public);
-
-  // DH2: DH(IK_B, EK_A) — mirrors Alice's DH(EK_A, IK_B)
   const dh2 = x25519.getSharedSecret(bobIdentityX25519Private, aliceEphemeralKey);
-
-  // DH3: DH(SPK_B, EK_A) — mirrors Alice's DH(EK_A, SPK_B)
   const dh3 = x25519.getSharedSecret(bobSignedPreKey.privateKey, aliceEphemeralKey);
 
-  // DH4: DH(OPK_B, EK_A) — optional
-  let dhConcat: Uint8Array;
-
+  const dhParts: Uint8Array[] = [dh1, dh2, dh3];
   if (bobOneTimePreKey != null) {
-    const dh4 = x25519.getSharedSecret(bobOneTimePreKey.privateKey, aliceEphemeralKey);
-    dhConcat = concatBytes(dh1, dh2, dh3, dh4);
-  } else {
-    dhConcat = concatBytes(dh1, dh2, dh3);
+    dhParts.push(x25519.getSharedSecret(bobOneTimePreKey.privateKey, aliceEphemeralKey));
   }
 
-  // Derive shared secret via BLAKE3
-  return blake3(dhConcat);
+  // PQXDH: decapsulate if Alice sent a ciphertext and Bob has his secret key
+  if (pqCiphertext && pqSecretKey) {
+    const pqSS = ml_kem768.decapsulate(pqCiphertext, pqSecretKey);
+    dhParts.push(pqSS);
+    return blake3(concatBytes(...dhParts), { context: PQXDH_KDF_CONTEXT });
+  }
+
+  return blake3(concatBytes(...dhParts));
 }
 
 // --- PreKey Bundle Verification ---
 
-/**
- * Verifies the signed pre-key signature in a PreKeyBundle.
- *
- * Checks that the signedPreKey was signed by the holder of the identityKey
- * using Ed25519.
- *
- * @param bundle - The PreKeyBundle to verify
- * @returns true if the signature is valid, false otherwise
- */
 export function verifyPreKeyBundle(bundle: PreKeyBundle): boolean {
   try {
     return ed25519.verify(
@@ -264,127 +245,87 @@ export function verifyPreKeyBundle(bundle: PreKeyBundle): boolean {
 // --- Serialization ---
 
 /**
- * Serializes a PreKeyBundle to a compact binary format for gossip distribution.
+ * Serializes a PreKeyBundle to binary.
  *
- * Wire format:
- *   [version: 1 byte]
- *   [flags: 1 byte]       — bit 0: hasOneTimePreKey
- *   [identityKey: 32 bytes]
- *   [signedPreKey: 32 bytes]
- *   [signedPreKeySignature: 64 bytes]
- *   [oneTimePreKey: 32 bytes]  — optional, present if flags bit 0 is set
+ * Version 0x01 (classical):
+ *   [version: 1] [flags: 1] [ik: 32] [spk: 32] [sig: 64] [opk?: 32]
  *
- * Total: 130 bytes without OPK, 162 bytes with OPK.
+ * Version 0x02 (PQXDH):
+ *   [version: 1] [flags: 1] [ik: 32] [spk: 32] [sig: 64] [pq: 1184] [opk?: 32]
  *
- * @param bundle - The PreKeyBundle to serialize
- * @returns Serialized binary representation
+ * flags bit 0: hasOneTimePreKey
  */
 export function serializePreKeyBundle(bundle: PreKeyBundle): Uint8Array {
+  const hasPQ = bundle.pqPublicKey != null;
   const hasOPK = bundle.oneTimePreKey != null;
+  const version = hasPQ ? BUNDLE_VERSION_PQXDH : BUNDLE_VERSION_CLASSICAL;
   const flags = hasOPK ? 0x01 : 0x00;
-  const totalLength = 1 + 1 + KEY_LENGTH + KEY_LENGTH + SIGNATURE_LENGTH + (hasOPK ? KEY_LENGTH : 0);
 
-  const data = new Uint8Array(totalLength);
-  let offset = 0;
+  const size =
+    1 + 1 +
+    KEY_LENGTH + KEY_LENGTH + SIGNATURE_LENGTH +
+    (hasPQ ? PQ_PUBLIC_KEY_LENGTH : 0) +
+    (hasOPK ? KEY_LENGTH : 0);
 
-  // Version
-  data[offset++] = BUNDLE_VERSION;
+  const data = new Uint8Array(size);
+  let off = 0;
 
-  // Flags
-  data[offset++] = flags;
-
-  // Identity key
-  data.set(bundle.identityKey, offset);
-  offset += KEY_LENGTH;
-
-  // Signed pre-key
-  data.set(bundle.signedPreKey, offset);
-  offset += KEY_LENGTH;
-
-  // Signed pre-key signature
-  data.set(bundle.signedPreKeySignature, offset);
-  offset += SIGNATURE_LENGTH;
-
-  // One-time pre-key (optional)
-  if (hasOPK) {
-    data.set(bundle.oneTimePreKey!, offset);
-  }
+  data[off++] = version;
+  data[off++] = flags;
+  data.set(bundle.identityKey, off); off += KEY_LENGTH;
+  data.set(bundle.signedPreKey, off); off += KEY_LENGTH;
+  data.set(bundle.signedPreKeySignature, off); off += SIGNATURE_LENGTH;
+  if (hasPQ) { data.set(bundle.pqPublicKey!, off); off += PQ_PUBLIC_KEY_LENGTH; }
+  if (hasOPK) { data.set(bundle.oneTimePreKey!, off); }
 
   return data;
 }
 
-/**
- * Deserializes a PreKeyBundle from its binary representation.
- *
- * @param data - Serialized PreKeyBundle bytes
- * @returns The deserialized PreKeyBundle
- * @throws If the data is malformed or has an unsupported version
- */
 export function deserializePreKeyBundle(data: Uint8Array): PreKeyBundle {
-  if (data.length < 2) {
-    throw new Error('PreKeyBundle data too short: missing header');
-  }
+  if (data.length < 2) throw new Error('PreKeyBundle data too short: missing header');
 
-  let offset = 0;
-
-  // Version
-  const version = data[offset++];
-  if (version !== BUNDLE_VERSION) {
+  let off = 0;
+  const version = data[off++];
+  if (version !== BUNDLE_VERSION_CLASSICAL && version !== BUNDLE_VERSION_PQXDH) {
     throw new Error(`Unsupported PreKeyBundle version: ${version}`);
   }
 
-  // Flags
-  const flags = data[offset++];
+  const flags = data[off++];
   const hasOPK = (flags & 0x01) !== 0;
+  const hasPQ = version === BUNDLE_VERSION_PQXDH;
 
-  const expectedLength = 1 + 1 + KEY_LENGTH + KEY_LENGTH + SIGNATURE_LENGTH + (hasOPK ? KEY_LENGTH : 0);
-  if (data.length < expectedLength) {
-    throw new Error(
-      `PreKeyBundle data too short: expected ${expectedLength} bytes, got ${data.length}`,
-    );
+  const expected =
+    1 + 1 +
+    KEY_LENGTH + KEY_LENGTH + SIGNATURE_LENGTH +
+    (hasPQ ? PQ_PUBLIC_KEY_LENGTH : 0) +
+    (hasOPK ? KEY_LENGTH : 0);
+
+  if (data.length < expected) {
+    throw new Error(`PreKeyBundle data too short: expected ${expected} bytes, got ${data.length}`);
   }
 
-  // Identity key
-  const identityKey = data.slice(offset, offset + KEY_LENGTH);
-  offset += KEY_LENGTH;
+  const identityKey = data.slice(off, off + KEY_LENGTH); off += KEY_LENGTH;
+  const signedPreKey = data.slice(off, off + KEY_LENGTH); off += KEY_LENGTH;
+  const signedPreKeySignature = data.slice(off, off + SIGNATURE_LENGTH); off += SIGNATURE_LENGTH;
 
-  // Signed pre-key
-  const signedPreKey = data.slice(offset, offset + KEY_LENGTH);
-  offset += KEY_LENGTH;
+  let pqPublicKey: Uint8Array | undefined;
+  if (hasPQ) {
+    pqPublicKey = data.slice(off, off + PQ_PUBLIC_KEY_LENGTH);
+    off += PQ_PUBLIC_KEY_LENGTH;
+  }
 
-  // Signed pre-key signature
-  const signedPreKeySignature = data.slice(offset, offset + SIGNATURE_LENGTH);
-  offset += SIGNATURE_LENGTH;
+  const oneTimePreKey = hasOPK ? data.slice(off, off + KEY_LENGTH) : undefined;
 
-  // One-time pre-key (optional)
-  const oneTimePreKey = hasOPK
-    ? data.slice(offset, offset + KEY_LENGTH)
-    : undefined;
-
-  return {
-    identityKey,
-    signedPreKey,
-    signedPreKeySignature,
-    oneTimePreKey,
-  };
+  return { identityKey, signedPreKey, signedPreKeySignature, oneTimePreKey, pqPublicKey };
 }
 
 // --- Utility ---
 
-/**
- * Concatenates multiple Uint8Arrays into a single Uint8Array.
- */
 function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  let totalLength = 0;
-  for (const arr of arrays) {
-    totalLength += arr.length;
-  }
-
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
-  }
-  return result;
+  let total = 0;
+  for (const a of arrays) total += a.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
 }

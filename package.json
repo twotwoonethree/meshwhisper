@@ -25,6 +25,10 @@
     "./persistence/node": {
       "types": "./dist/persistence/node-storage.d.ts",
       "default": "./dist/persistence/node-storage.js"
+    },
+    "./react-native": {
+      "types": "./dist/react-native/index.d.ts",
+      "default": "./dist/react-native/index.js"
     }
   },
   "bin": {
@@ -54,6 +58,7 @@
     "@noble/ciphers": "^1.2.0",
     "@noble/curves": "^1.8.0",
     "@noble/hashes": "^1.7.0",
+    "@noble/post-quantum": "^0.6.1",
     "lz4js": "^0.2.0"
   },
   "optionalDependencies": {

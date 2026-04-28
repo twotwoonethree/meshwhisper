@@ -30,4 +30,20 @@ export interface StoredMessage {
   timestamp: number;
   direction: 'inbound' | 'outbound';
   status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
+  /** Set for group messages. */
+  groupId?: string;
+  groupSenderId?: string;
+  /** Unix ms after which this message should be considered expired and purged. */
+  expiresAt?: number;
+}
+
+export interface Conversation {
+  /** The peer ID of the other party. */
+  peerId: string;
+  /** The most recent message in the conversation, or null if none. */
+  lastMessage: StoredMessage | null;
+  /** Number of inbound messages not yet marked as read. */
+  unreadCount: number;
+  /** Timestamp of the most recent message (ms since epoch). */
+  updatedAt: number;
 }

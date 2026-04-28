@@ -31,6 +31,8 @@ export interface PreKeyBundle {
   signedPreKey: Uint8Array;
   signedPreKeySignature: Uint8Array;
   oneTimePreKey?: Uint8Array;
+  /** ML-KEM-768 public key (1184 bytes). Present on PQXDH-capable bundles. */
+  pqPublicKey?: Uint8Array;
 }
 
 export interface EncryptedPayload {
@@ -134,6 +136,10 @@ export interface Message {
   timestamp: number;
   urgency: MessageUrgency;
   expiry?: number;
+  /** Set when the message was sent to a group. */
+  groupId?: string;
+  /** The original sender within the group (may differ from senderId when relayed). */
+  groupSenderId?: string;
 }
 
 // --- Group Types ---
@@ -223,7 +229,7 @@ export type MessageHook = (message: Message) => boolean | Promise<boolean>;
 // --- SDK Config Types ---
 
 // Re-export persistence types so callers only need one import
-export type { StorageBackend, StoredMessage } from './persistence/types.js';
+export type { StorageBackend, StoredMessage, Conversation } from './persistence/types.js';
 
 /** Web Push subscription object (serialisable form of PushSubscription). */
 export interface WebPushSubscription {
@@ -245,6 +251,13 @@ export interface MeshWhisperConfig {
   /** MeshWhisper Node endpoint(s). Use "mesh" for Foundation-hosted nodes,
    *  a wss:// URL for self-hosted, or an array for hybrid mode. Defaults to "mesh". */
   node?: string | string[];
+  /**
+   * Human-readable username registered with the relay alongside your pre-key bundle.
+   * Other users can add you via `MeshWhisper.addContactByKey('@alice')` instead of
+   * needing your raw public key. Usernames are scoped to the namespace and
+   * first-registered wins. Omit to stay key-only.
+   */
+  username?: string;
   /** Optional developer key (base64 public key). If omitted a random key is used,
    *  which is fine for development and single-tenant deployments. */
   developerKey?: string;
@@ -313,6 +326,35 @@ export interface MeshWhisperConfig {
     sensorType: EntropySensorType,
     durationMs: number,
   ) => Promise<Float64Array>;
+  /**
+   * Called when a peer starts or stops typing.
+   * `isTyping` is true for typing_start, false for typing_stop.
+   * Ephemeral — not stored or reliable.
+   */
+  onTyping?: (peerId: string, isTyping: boolean) => void;
+  /**
+   * Called when another peer introduces a new contact to you. The `peerId` is
+   * the introduced peer's identifier; `introducedBy` is the mutual contact who
+   * brokered the introduction; `username` is their registered username if any.
+   *
+   * Call `MeshWhisper.addContactByKey(peerId)` from this handler to accept.
+   * If you don't call it the introduction is silently ignored.
+   *
+   * ```ts
+   * onContactRequest: async (peerId, introducedBy, username) => {
+   *   const display = username ?? peerId.slice(0, 8);
+   *   const accepted = await showConfirmDialog(`${introducedBy} wants to introduce you to ${display}`);
+   *   if (accepted) await MeshWhisper.addContactByKey(peerId);
+   * }
+   * ```
+   */
+  onContactRequest?: (peerId: string, introducedBy: string, username?: string) => void | Promise<void>;
+  /**
+   * Called when another peer invites you to a group. The group is held in a
+   * pending state until you call `MeshWhisper.acceptGroupInvite(groupId)`.
+   * Decline by simply not calling it, or call `MeshWhisper.declineGroupInvite(groupId)`.
+   */
+  onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

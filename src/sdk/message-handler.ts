@@ -6,10 +6,11 @@
 //   - deduplication (seenMessageIds rolling 24h window)
 //   - message persistence (save, update status, read history)
 //   - control message dispatch (delivery receipts, read receipts)
+//   - group message routing (detect __mw_grp envelope, delegate decryption)
 //   - cluster sync queuing
 // ============================================================
 
-import type { Message, StorageBackend, StoredMessage } from '../types.js';
+import type { Message, StorageBackend, StoredMessage, Conversation } from '../types.js';
 import type { Packet } from '../types.js';
 import { decompressPayload } from '../packet/index.js';
 import { ratchetDecrypt } from '../ratchet/index.js';
@@ -23,6 +24,9 @@ import {
   type ControlMessage,
   type MessageEnvelope,
 } from './utils.js';
+
+/** Prefix that marks a group message envelope inside the pairwise channel. */
+const GROUP_ENVELOPE_PREFIX = '{"__mw_grp":';
 
 export class MessageHandler {
   // Rolling set of seen message IDs to prevent duplicate delivery.
@@ -48,6 +52,23 @@ export class MessageHandler {
      * The coordinator handles these.
      */
     private readonly onUnhandledControl: ((ctrl: ControlMessage, fromPeerId: string) => void) | null = null,
+    /**
+     * Called when a DATA packet addressed to us fails to decrypt across all
+     * known sessions. Signals that a session may be lost (e.g. after reinstall)
+     * and that re-establishment should be attempted.
+     */
+    private readonly onDecryptFailure: (() => void) | null = null,
+    /**
+     * Called when a group-envelope message is received after pairwise decryption.
+     * The coordinator decrypts the inner ciphertext with the group sender key
+     * and returns the plaintext, or null if the group/sender key is unknown.
+     */
+    private readonly onGroupData: ((
+      groupId: string,
+      groupSenderId: string,
+      ciphertext: Uint8Array,
+      fromPeerId: string,
+    ) => { plaintext: Uint8Array } | null) | null = null,
   ) {}
 
   // ----------------------------------------------------------------
@@ -62,6 +83,22 @@ export class MessageHandler {
     const entries = JSON.parse(raw) as Array<[string, number]>;
     for (const [id, ts] of entries) {
       if (ts > cutoff) this.seenMessageIds.set(id, ts);
+    }
+  }
+
+  /** Purge all messages that have passed their expiresAt timestamp. */
+  async purgeExpiredMessages(): Promise<void> {
+    if (!this.storage) return;
+    const keys = await this.storage.keys('messages/');
+    const now = Date.now();
+    for (const key of keys) {
+      const raw = await this.storage.get(key);
+      if (!raw) continue;
+      const messages: StoredMessage[] = JSON.parse(raw);
+      const live = messages.filter((m) => !m.expiresAt || m.expiresAt > now);
+      if (live.length !== messages.length) {
+        await this.storage.set(key, JSON.stringify(live));
+      }
     }
   }
 
@@ -83,10 +120,6 @@ export class MessageHandler {
       let matchedPeerId: string | null = null;
 
       // Fast path: look up the session by the sender's ratchet DH public key.
-      // This is O(1) and avoids leaking timing information across sessions.
-      // The index is populated on first successful decryption; until then we
-      // fall through to trial decryption (only on the first message or after
-      // each DH ratchet step, which happens at most every other message).
       const dhKeyHex = uint8ArrayToHex(header.dhPublicKey);
       const indexedPeerId = this.sessionManager.lookupByDhKey(dhKeyHex);
 
@@ -96,25 +129,21 @@ export class MessageHandler {
           try {
             const result = ratchetDecrypt(session, header, ciphertextBody);
             this.sessionManager.setSession(indexedPeerId, result.state);
-            // Re-register in case the DH key changed during this decrypt (ratchet step)
             this.sessionManager.registerDhKey(dhKeyHex, indexedPeerId);
             decrypted = result.plaintext;
             matchedPeerId = indexedPeerId;
           } catch {
-            // Index hit but decrypt failed — key may have been re-used across
-            // a ratchet boundary. Fall through to trial decryption below.
+            // Fall through to trial decryption
           }
         }
       }
 
-      // Slow path: try every session. Runs only on cache miss (first message
-      // from a peer or first message after their DH ratchet step).
+      // Slow path: try every session.
       if (!decrypted) {
         for (const [peerId, session] of this.sessionManager.sessions_iter()) {
           try {
             const result = ratchetDecrypt(session, header, ciphertextBody);
             this.sessionManager.setSession(peerId, result.state);
-            // Seed the index so future messages from this peer are O(1).
             this.sessionManager.registerDhKey(dhKeyHex, peerId);
             decrypted = result.plaintext;
             matchedPeerId = peerId;
@@ -125,7 +154,10 @@ export class MessageHandler {
         }
       }
 
-      if (!decrypted || !matchedPeerId) return;
+      if (!decrypted || !matchedPeerId) {
+        this.onDecryptFailure?.();
+        return;
+      }
 
       const decompressed = decompressPayload(decrypted);
       const envelope: MessageEnvelope = JSON.parse(new TextDecoder().decode(decompressed));
@@ -134,11 +166,9 @@ export class MessageHandler {
       if (this.seenMessageIds.has(envelope.id)) return;
       this.seenMessageIds.set(envelope.id, envelope.timestamp);
       this.pruneSeenIds();
-      // Persist immediately so the dedup window survives unclean exits
-      // (crash, OOM kill). Without this, reconnect causes duplicate delivery.
       this.persistSeenIds().catch(() => {});
 
-      // Control messages (delivery receipts, read receipts, typing)
+      // Control messages (delivery receipts, read receipts, typing, etc.)
       const payloadBytes = new Uint8Array(envelope.payload);
       const ctrl = tryParseControl(payloadBytes);
       if (ctrl) {
@@ -147,9 +177,16 @@ export class MessageHandler {
       }
 
       // Expiry check
-      if (envelope.expiry) {
-        if (Date.now() > envelope.timestamp + envelope.expiry * 1000) return;
+      if (envelope.expiry && Date.now() > envelope.timestamp + envelope.expiry * 1000) return;
+
+      // Group message envelope — decode and delegate inner decryption
+      const payloadText = new TextDecoder().decode(payloadBytes);
+      if (payloadText.startsWith(GROUP_ENVELOPE_PREFIX)) {
+        this.handleGroupEnvelope(payloadText, matchedPeerId, envelope);
+        return;
       }
+
+      const expiresAt = envelope.expiry ? envelope.timestamp + envelope.expiry * 1000 : undefined;
 
       const message: Message = {
         id: envelope.id,
@@ -161,7 +198,6 @@ export class MessageHandler {
         expiry: envelope.expiry,
       };
 
-      // Persist inbound message
       this.saveMessage({
         id: message.id,
         conversationId: matchedPeerId,
@@ -171,17 +207,15 @@ export class MessageHandler {
         timestamp: message.timestamp,
         direction: 'inbound',
         status: 'delivered',
+        expiresAt,
       }).catch(() => {});
 
-      // Surface to app
       if (this.onMessage) {
         this.onMessage(message);
       }
 
-      // Send delivery receipt
       this.sendControl(matchedPeerId, { __mw_ctrl: 'delivered', messageId: message.id });
 
-      // Cluster sync
       if (this.cluster) {
         this.cluster.syncManager.queueForSync({
           messageId: message.id,
@@ -193,6 +227,60 @@ export class MessageHandler {
       }
     } catch {
       // Malformed packet — drop silently
+    }
+  }
+
+  private handleGroupEnvelope(
+    payloadText: string,
+    fromPeerId: string,
+    envelope: MessageEnvelope,
+  ): void {
+    try {
+      const grpEnv = JSON.parse(payloadText) as {
+        __mw_grp: string;
+        sid: string;
+        d: number[];
+      };
+      const { __mw_grp: groupId, sid: groupSenderId, d } = grpEnv;
+      const ciphertext = new Uint8Array(d);
+
+      if (!this.onGroupData) return;
+      const result = this.onGroupData(groupId, groupSenderId, ciphertext, fromPeerId);
+      if (!result) return;
+
+      const expiresAt = envelope.expiry ? envelope.timestamp + envelope.expiry * 1000 : undefined;
+
+      const message: Message = {
+        id: envelope.id,
+        senderId: groupSenderId,
+        recipientId: this.getLocalPeerId(),
+        payload: result.plaintext,
+        timestamp: envelope.timestamp,
+        urgency: envelope.urgency as Message['urgency'],
+        expiry: envelope.expiry,
+        groupId,
+        groupSenderId,
+      };
+
+      this.saveMessage({
+        id: message.id,
+        conversationId: groupId,
+        senderId: groupSenderId,
+        recipientId: this.getLocalPeerId(),
+        payload: Array.from(result.plaintext),
+        timestamp: message.timestamp,
+        direction: 'inbound',
+        status: 'delivered',
+        groupId,
+        groupSenderId,
+        expiresAt,
+      }).catch(() => {});
+
+      if (this.onMessage) {
+        this.onMessage(message);
+      }
+    } catch {
+      // Malformed group envelope — drop
     }
   }
 
@@ -208,8 +296,12 @@ export class MessageHandler {
           this.updateMessageStatus(ctrl.messageId, fromPeerId, 'read').catch(() => {});
         }
         break;
+      case 'delete':
+        if (ctrl.messageId) {
+          this.removeMessage(ctrl.messageId, fromPeerId).catch(() => {});
+        }
+        break;
       default:
-        // Delegate sybil and other coordinator-owned control types
         if (this.onUnhandledControl) {
           this.onUnhandledControl(ctrl, fromPeerId);
         }
@@ -233,12 +325,23 @@ export class MessageHandler {
       messages[existing] = message;
     } else {
       messages.push(message);
-      // Keep the newest N messages; drop oldest when over the cap
       if (messages.length > MessageHandler.MAX_STORED_MESSAGES) {
         messages.splice(0, messages.length - MessageHandler.MAX_STORED_MESSAGES);
       }
     }
     await this.storage.set(key, JSON.stringify(messages));
+  }
+
+  async removeMessage(messageId: string, conversationId: string): Promise<void> {
+    if (!this.storage) return;
+    const key = `messages/${conversationId}`;
+    const raw = await this.storage.get(key);
+    if (!raw) return;
+    const messages: StoredMessage[] = JSON.parse(raw);
+    const filtered = messages.filter((m) => m.id !== messageId);
+    if (filtered.length !== messages.length) {
+      await this.storage.set(key, JSON.stringify(filtered));
+    }
   }
 
   async updateMessageStatus(
@@ -267,7 +370,9 @@ export class MessageHandler {
     if (!this.storage) return [];
     const raw = await this.storage.get(`messages/${peerId}`);
     if (!raw) return [];
-    let messages: StoredMessage[] = JSON.parse(raw);
+    const now = Date.now();
+    let messages: StoredMessage[] = (JSON.parse(raw) as StoredMessage[])
+      .filter((m) => !m.expiresAt || m.expiresAt > now);
     if (options?.before !== undefined) {
       messages = messages.filter((m) => m.timestamp < options.before!);
     }
@@ -275,6 +380,33 @@ export class MessageHandler {
       messages = messages.slice(-options.limit);
     }
     return messages;
+  }
+
+  async getConversations(): Promise<Conversation[]> {
+    if (!this.storage) return [];
+    const keys = await this.storage.keys('messages/');
+    const conversations: Conversation[] = [];
+    const now = Date.now();
+    for (const key of keys) {
+      const peerId = key.slice('messages/'.length);
+      const raw = await this.storage.get(key);
+      if (!raw) continue;
+      const messages: StoredMessage[] = (JSON.parse(raw) as StoredMessage[])
+        .filter((m) => !m.expiresAt || m.expiresAt > now);
+      if (messages.length === 0) continue;
+      const lastMessage = messages[messages.length - 1];
+      const unreadCount = messages.filter(
+        (m) => m.direction === 'inbound' && m.status !== 'read',
+      ).length;
+      conversations.push({
+        peerId,
+        lastMessage,
+        unreadCount,
+        updatedAt: lastMessage.timestamp,
+      });
+    }
+    conversations.sort((a, b) => b.updatedAt - a.updatedAt);
+    return conversations;
   }
 
   // ----------------------------------------------------------------

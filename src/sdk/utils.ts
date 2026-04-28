@@ -107,7 +107,10 @@ export interface ControlMessage {
     | 'typing_stop'
     | 'entropy_challenge'
     | 'entropy_response'
-    | 'reputation_proof';
+    | 'reputation_proof'
+    | 'contact_request'
+    | 'group_invite'
+    | 'delete';
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];
@@ -120,6 +123,21 @@ export interface ControlMessage {
     proof: number[];
     claims: { minRelayCount: number; periodDays: number; minReciprocityScore: number };
     timestamp: number;
+  };
+  // contact_request (introduction)
+  contactRequest?: {
+    introducedPeerId: string;
+    introducedPublicKey: number[];
+    introducedBy: string;
+    username?: string;
+  };
+  // group_invite
+  groupInvite?: {
+    groupId: string;
+    groupName: string;
+    invitedBy: string;
+    members: string[];
+    senderKeys: Record<string, number[]>;
   };
 }
 
@@ -175,4 +193,6 @@ export interface HandshakeEnvelope {
   // Public key of the one-time pre-key Alice consumed, so Bob can look up
   // the corresponding private key to complete DH4. Absent when no OPK was used.
   usedOneTimePreKeyPublic?: number[];
+  // ML-KEM-768 ciphertext (1088 bytes). Present when Alice performed PQXDH.
+  pqCiphertext?: number[];
 }

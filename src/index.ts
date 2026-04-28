@@ -75,6 +75,10 @@ export type {
 
   // Events
   EventEmitter,
+
+  // Persistence
+  StoredMessage,
+  Conversation,
 } from './types.js';
 
 // Re-export PacketFlags as a value (enum) since it is used as both
