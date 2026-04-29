@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppMessage, Contact } from '../types.ts';
+import type { AppMessage, Contact, GroupInfo } from '../types.ts';
 
 interface Props {
   contact: Contact;
+  group?: GroupInfo;
   messages: AppMessage[];
   isTyping: boolean;
   onBack: () => void;
@@ -23,7 +24,7 @@ function StatusIcon({ status }: { status: AppMessage['status'] }) {
   return null;
 }
 
-export default function Thread({ contact, messages, isTyping, onBack, onSend, onRemove }: Props) {
+export default function Thread({ contact, group, messages, isTyping, onBack, onSend, onRemove }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -66,14 +67,24 @@ export default function Thread({ contact, messages, isTyping, onBack, onSend, on
             <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
           </svg>
         </button>
-        <div className="w-8 h-8 rounded-full bg-brand-600 flex-shrink-0 flex items-center justify-center text-white text-sm font-semibold">
-          {contact.displayName[0]?.toUpperCase()}
-        </div>
+        {group ? (
+          <div className="w-8 h-8 rounded-full bg-brand-700 flex-shrink-0 flex items-center justify-center">
+            <svg className="w-4 h-4 text-brand-200" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+            </svg>
+          </div>
+        ) : (
+          <div className="w-8 h-8 rounded-full bg-brand-600 flex-shrink-0 flex items-center justify-center text-white text-sm font-semibold">
+            {contact.displayName[0]?.toUpperCase()}
+          </div>
+        )}
         <div className="flex-1">
           <p className="text-white font-medium text-sm">{contact.displayName}</p>
-          {contact.username && (
+          {group ? (
+            <p className="text-slate-500 text-xs">{group.members.length} members</p>
+          ) : contact.username ? (
             <p className="text-slate-500 text-xs">@{contact.username}</p>
-          )}
+          ) : null}
         </div>
         <button
           onClick={() => setConfirmDelete(true)}
@@ -118,7 +129,10 @@ export default function Thread({ contact, messages, isTyping, onBack, onSend, on
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full">
             <p className="text-slate-600 text-sm text-center">
-              This is the beginning of your encrypted conversation<br />with {contact.displayName}.
+              {group
+                ? <>This is the beginning of <br /><span className="font-medium">{contact.displayName}</span>.</>
+                : <>This is the beginning of your encrypted conversation<br />with {contact.displayName}.</>
+              }
             </p>
           </div>
         )}
@@ -134,6 +148,11 @@ export default function Thread({ contact, messages, isTyping, onBack, onSend, on
               className={`flex ${isOut ? 'justify-end' : 'justify-start'} ${grouped ? 'mt-0.5' : 'mt-3'}`}
             >
               <div className={`max-w-[75%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
+                {!isOut && !grouped && msg.senderName && (
+                  <span className="text-brand-400 text-[10px] font-medium mb-0.5 px-1">
+                    {msg.senderName}
+                  </span>
+                )}
                 <div
                   className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${
                     isOut

@@ -1,17 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Message, Conversation as SDKConversation, StoredMessage } from '@meshwhisper/sdk';
+import { MeshWhisper } from '@meshwhisper/sdk';
 import { initSDK, getSDK } from './sdk.ts';
 import { getPushSubscription } from './push.ts';
 import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
 import { saveContactName, getContactName, removeContactName } from './contact-names.ts';
 import { isHandled, markAccepted, markDeclined as markDeclinedContact } from './accepted-contacts.ts';
-import type { AppState, AppMessage, Conversation, Contact } from './types.ts';
+import { loadGroups, upsertGroup } from './group-storage.ts';
+import type { AppState, AppMessage, Conversation, Contact, GroupInfo } from './types.ts';
 import Onboarding from './components/Onboarding.tsx';
 import Login from './components/Login.tsx';
 import ConversationList from './components/ConversationList.tsx';
 import Thread from './components/Thread.tsx';
 import PendingRequests from './components/PendingRequests.tsx';
+import CreateGroup from './components/CreateGroup.tsx';
+import GroupInviteModal from './components/GroupInviteModal.tsx';
 
 const USERNAME_KEY = 'prudence:username';
 
@@ -51,6 +55,21 @@ function makeContact(peerId: string, username?: string): Contact {
   };
 }
 
+function makeGroupConversation(group: GroupInfo): Conversation {
+  return {
+    id: group.id,
+    contact: { peerId: group.id, displayName: group.name, addedAt: Date.now() },
+    group,
+    unread: 0,
+    isTyping: false,
+  };
+}
+
+function senderDisplayName(senderId: string): string {
+  const name = getContactName(senderId);
+  return name ? `@${name}` : senderId.slice(0, 8);
+}
+
 export default function App() {
   const [username, setUsername] = useState<string | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
@@ -61,9 +80,12 @@ export default function App() {
     activeConversationId: null,
     messages: {},
     pendingRequests: [],
+    pendingGroupInvites: [],
     connected: false,
   });
   const [showPending, setShowPending] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showGroupInvites, setShowGroupInvites] = useState(false);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
@@ -114,7 +136,8 @@ export default function App() {
       }
     } catch { /* not a control message */ }
 
-    const conversationId = msg.senderId;
+    const conversationId = msg.groupId ?? msg.senderId;
+    const isGroup = !!msg.groupId;
     const appMsg: AppMessage = {
       id: msg.id ?? crypto.randomUUID(),
       conversationId,
@@ -122,6 +145,10 @@ export default function App() {
       timestamp: msg.timestamp ?? Date.now(),
       direction: 'inbound',
       status: 'delivered',
+      ...(isGroup && msg.groupSenderId ? {
+        senderId: msg.groupSenderId,
+        senderName: senderDisplayName(msg.groupSenderId),
+      } : {}),
     };
 
     setState((prev) => {
@@ -188,6 +215,17 @@ export default function App() {
     [],
   );
 
+  const handleGroupInvite = useCallback(
+    (groupId: string, groupName: string, invitedBy: string, members: string[]) => {
+      setState((prev) => {
+        if (prev.pendingGroupInvites.some((i) => i.groupId === groupId)) return prev;
+        return { ...prev, pendingGroupInvites: [...prev.pendingGroupInvites, { groupId, groupName, invitedBy, members }] };
+      });
+      setShowGroupInvites(true);
+    },
+    [],
+  );
+
   const handleConnectionStatus = useCallback((status: 'connected' | 'disconnected') => {
     setState((prev) => ({ ...prev, connected: status === 'connected' }));
   }, []);
@@ -211,17 +249,39 @@ export default function App() {
         onTyping: handleTyping,
         onContactRequest: handleContactRequest,
         onConnectionStatus: handleConnectionStatus,
-      }, pushSub).then((sdk) => {
+        onGroupInvite: handleGroupInvite,
+      }, pushSub).then(async (sdk) => {
       if (cancelled) return;
+
+      // Restore persisted group state into SDK memory
+      const storedGroups = await loadGroups();
+      for (const g of storedGroups) {
+        MeshWhisper.restoreGroup(g.id, g.name, g.members.map((m) => m.peerId), g.senderKeys);
+      }
+
       setState((prev) => ({ ...prev, myUsername: username, connected: true }));
       sdk.getConversationsInstance().then((convs: SDKConversation[]) => {
         if (cancelled) return;
-        const appConvs: Conversation[] = convs.map((c: SDKConversation) => ({
-          id: c.peerId,
-          contact: makeContact(c.peerId),
-          unread: c.unreadCount ?? 0,
+        const groupIds = new Set(storedGroups.map((g) => g.id));
+
+        const dmConvs: Conversation[] = convs
+          .filter((c) => !groupIds.has(c.peerId))
+          .map((c: SDKConversation) => ({
+            id: c.peerId,
+            contact: makeContact(c.peerId),
+            unread: c.unreadCount ?? 0,
+            isTyping: false,
+          }));
+
+        const groupConvs: Conversation[] = storedGroups.map((g) => ({
+          id: g.id,
+          contact: { peerId: g.id, displayName: g.name, addedAt: g.createdAt },
+          group: { id: g.id, name: g.name, members: g.members } satisfies GroupInfo,
+          unread: convs.find((c) => c.peerId === g.id)?.unreadCount ?? 0,
           isTyping: false,
         }));
+
+        const appConvs = [...dmConvs, ...groupConvs];
         setState((prev) => ({ ...prev, conversations: appConvs }));
         convs.forEach(async (c: SDKConversation) => {
           const msgs = await sdk.getMessagesInstance(c.peerId);
@@ -246,6 +306,10 @@ export default function App() {
               timestamp: m.timestamp,
               direction: m.direction,
               status: m.status,
+              ...(m.groupSenderId && m.direction === 'inbound' ? {
+                senderId: m.groupSenderId,
+                senderName: senderDisplayName(m.groupSenderId),
+              } : {}),
             });
           }
 
@@ -289,7 +353,7 @@ export default function App() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus]);
+  }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus, handleGroupInvite]);
 
   async function handleRegister(chosenUsername: string, password: string) {
     initStorage(chosenUsername);
@@ -343,8 +407,12 @@ export default function App() {
       };
     });
 
+    const isGroupConv = !!state.conversations.find((c) => c.id === conversationId)?.group;
     const payload = new TextEncoder().encode(text);
-    sdk.sendMessage(conversationId, payload as Uint8Array).then(() => {
+    const sendPromise = isGroupConv
+      ? sdk.sendToGroup(conversationId, payload as Uint8Array)
+      : sdk.sendMessage(conversationId, payload as Uint8Array);
+    sendPromise.then(() => {
       setState((prev) => ({
         ...prev,
         messages: {
@@ -406,6 +474,85 @@ export default function App() {
     }));
   }
 
+  async function handleCreateGroup(name: string, memberPeerIds: string[]) {
+    const sdk = getSDK();
+    if (!sdk) return;
+    const handle = MeshWhisper.createGroup({ name, members: memberPeerIds });
+    const senderKeys: Record<string, number[]> = {};
+    for (const [peerId, member] of handle.group.members) {
+      senderKeys[peerId] = Array.from(member.senderKey);
+    }
+    const group: GroupInfo = {
+      id: handle.id,
+      name: handle.name,
+      members: [...handle.group.members.values()].map((m) => ({
+        peerId: m.id,
+        role: m.role,
+        username: getContactName(m.id),
+      })),
+    };
+    await upsertGroup({
+      id: handle.id,
+      name: handle.name,
+      creatorId: MeshWhisper.getLocalPeerId(),
+      members: group.members,
+      senderKeys,
+      createdAt: handle.group.createdAt,
+    });
+    setState((prev) => ({
+      ...prev,
+      conversations: [makeGroupConversation(group), ...prev.conversations],
+    }));
+  }
+
+  async function handleAcceptGroupInvite(groupId: string) {
+    const inv = state.pendingGroupInvites.find((i) => i.groupId === groupId);
+    if (!inv) return;
+    MeshWhisper.acceptGroupInvite(groupId);
+    const handle = MeshWhisper.getGroup(groupId);
+    if (handle) {
+      const senderKeys: Record<string, number[]> = {};
+      for (const [peerId, member] of handle.group.members) {
+        senderKeys[peerId] = Array.from(member.senderKey);
+      }
+      const group: GroupInfo = {
+        id: handle.id,
+        name: handle.name,
+        members: [...handle.group.members.values()].map((m) => ({
+          peerId: m.id,
+          role: m.role,
+          username: getContactName(m.id),
+        })),
+      };
+      await upsertGroup({
+        id: handle.id,
+        name: handle.name,
+        creatorId: inv.invitedBy,
+        members: group.members,
+        senderKeys,
+        createdAt: Date.now(),
+      });
+      setState((prev) => ({
+        ...prev,
+        pendingGroupInvites: prev.pendingGroupInvites.filter((i) => i.groupId !== groupId),
+        conversations: [makeGroupConversation(group), ...prev.conversations],
+      }));
+    } else {
+      setState((prev) => ({
+        ...prev,
+        pendingGroupInvites: prev.pendingGroupInvites.filter((i) => i.groupId !== groupId),
+      }));
+    }
+  }
+
+  function handleDeclineGroupInvite(groupId: string) {
+    MeshWhisper.declineGroupInvite(groupId);
+    setState((prev) => ({
+      ...prev,
+      pendingGroupInvites: prev.pendingGroupInvites.filter((i) => i.groupId !== groupId),
+    }));
+  }
+
   if (loading) {
     return (
       <div className="h-full bg-slate-950 flex items-center justify-center">
@@ -424,6 +571,10 @@ export default function App() {
 
   const activeConv = state.conversations.find((c) => c.id === state.activeConversationId);
 
+  const allContacts = state.conversations
+    .filter((c) => !c.group)
+    .map((c) => c.contact);
+
   return (
     <div className="h-full flex">
       <div className={`${activeConv ? 'hidden sm:flex' : 'flex'} w-full sm:w-72 lg:w-80 flex-shrink-0 flex-col`}>
@@ -432,6 +583,7 @@ export default function App() {
           conversations={state.conversations}
           activeId={state.activeConversationId}
           pendingCount={state.pendingRequests.length}
+          pendingGroupInviteCount={state.pendingGroupInvites.length}
           connected={state.connected}
           onLock={() => { sessionStorage.setItem('prudence:locked', '1'); setAuthenticated(false); }}
           onSelect={(id) =>
@@ -444,23 +596,24 @@ export default function App() {
             }))
           }
           onPendingClick={() => setShowPending(true)}
-          onContactAdded={(peerId, username) => {
-            saveContactName(peerId, username);
+          onGroupInviteClick={() => setShowGroupInvites(true)}
+          onNewGroup={() => setShowCreateGroup(true)}
+          onContactAdded={(peerId, addedUsername) => {
+            saveContactName(peerId, addedUsername);
             setState((prev) => {
               const existing = prev.conversations.find((c) => c.id === peerId);
               if (existing) {
-                // Update the contact name if it was previously unknown
                 return {
                   ...prev,
                   conversations: prev.conversations.map((c) =>
-                    c.id === peerId ? { ...c, contact: makeContact(peerId, username) } : c,
+                    c.id === peerId ? { ...c, contact: makeContact(peerId, addedUsername) } : c,
                   ),
                 };
               }
               return {
                 ...prev,
                 conversations: [
-                  { id: peerId, contact: makeContact(peerId, username), unread: 0, isTyping: false },
+                  { id: peerId, contact: makeContact(peerId, addedUsername), unread: 0, isTyping: false },
                   ...prev.conversations,
                 ],
               };
@@ -473,6 +626,7 @@ export default function App() {
         {activeConv ? (
           <Thread
             contact={activeConv.contact}
+            group={activeConv.group}
             messages={state.messages[activeConv.id] ?? []}
             isTyping={activeConv.isTyping}
             onBack={() => setState((prev) => ({ ...prev, activeConversationId: null }))}
@@ -492,6 +646,24 @@ export default function App() {
           onAccept={(peerId, reqUsername) => handleAcceptRequest(peerId, reqUsername)}
           onDecline={handleDeclineRequest}
           onClose={() => setShowPending(false)}
+        />
+      )}
+
+      {showGroupInvites && state.pendingGroupInvites.length > 0 && (
+        <GroupInviteModal
+          invites={state.pendingGroupInvites}
+          getContactName={(peerId) => getContactName(peerId)}
+          onAccept={(groupId) => { void handleAcceptGroupInvite(groupId); }}
+          onDecline={handleDeclineGroupInvite}
+          onClose={() => setShowGroupInvites(false)}
+        />
+      )}
+
+      {showCreateGroup && (
+        <CreateGroup
+          contacts={allContacts}
+          onClose={() => setShowCreateGroup(false)}
+          onCreate={(name, memberPeerIds) => { void handleCreateGroup(name, memberPeerIds); }}
         />
       )}
     </div>

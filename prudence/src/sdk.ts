@@ -15,6 +15,7 @@ export async function initSDK(
     onTyping: (peerId: string, isTyping: boolean) => void;
     onContactRequest: (peerId: string, introducedBy: string, username?: string) => void;
     onConnectionStatus: (status: 'connected' | 'disconnected') => void;
+    onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void;
   },
   pushSubscription?: WebPushSubscription | null,
 ) {
@@ -25,7 +26,11 @@ export async function initSDK(
     username,
     storage: idbStorage,
     ...(pushSubscription ? { push: { platform: 'webpush' as const, subscription: pushSubscription } } : {}),
-    ...handlers,
+    onMessage: handlers.onMessage,
+    onTyping: handlers.onTyping,
+    onContactRequest: handlers.onContactRequest,
+    onConnectionStatus: handlers.onConnectionStatus,
+    ...(handlers.onGroupInvite ? { onGroupInvite: handlers.onGroupInvite } : {}),
   });
   return instance;
 }

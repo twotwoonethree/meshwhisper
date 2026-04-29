@@ -881,6 +881,39 @@ export class MeshWhisper {
     MeshWhisper.instance.pendingGroupInvites.delete(groupId);
   }
 
+  /**
+   * Restores a previously-joined group from persisted state (sender keys, members).
+   * Does NOT send any invites — used only to reload in-memory group state after restart.
+   */
+  static restoreGroup(
+    groupId: string,
+    groupName: string,
+    members: string[],
+    senderKeys: Record<string, number[]>,
+  ): void {
+    MeshWhisper.instance.restoreGroupInstance(groupId, groupName, members, senderKeys);
+  }
+
+  restoreGroupInstance(
+    groupId: string,
+    groupName: string,
+    members: string[],
+    senderKeys: Record<string, number[]>,
+  ): void {
+    if (this.groupManager.getGroup(groupId)) return;
+    const senderKeyMap = new Map<string, Uint8Array>(
+      Object.entries(senderKeys).map(([id, arr]) => [id, new Uint8Array(arr)]),
+    );
+    const invite: import('../group/index.js').GroupInvite = {
+      groupId,
+      groupName,
+      invitedBy: members[0] ?? this.getLocalPeerId(),
+      senderKeys: senderKeyMap,
+      members,
+    };
+    this.groupManager.joinGroup(groupId, invite);
+  }
+
   // ================================================================
   // Public API — Identity backup / restore
   // ================================================================

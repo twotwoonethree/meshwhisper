@@ -8,17 +8,28 @@ interface Props {
   conversations: Conversation[];
   activeId: string | null;
   pendingCount: number;
+  pendingGroupInviteCount: number;
   connected: boolean;
   onSelect: (id: string) => void;
   onPendingClick: () => void;
+  onGroupInviteClick: () => void;
   onContactAdded: (peerId: string, username: string) => void;
+  onNewGroup: () => void;
   onLock: () => void;
 }
 
-function Avatar({ name, size = 'md' }: { name: string; size?: 'sm' | 'md' }) {
-  const s = size === 'sm' ? 'w-8 h-8 text-xs' : 'w-10 h-10 text-sm';
+function Avatar({ name, isGroup = false }: { name: string; isGroup?: boolean }) {
+  if (isGroup) {
+    return (
+      <div className="w-10 h-10 rounded-full bg-brand-700 flex-shrink-0 flex items-center justify-center">
+        <svg className="w-5 h-5 text-brand-200" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+        </svg>
+      </div>
+    );
+  }
   return (
-    <div className={`${s} rounded-full bg-brand-600 flex-shrink-0 flex items-center justify-center text-white font-semibold`}>
+    <div className="w-10 h-10 rounded-full bg-brand-600 flex-shrink-0 flex items-center justify-center text-white text-sm font-semibold">
       {name[0]?.toUpperCase() ?? '?'}
     </div>
   );
@@ -41,10 +52,13 @@ export default function ConversationList({
   conversations,
   activeId,
   pendingCount,
+  pendingGroupInviteCount,
   connected,
   onSelect,
   onPendingClick,
+  onGroupInviteClick,
   onContactAdded,
+  onNewGroup,
   onLock,
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
@@ -73,6 +87,15 @@ export default function ConversationList({
               </svg>
             </button>
             <button
+              onClick={onNewGroup}
+              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors"
+              title="New group"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+              </svg>
+            </button>
+            <button
               onClick={() => setShowAdd(true)}
               className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors"
               title="Add contact"
@@ -84,7 +107,7 @@ export default function ConversationList({
           </div>
         </div>
 
-        {/* Pending requests banner */}
+        {/* Pending contact requests banner */}
         {pendingCount > 0 && (
           <button
             onClick={onPendingClick}
@@ -93,6 +116,19 @@ export default function ConversationList({
             <div className="w-2 h-2 rounded-full bg-brand-400 flex-shrink-0" />
             <span className="text-brand-400 text-sm font-medium">
               {pendingCount} contact request{pendingCount > 1 ? 's' : ''}
+            </span>
+          </button>
+        )}
+
+        {/* Pending group invitations banner */}
+        {pendingGroupInviteCount > 0 && (
+          <button
+            onClick={onGroupInviteClick}
+            className="flex items-center gap-3 px-4 py-3 bg-brand-600/10 border-b border-brand-600/20 hover:bg-brand-600/20 transition-colors text-left"
+          >
+            <div className="w-2 h-2 rounded-full bg-brand-400 flex-shrink-0" />
+            <span className="text-brand-400 text-sm font-medium">
+              {pendingGroupInviteCount} group invitation{pendingGroupInviteCount > 1 ? 's' : ''}
             </span>
           </button>
         )}
@@ -111,7 +147,7 @@ export default function ConversationList({
                 onClick={() => onSelect(conv.id)}
                 className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-800/60 transition-colors text-left border-b border-slate-800/50 ${activeId === conv.id ? 'bg-slate-800' : ''}`}
               >
-                <Avatar name={conv.contact.displayName} />
+                <Avatar name={conv.contact.displayName} isGroup={!!conv.group} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="text-white text-sm font-medium truncate">
@@ -128,7 +164,11 @@ export default function ConversationList({
                       {conv.isTyping ? (
                         <span className="text-brand-400 italic">typing…</span>
                       ) : conv.lastMessage ? (
-                        conv.lastMessage.text
+                        conv.group && conv.lastMessage.senderName
+                          ? <><span className="text-slate-500">{conv.lastMessage.senderName}:</span> {conv.lastMessage.text}</>
+                          : conv.lastMessage.text
+                      ) : conv.group ? (
+                        <span className="text-slate-600">{conv.group.members.length} members</span>
                       ) : (
                         <span className="text-slate-600">No messages yet</span>
                       )}
