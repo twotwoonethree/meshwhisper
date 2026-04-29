@@ -306,22 +306,29 @@ export default function App() {
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
-      // Attempt to restore from relay archive on first boot / fresh install.
-      // This is a no-op if the archive doesn't exist yet.
+      // Archive sync: pull if this device has no local data (fresh install /
+      // cleared storage), then always push current state to seed / update relay.
       try {
-        const { restored, extra } = await sdk.pullArchive();
-        if (restored && extra) {
-          if (extra.contactNames && typeof extra.contactNames === 'object') {
-            for (const [pid, name] of Object.entries(extra.contactNames as Record<string, string>)) {
-              saveContactName(pid, name);
+        const localContacts = MeshWhisper.getContacts();
+        if (localContacts.length === 0) {
+          // Fresh device — try to restore from relay archive.
+          const { restored, extra } = await sdk.pullArchive();
+          if (restored && extra) {
+            if (extra.contactNames && typeof extra.contactNames === 'object') {
+              for (const [pid, name] of Object.entries(extra.contactNames as Record<string, string>)) {
+                saveContactName(pid, name);
+              }
+            }
+            if (Array.isArray(extra.acceptedContacts)) {
+              restoreAccepted(extra.acceptedContacts as string[]);
             }
           }
-          if (Array.isArray(extra.acceptedContacts)) {
-            restoreAccepted(extra.acceptedContacts as string[]);
-          }
+          if (cancelled) return;
         }
+        // Always push current state so relay archive is up to date.
+        scheduleArchiveSync(sdk);
       } catch (e) {
-        console.warn('[archive] pull failed:', e);
+        console.warn('[archive] sync failed:', e);
       }
       if (cancelled) return;
 
@@ -633,7 +640,9 @@ export default function App() {
 
   async function handleAttach(conversationId: string, file: File) {
     const isImage = isImageMime(file.type || '');
-    const thumb = isImage ? await generateThumbnail(file).catch(() => undefined) : undefined;
+    // Full-res thumbnail for local display only; tiny thumb travels in the message pointer.
+    const thumb = isImage ? await generateThumbnail(file, 220).catch(() => undefined) : undefined;
+    const thumbForPointer = isImage ? await generateThumbnail(file, 40).catch(() => undefined) : undefined;
     const localObjectUrl = URL.createObjectURL(file);
     const msgId = crypto.randomUUID();
     const media: AppMessageMedia = {
@@ -659,7 +668,7 @@ export default function App() {
       const bytes = await readFileBytes(file);
       await MeshWhisper.sendMedia(conversationId, bytes, {
         mimeType: file.type || 'application/octet-stream',
-        ...(thumb ? { thumb } : {}),
+        ...(thumbForPointer ? { thumb: thumbForPointer } : {}),
         fileName: file.name, fileSize: file.size,
       });
       setState((prev) => ({
