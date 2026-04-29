@@ -4,11 +4,6 @@ interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>;
 }
 
-type InstallState =
-  | { kind: 'hidden' }
-  | { kind: 'android'; prompt: () => void }
-  | { kind: 'ios' };
-
 function isIos() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent);
 }
@@ -19,27 +14,18 @@ function isStandalone() {
 }
 
 export default function InstallButton() {
-  const [state, setState] = useState<InstallState>({ kind: 'hidden' });
   const [open, setOpen] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [installed, setInstalled] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (isStandalone()) return;
-
-    const handler = (e: Event) => {
+    const handler = (e: BeforeInstallPromptEvent) => {
       e.preventDefault();
-      const prompt = () => (e as BeforeInstallPromptEvent).prompt();
-      setState({ kind: 'android', prompt });
+      setDeferredPrompt(e);
     };
-
-    window.addEventListener('beforeinstallprompt', handler);
-
-    if (isIos() && !isStandalone()) {
-      setState({ kind: 'ios' });
-    }
-
-    return () => window.removeEventListener('beforeinstallprompt', handler);
+    window.addEventListener('beforeinstallprompt', handler as EventListener);
+    return () => window.removeEventListener('beforeinstallprompt', handler as EventListener);
   }, []);
 
   useEffect(() => {
@@ -53,14 +39,16 @@ export default function InstallButton() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open]);
 
-  if (state.kind === 'hidden' || installed) return null;
+  if (isStandalone() || installed) return null;
 
   async function handleInstall() {
-    if (state.kind !== 'android') return;
-    state.prompt();
-    setOpen(false);
+    if (!deferredPrompt) return;
+    await deferredPrompt.prompt();
     setInstalled(true);
+    setOpen(false);
   }
+
+  const ios = isIos();
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -76,9 +64,10 @@ export default function InstallButton() {
 
       {open && (
         <div className="absolute right-0 top-10 w-64 bg-slate-900 border border-slate-700 rounded-xl shadow-xl z-50 p-4">
-          {state.kind === 'android' && (
+          <p className="text-white text-sm font-medium mb-1">Install Prudence</p>
+
+          {deferredPrompt ? (
             <>
-              <p className="text-white text-sm font-medium mb-1">Install Prudence</p>
               <p className="text-slate-400 text-xs mb-3 leading-relaxed">
                 Add to your home screen for the full app experience — works offline too.
               </p>
@@ -89,20 +78,21 @@ export default function InstallButton() {
                 Install
               </button>
             </>
-          )}
-
-          {state.kind === 'ios' && (
-            <>
-              <p className="text-white text-sm font-medium mb-1">Add to Home Screen</p>
-              <p className="text-slate-400 text-xs leading-relaxed">
-                Tap the{' '}
-                <svg className="inline w-3.5 h-3.5 mb-0.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
-                </svg>
-                {' '}Share button in Safari, then choose{' '}
-                <span className="text-white font-medium">Add to Home Screen</span>.
-              </p>
-            </>
+          ) : ios ? (
+            <p className="text-slate-400 text-xs leading-relaxed">
+              Tap the{' '}
+              <svg className="inline w-3.5 h-3.5 mb-0.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+              </svg>
+              {' '}Share button in Safari, then choose{' '}
+              <span className="text-white font-medium">Add to Home Screen</span>.
+            </p>
+          ) : (
+            <p className="text-slate-400 text-xs leading-relaxed">
+              In Chrome, tap the <span className="text-white font-medium">⋮</span> menu and choose{' '}
+              <span className="text-white font-medium">Install app</span> or{' '}
+              <span className="text-white font-medium">Add to Home Screen</span>.
+            </p>
           )}
         </div>
       )}
