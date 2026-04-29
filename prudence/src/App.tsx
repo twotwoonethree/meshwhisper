@@ -66,9 +66,22 @@ export default function App() {
 
   useEffect(() => {
     const u = localStorage.getItem(USERNAME_KEY);
-    if (u) initStorage(u);
+    if (!u) {
+      setLoading(false);
+      return;
+    }
+    initStorage(u);
     setUsername(u);
-    setLoading(false);
+    // If the app was explicitly locked this session, require password
+    if (sessionStorage.getItem('prudence:locked')) {
+      setLoading(false);
+      return;
+    }
+    // Auto-authenticate if identity key is already in IDB
+    idbStorage.get('identity').then((key) => {
+      if (key) setAuthenticated(true);
+      setLoading(false);
+    });
   }, []);
 
   const handleMessage = useCallback((msg: Message) => {
@@ -273,6 +286,7 @@ export default function App() {
     if (!username) return;
     const seed = await deriveIdentityKey(username, password);
     await idbStorage.set('identity', uint8ArrayToHex(seed));
+    sessionStorage.removeItem('prudence:locked');
     setAuthenticated(true);
   }
 
@@ -399,7 +413,7 @@ export default function App() {
           activeId={state.activeConversationId}
           pendingCount={state.pendingRequests.length}
           connected={state.connected}
-          onLock={() => setAuthenticated(false)}
+          onLock={() => { sessionStorage.setItem('prudence:locked', '1'); setAuthenticated(false); }}
           onSelect={(id) =>
             setState((prev) => ({
               ...prev,
