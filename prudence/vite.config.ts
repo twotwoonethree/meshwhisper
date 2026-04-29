@@ -22,7 +22,7 @@ export default defineConfig({
         name: 'Prudence',
         short_name: 'Prudence',
         description: 'End-to-end encrypted messaging',
-        theme_color: '#020617',
+        theme_color: '#9333ea',
         background_color: '#020617',
         display: 'standalone',
         orientation: 'portrait',
