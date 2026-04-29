@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Message, Conversation as SDKConversation, StoredMessage } from '@meshwhisper/sdk';
 import { initSDK, getSDK } from './sdk.ts';
+import { getPushSubscription } from './push.ts';
 import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
 import { saveContactName, getContactName, removeContactName } from './contact-names.ts';
@@ -192,12 +193,16 @@ export default function App() {
     if (!username || !authenticated) return;
     let cancelled = false;
 
-    void initSDK(username, {
-      onMessage: handleMessage,
-      onTyping: handleTyping,
-      onContactRequest: handleContactRequest,
-      onConnectionStatus: handleConnectionStatus,
-    }).then((sdk) => {
+    void (async () => {
+      const pushSub = await getPushSubscription().catch(() => null);
+      if (cancelled) return;
+
+      void initSDK(username, {
+        onMessage: handleMessage,
+        onTyping: handleTyping,
+        onContactRequest: handleContactRequest,
+        onConnectionStatus: handleConnectionStatus,
+      }, pushSub).then((sdk) => {
       if (cancelled) return;
       setState((prev) => ({ ...prev, myUsername: username, connected: true }));
       sdk.getConversationsInstance().then((convs: SDKConversation[]) => {
@@ -269,6 +274,7 @@ export default function App() {
         });
       });
     }).catch(console.error);
+    })();
 
     return () => { cancelled = true; };
   }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus]);
