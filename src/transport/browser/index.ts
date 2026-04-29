@@ -178,6 +178,11 @@ export class BrowserTransport implements Transport {
     this.ws.send(JSON.stringify(this.buildHello()));
   }
 
+  pull(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'pull' }));
+  }
+
   setPushConfig(pushConfig: PushConfig | undefined): void {
     this.pushConfig = pushConfig;
     this.refreshDestHashes();

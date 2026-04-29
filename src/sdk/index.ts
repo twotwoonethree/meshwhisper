@@ -1229,6 +1229,15 @@ export class MeshWhisper {
     ].filter(Boolean));
   }
 
+  /** Requests any queued messages from the relay. Call when the app returns to the foreground. */
+  static pull(): void {
+    MeshWhisper.instance.pullInstance();
+  }
+
+  pullInstance(): void {
+    (this.nodeTransport as unknown as { pull?: () => void } | null)?.pull?.();
+  }
+
   static sendTyping(peerId: string): void {
     MeshWhisper.instance.sendControl(peerId, { __mw_ctrl: 'typing_start' });
   }

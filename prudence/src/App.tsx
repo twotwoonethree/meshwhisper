@@ -5,6 +5,7 @@ import { getPushSubscription } from './push.ts';
 import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
 import { saveContactName, getContactName, removeContactName } from './contact-names.ts';
+import { isHandled, markAccepted, markDeclined as markDeclinedContact } from './accepted-contacts.ts';
 import type { AppState, AppMessage, Conversation, Contact } from './types.ts';
 import Onboarding from './components/Onboarding.tsx';
 import Login from './components/Login.tsx';
@@ -95,18 +96,20 @@ export default function App() {
       if (ctrl.__prudence_ctrl === 'contact_request') {
         console.log('[prudence] contact_request from', msg.senderId, 'username:', ctrl.username);
         if (ctrl.username) saveContactName(msg.senderId, ctrl.username);
-        setState((prev) => {
-          if (prev.pendingRequests.some((r) => r.peerId === msg.senderId)) return prev;
-          return {
-            ...prev,
-            pendingRequests: [...prev.pendingRequests, {
-              peerId: msg.senderId,
-              username: ctrl.username,
-              introducedBy: msg.senderId,
-            }],
-          };
-        });
-        setShowPending(true);
+        if (!isHandled(msg.senderId)) {
+          setState((prev) => {
+            if (prev.pendingRequests.some((r) => r.peerId === msg.senderId)) return prev;
+            return {
+              ...prev,
+              pendingRequests: [...prev.pendingRequests, {
+                peerId: msg.senderId,
+                username: ctrl.username,
+                introducedBy: msg.senderId,
+              }],
+            };
+          });
+          setShowPending(true);
+        }
         return;
       }
     } catch { /* not a control message */ }
@@ -175,6 +178,7 @@ export default function App() {
 
   const handleContactRequest = useCallback(
     (peerId: string, introducedBy: string, reqUsername?: string) => {
+      if (isHandled(peerId)) return;
       setState((prev) => ({
         ...prev,
         pendingRequests: [...prev.pendingRequests, { peerId, introducedBy, username: reqUsername }],
@@ -192,6 +196,11 @@ export default function App() {
   useEffect(() => {
     if (!username || !authenticated) return;
     let cancelled = false;
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') getSDK()?.pullInstance();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
 
     void (async () => {
       const pushSub = await getPushSubscription().catch(() => null);
@@ -226,7 +235,7 @@ export default function App() {
             if (isControlMessage(text)) {
               if (m.direction === 'inbound') {
                 const cr = extractContactRequest(text);
-                if (cr) pendingFromHistory.push({ peerId: c.peerId, username: cr.username });
+                if (cr && !isHandled(c.peerId)) pendingFromHistory.push({ peerId: c.peerId, username: cr.username });
               }
               continue;
             }
@@ -276,7 +285,10 @@ export default function App() {
     }).catch(console.error);
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus]);
 
   async function handleRegister(chosenUsername: string, password: string) {
@@ -357,6 +369,7 @@ export default function App() {
   }
 
   function handleAcceptRequest(peerId: string, reqUsername?: string) {
+    markAccepted(peerId);
     const req = state.pendingRequests.find((r) => r.peerId === peerId);
     const resolvedUsername = reqUsername ?? req?.username;
     if (resolvedUsername) saveContactName(peerId, resolvedUsername);
@@ -386,6 +399,7 @@ export default function App() {
   }
 
   function handleDeclineRequest(peerId: string) {
+    markDeclinedContact(peerId);
     setState((prev) => ({
       ...prev,
       pendingRequests: prev.pendingRequests.filter((r) => r.peerId !== peerId),
