@@ -68,10 +68,11 @@ import Nav from '../components/Nav.astro';
             <div class="text-brand-400 text-xs font-medium uppercase tracking-widest">Stage 1 — Now</div>
           </div>
           <h3 class="text-white font-semibold mb-2">Foundation node live</h3>
-          <p class="text-slate-400 text-sm leading-relaxed">
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
             The relay is running at <code class="text-brand-300">relay.meshwhisper.org</code>.
-            Prudence — the reference PWA — is being built on the SDK.
+            Prudence — the reference PWA built on the SDK — is live and open to use.
           </p>
+          <a href="https://prudence.meshwhisper.org" class="text-brand-400 text-sm hover:text-brand-300 transition-colors">Try Prudence →</a>
         </div>
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
           <div class="flex items-center gap-2 mb-3">
@@ -94,6 +95,44 @@ import Nav from '../components/Nav.astro';
             Device-layer relay becomes meaningful. Privacy strengthens automatically
             as a side effect of adoption — the inverse of centralised messaging.
           </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Prudence -->
+    <section class="border-t border-slate-800">
+      <div class="max-w-6xl mx-auto px-6 py-20 flex flex-col sm:flex-row items-center gap-10">
+        <div class="flex-1">
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Reference app — live now</div>
+          <h2 class="text-2xl font-bold text-white mb-4">Prudence</h2>
+          <p class="text-slate-400 text-sm leading-relaxed mb-6">
+            A fully working encrypted messenger built entirely on the MeshWhisper SDK.
+            No phone number. No email. Username and password — your keys are derived from them,
+            nothing is stored on a server. Messages are end-to-end encrypted before they leave your device.
+          </p>
+          <a
+            href="https://prudence.meshwhisper.org"
+            class="inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-400 text-white px-5 py-2.5 rounded-lg font-medium text-sm transition-colors"
+          >
+            Open Prudence
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+            </svg>
+          </a>
+        </div>
+        <div class="flex-1 bg-slate-900 border border-slate-800 rounded-2xl p-6 font-mono text-xs leading-relaxed text-slate-400 max-w-sm w-full">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="w-2 h-2 rounded-full bg-brand-400"></div>
+            <span class="text-brand-400">prudence.meshwhisper.org</span>
+          </div>
+          <div class="space-y-3">
+            <div class="flex justify-end"><span class="bg-brand-700 text-white px-3 py-1.5 rounded-2xl rounded-br-sm text-xs">Hey — can you read this?</span></div>
+            <div class="flex justify-start"><span class="bg-slate-800 text-slate-200 px-3 py-1.5 rounded-2xl rounded-bl-sm text-xs">Only me. The relay can't.</span></div>
+            <div class="flex justify-end"><span class="bg-brand-700 text-white px-3 py-1.5 rounded-2xl rounded-br-sm text-xs">That's the point.</span></div>
+          </div>
+          <div class="mt-4 pt-4 border-t border-slate-800 text-slate-600 text-[10px]">
+            PQXDH + Double Ratchet · No keys on server · Works in any browser
+          </div>
         </div>
       </div>
     </section>
@@ -169,6 +208,10 @@ import Nav from '../components/Nav.astro';
           <div><a href="#" data-coming-soon class="hover:text-white transition-colors">API reference</a></div>
           <div><a href="#" data-coming-soon class="hover:text-white transition-colors">GitHub</a></div>
           <div><a href="https://relay.meshwhisper.org/health" class="hover:text-white transition-colors">Relay status</a></div>
+        </div>
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Apps</div>
+          <div><a href="https://prudence.meshwhisper.org" class="hover:text-white transition-colors">Prudence</a></div>
         </div>
       </div>
     </div>

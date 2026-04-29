@@ -54,8 +54,8 @@ export default function ConversationList({
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-4 border-b border-slate-800">
           <div>
-            <h1 className="text-white font-semibold text-base">Prudence</h1>
-            <div className="flex items-center gap-1.5 mt-0.5">
+            <img src="/logo-long.png" alt="Prudence" className="h-6 object-contain object-left" />
+            <div className="flex items-center gap-1.5 mt-1">
               <div className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-400' : 'bg-slate-600'}`} />
               <span className="text-slate-500 text-xs">@{myUsername}</span>
             </div>
