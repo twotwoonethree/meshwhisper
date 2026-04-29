@@ -9,28 +9,44 @@ import Nav from '../components/Nav.astro';
   <main>
 
     <!-- Hero -->
-    <section class="max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
-      <h1 class="text-5xl sm:text-6xl font-bold text-white tracking-tight leading-tight mb-6">
-        A relay doesn't need to read<br />a message to forward it
-      </h1>
+    <section class="max-w-6xl mx-auto px-6 pt-20 pb-20">
+      <div class="flex flex-col-reverse lg:flex-row items-center gap-12 lg:gap-16">
 
-      <p class="text-xl text-slate-400 max-w-2xl mx-auto mb-8 leading-relaxed">
-        MeshWhisper is messaging infrastructure built on this observation.
-        Encrypted on the device. Forwarded as an opaque blob. Decrypted on the other end.
-        The relay never holds a key. It doesn't need to.
-      </p>
+        <!-- Text -->
+        <div class="flex-1 text-center lg:text-left">
+          <h1 class="text-5xl sm:text-6xl font-bold text-white tracking-tight leading-tight mb-6">
+            A relay doesn't need to read<br />a message to forward it
+          </h1>
 
-      <div class="inline-block bg-slate-900 border border-slate-700 rounded-xl px-6 py-3 font-mono text-brand-300 text-sm mb-10">
-        Relay promiscuously. Connect selectively.
-      </div>
+          <p class="text-xl text-slate-400 mb-8 leading-relaxed">
+            MeshWhisper is messaging infrastructure built on this observation.
+            Encrypted on the device. Forwarded as an opaque blob. Decrypted on the other end.
+            The relay never holds a key. It doesn't need to.
+          </p>
 
-      <div class="flex flex-col sm:flex-row gap-4 justify-center">
-        <a href="#integrate" class="bg-brand-500 hover:bg-brand-400 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-          Integrate the SDK
-        </a>
-        <a href="/how-it-works" class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white px-6 py-3 rounded-lg font-semibold transition-colors">
-          How it works →
-        </a>
+          <div class="inline-block bg-slate-900 border border-slate-700 rounded-xl px-6 py-3 font-mono text-brand-300 text-sm mb-10">
+            Relay promiscuously. Connect selectively.
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start">
+            <a href="#integrate" class="bg-brand-500 hover:bg-brand-400 text-white px-6 py-3 rounded-lg font-semibold transition-colors">
+              Integrate the SDK
+            </a>
+            <a href="/how-it-works" class="border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white px-6 py-3 rounded-lg font-semibold transition-colors">
+              How it works →
+            </a>
+          </div>
+        </div>
+
+        <!-- Logo mark -->
+        <div class="flex-shrink-0 flex items-center justify-center lg:w-96">
+          <img
+            src="/logo-mark.png"
+            alt="MeshWhisper"
+            class="w-64 sm:w-80 lg:w-96 opacity-90 drop-shadow-[0_0_60px_rgba(34,211,238,0.15)]"
+          />
+        </div>
+
       </div>
     </section>
 
