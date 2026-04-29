@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Conversation } from '../types.ts';
 import AddContact from './AddContact.tsx';
+import InstallButton from './InstallButton.tsx';
 
 interface Props {
   myUsername: string;
@@ -61,6 +62,7 @@ export default function ConversationList({
             </div>
           </div>
           <div className="flex items-center gap-1">
+            <InstallButton />
             <button
               onClick={onLock}
               className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-slate-300 transition-colors"
