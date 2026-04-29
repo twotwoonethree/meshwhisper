@@ -32,6 +32,7 @@
 
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as nodeCrypto from 'node:crypto';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Database from 'better-sqlite3';
@@ -45,6 +46,7 @@ const BLOB_TTL_HOURS = parseInt(process.env.BLOB_TTL_HOURS ?? '72', 10);
 const MAX_BLOB_SIZE = parseInt(process.env.MAX_BLOB_SIZE ?? String(256 * 1024), 10); // 256 KB
 const MAX_BLOBS_PER_HASH = parseInt(process.env.MAX_BLOBS_PER_HASH ?? '500', 10);
 const MEDIA_TTL_HOURS = parseInt(process.env.MEDIA_TTL_HOURS ?? String(7 * 24), 10); // 7 days
+const MAX_ARCHIVE_SIZE = parseInt(process.env.MAX_ARCHIVE_SIZE ?? String(12 * 1024 * 1024), 10); // 12 MB
 const MAX_MEDIA_SIZE = parseInt(process.env.MAX_MEDIA_SIZE ?? String(50 * 1024 * 1024), 10); // 50 MB
 const PRUNE_INTERVAL_MS = 5 * 60 * 1000; // prune expired blobs every 5 minutes
 const PUSH_WEBHOOK_URL = process.env.PUSH_WEBHOOK_URL ?? null;
@@ -115,6 +117,14 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS prekey_username_idx
     ON prekey_bundles (namespace, username)
     WHERE username IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS archives (
+    peer_id    TEXT    PRIMARY KEY,
+    auth_hash  TEXT    NOT NULL,
+    data       BLOB    NOT NULL,
+    stored_at  INTEGER NOT NULL,
+    size       INTEGER NOT NULL
+  );
 `);
 
 // Prepared statements
@@ -209,6 +219,29 @@ const stmts = {
   ),
   countMedia: db.prepare(
     'SELECT COUNT(*) AS cnt FROM media',
+  ),
+
+  // archives
+  upsertArchive: db.prepare(
+    `INSERT INTO archives (peer_id, auth_hash, data, stored_at, size)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(peer_id) DO UPDATE SET
+       data      = excluded.data,
+       stored_at = excluded.stored_at,
+       size      = excluded.size
+     WHERE auth_hash = excluded.auth_hash`,
+  ),
+  getArchiveAuthHash: db.prepare<[string]>(
+    'SELECT auth_hash FROM archives WHERE peer_id = ?',
+  ),
+  getArchiveData: db.prepare<[string]>(
+    'SELECT data FROM archives WHERE peer_id = ?',
+  ),
+  insertArchiveFirstTime: db.prepare(
+    'INSERT OR IGNORE INTO archives (peer_id, auth_hash, data, stored_at, size) VALUES (?, ?, ?, ?, ?)',
+  ),
+  countArchives: db.prepare(
+    'SELECT COUNT(*) AS cnt FROM archives',
   ),
 };
 
@@ -679,6 +712,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       pushRegistrations: (stmts.countPush.get() as { cnt: number }).cnt,
       mediaEntries: (stmts.countMedia.get() as { cnt: number }).cnt,
       opkEntries: (stmts.countOpks.get() as { cnt: number }).cnt,
+      archiveEntries: (stmts.countArchives.get() as { cnt: number }).cnt,
     });
     return;
   }
@@ -893,6 +927,76 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
+  // Upload encrypted archive
+  // PUT /archive/:peerId  Authorization: Bearer <token>
+  const archivePutMatch = url.pathname.match(/^\/archive\/([0-9a-f]{64})$/);
+  if (archivePutMatch && method === 'PUT') {
+    const peerId = archivePutMatch[1];
+    const authHeader = req.headers['authorization'] ?? '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!token) {
+      sendJson(res, 401, { error: 'Missing Authorization header' });
+      return;
+    }
+
+    const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
+    if (contentLength > MAX_ARCHIVE_SIZE) {
+      sendJson(res, 413, { error: `Archive too large (max ${MAX_ARCHIVE_SIZE} bytes)` });
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let aborted = false;
+    await new Promise<void>((resolve, reject) => {
+      req.on('data', (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > MAX_ARCHIVE_SIZE) { aborted = true; req.destroy(); return; }
+        chunks.push(chunk);
+      });
+      req.on('end', resolve);
+      req.on('error', reject);
+    });
+    if (aborted) {
+      sendJson(res, 413, { error: `Archive too large (max ${MAX_ARCHIVE_SIZE} bytes)` });
+      return;
+    }
+
+    const data = Buffer.concat(chunks);
+    const incomingHash = nodeCrypto.createHash('sha256').update(token).digest('hex');
+
+    // First write: INSERT OR IGNORE sets the auth_hash. The upsert only
+    // succeeds when auth_hash matches, preventing overwrites by other parties.
+    stmts.insertArchiveFirstTime.run(peerId, incomingHash, data, Date.now(), data.length);
+    const existing = stmts.getArchiveAuthHash.get(peerId) as { auth_hash: string } | undefined;
+    if (!existing || existing.auth_hash !== incomingHash) {
+      sendJson(res, 403, { error: 'Invalid archive token' });
+      return;
+    }
+    stmts.upsertArchive.run(peerId, incomingHash, data, Date.now(), data.length);
+    sendJson(res, 200, { ok: true, size: data.length });
+    return;
+  }
+
+  // Download encrypted archive
+  // GET /archive/:peerId  (no auth — content is client-encrypted)
+  const archiveGetMatch = url.pathname.match(/^\/archive\/([0-9a-f]{64})$/);
+  if (archiveGetMatch && method === 'GET') {
+    const row = stmts.getArchiveData.get(archiveGetMatch[1]) as { data: Buffer } | undefined;
+    if (!row) {
+      sendJson(res, 404, { error: 'Archive not found' });
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': row.data.length,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store',
+    });
+    res.end(row.data);
+    return;
+  }
+
   sendJson(res, 404, { error: 'Not found' });
 }
 
@@ -936,6 +1040,7 @@ httpServer.listen(PORT, LISTEN_HOST, () => {
   console.log(`  Directory: http://localhost:${PORT}/directory`);
   console.log(`  OPKs:      http://localhost:${PORT}/opks`);
   console.log(`  Media:     http://localhost:${PORT}/media`);
+  console.log(`  Archive:   http://localhost:${PORT}/archive/:peerId`);
   console.log(`  Health:    http://localhost:${PORT}/health`);
   console.log(`  Database:  ${DB_PATH}`);
   console.log(`  Blob TTL:  ${BLOB_TTL_HOURS}h`);

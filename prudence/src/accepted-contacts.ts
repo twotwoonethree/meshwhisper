@@ -24,3 +24,12 @@ export function markDeclined(peerId: string): void {
 export function isHandled(peerId: string): boolean {
   return load().has(peerId);
 }
+
+export function getAll(): string[] {
+  return [...load()];
+}
+
+export function restoreAll(peerIds: string[]): void {
+  const set = new Set([...load(), ...peerIds]);
+  localStorage.setItem(KEY, JSON.stringify([...set]));
+}

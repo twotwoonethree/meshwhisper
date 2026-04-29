@@ -5,8 +5,8 @@ import { initSDK, getSDK } from './sdk.ts';
 import { getPushSubscription } from './push.ts';
 import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
-import { saveContactName, getContactName, removeContactName } from './contact-names.ts';
-import { isHandled, markAccepted, markDeclined as markDeclinedContact } from './accepted-contacts.ts';
+import { saveContactName, getContactName, getAllContactNames, removeContactName } from './contact-names.ts';
+import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as getAllAccepted, restoreAll as restoreAccepted } from './accepted-contacts.ts';
 import { loadGroups, upsertGroup } from './group-storage.ts';
 import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
 import type { AppState, AppMessage, AppMessageMedia, Conversation, Contact, GroupInfo } from './types.ts';
@@ -96,6 +96,20 @@ export default function App() {
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showGroupInvites, setShowGroupInvites] = useState(false);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const archiveSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function scheduleArchiveSync(sdk: ReturnType<typeof getSDK>) {
+    if (!sdk) return;
+    if (archiveSyncTimer.current) clearTimeout(archiveSyncTimer.current);
+    archiveSyncTimer.current = setTimeout(() => {
+      archiveSyncTimer.current = null;
+      sdk.pushArchive({
+        contactNames: getAllContactNames(),
+        acceptedContacts: getAllAccepted(),
+        groups: JSON.parse(localStorage.getItem('prudence:groups') ?? '[]'),
+      }).catch((e: unknown) => console.warn('[archive] push failed:', e));
+    }, 5_000);
+  }
 
   useEffect(() => {
     const u = localStorage.getItem(USERNAME_KEY);
@@ -215,7 +229,8 @@ export default function App() {
         },
       };
     });
-  }, []);
+    scheduleArchiveSync(getSDK());
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTyping = useCallback((peerId: string, isTyping: boolean) => {
     setState((prev) => ({
@@ -289,6 +304,25 @@ export default function App() {
         onConnectionStatus: handleConnectionStatus,
         onGroupInvite: handleGroupInvite,
       }, pushSub).then(async (sdk) => {
+      if (cancelled) return;
+
+      // Attempt to restore from relay archive on first boot / fresh install.
+      // This is a no-op if the archive doesn't exist yet.
+      try {
+        const { restored, extra } = await sdk.pullArchive();
+        if (restored && extra) {
+          if (extra.contactNames && typeof extra.contactNames === 'object') {
+            for (const [pid, name] of Object.entries(extra.contactNames as Record<string, string>)) {
+              saveContactName(pid, name);
+            }
+          }
+          if (Array.isArray(extra.acceptedContacts)) {
+            restoreAccepted(extra.acceptedContacts as string[]);
+          }
+        }
+      } catch (e) {
+        console.warn('[archive] pull failed:', e);
+      }
       if (cancelled) return;
 
       // Restore persisted group state into SDK memory
@@ -464,6 +498,7 @@ export default function App() {
           ) ?? [],
         },
       }));
+      scheduleArchiveSync(getSDK());
     }).catch((err: unknown) => {
       console.error('[send] failed:', err);
       setState((prev) => ({
@@ -492,6 +527,7 @@ export default function App() {
         ...prev.conversations.filter((c) => c.id !== peerId),
       ],
     }));
+    scheduleArchiveSync(getSDK());
   }
 
   async function handleRemoveContact(peerId: string) {

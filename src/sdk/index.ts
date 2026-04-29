@@ -82,6 +82,18 @@ import {
   serializeRatchetHeader,
   isControlPayload,
 } from './utils.js';
+import {
+  deriveBackupKey as _deriveBackupKey,
+  deriveArchiveToken,
+  encryptArchive,
+  decryptArchive,
+  collectKv,
+  restoreKv,
+  uploadArchive,
+  downloadArchive,
+  MAX_ARCHIVE_BYTES,
+} from './archive.js';
+export type { ArchivePayload } from './archive.js';
 
 // ============================================================
 // Public option/event types
@@ -1269,6 +1281,107 @@ export class MeshWhisper {
       this.storage?.delete(`messages/${peerId}`),
       this.storage?.delete(`sessions/${peerId}`),
     ].filter(Boolean));
+  }
+
+  // ================================================================
+  // Public API — Encrypted archive (backup / restore)
+  // ================================================================
+
+  /**
+   * Derive the backup encryption key from raw identity key bytes.
+   * Use this if you need to handle the encrypted blob outside the SDK
+   * (e.g. local file export). For relay-based sync, prefer pushArchive /
+   * pullArchive which derive the key internally.
+   */
+  static async deriveBackupKey(identityKeyBytes: Uint8Array): Promise<Uint8Array> {
+    return _deriveBackupKey(identityKeyBytes);
+  }
+
+  private archiveRelayUrl(): string {
+    const node = this.config.node ?? '';
+    return Array.isArray(node) ? node[0] ?? '' : node;
+  }
+
+  /**
+   * Build an encrypted archive blob containing message history, contacts,
+   * and peer state. Pass `extra` for any app-specific data (e.g. display
+   * names) that should travel with the archive.
+   */
+  async exportArchive(extra?: Record<string, unknown>): Promise<Uint8Array> {
+    this.assertRunning();
+    if (!this.storage) throw new Error('exportArchive requires a storage backend');
+    const identityKey = this.identity.getEdPrivateKey();
+    const backupKey = await _deriveBackupKey(identityKey);
+    const kv = await collectKv(this.storage);
+    const payload = {
+      version: 1 as const,
+      createdAt: Date.now(),
+      peerId: this.getLocalPeerId(),
+      relayUrl: this.archiveRelayUrl(),
+      kv,
+      extra,
+    };
+    return encryptArchive(payload, backupKey);
+  }
+
+  /**
+   * Decrypt and restore an archive blob into this SDK instance's storage.
+   * The SDK reloads its in-memory state after writing so the app sees
+   * the restored contacts and messages immediately.
+   * Returns the `extra` field from the archive for the app to handle.
+   */
+  async importArchive(blob: Uint8Array): Promise<{ extra?: Record<string, unknown> }> {
+    this.assertRunning();
+    if (!this.storage) throw new Error('importArchive requires a storage backend');
+    const identityKey = this.identity.getEdPrivateKey();
+    const backupKey = await _deriveBackupKey(identityKey);
+    const payload = await decryptArchive(blob, backupKey);
+    await restoreKv(payload.kv, this.storage);
+    await this.loadPersistedState();
+    return { extra: payload.extra };
+  }
+
+  /**
+   * Export and upload the archive to the home relay. Safe to call after
+   * every significant state change — throttle on the caller side.
+   */
+  async pushArchive(extra?: Record<string, unknown>): Promise<void> {
+    this.assertRunning();
+    if (!this.storage) return;
+    const identityKey = this.identity.getEdPrivateKey();
+    const backupKey = await _deriveBackupKey(identityKey);
+    const authToken = await deriveArchiveToken(identityKey);
+    const kv = await collectKv(this.storage);
+    const payload = {
+      version: 1 as const,
+      createdAt: Date.now(),
+      peerId: this.getLocalPeerId(),
+      relayUrl: this.archiveRelayUrl(),
+      kv,
+      extra,
+    };
+    const plainSize = JSON.stringify(payload).length;
+    if (plainSize > MAX_ARCHIVE_BYTES) {
+      console.warn(`[archive] archive too large (${plainSize} bytes), skipping push`);
+      return;
+    }
+    const blob = await encryptArchive(payload, backupKey);
+    await uploadArchive(this.archiveRelayUrl(), this.getLocalPeerId(), authToken, blob);
+  }
+
+  /**
+   * Download the archive from the home relay and restore state.
+   * Returns `{ restored: false }` when no archive exists yet.
+   * On a fresh install this should be called right after init() so
+   * contacts and messages are available before the UI renders.
+   */
+  async pullArchive(): Promise<{ restored: boolean; extra?: Record<string, unknown> }> {
+    this.assertRunning();
+    if (!this.storage) return { restored: false };
+    const blob = await downloadArchive(this.archiveRelayUrl(), this.getLocalPeerId());
+    if (!blob) return { restored: false };
+    const result = await this.importArchive(blob);
+    return { restored: true, ...result };
   }
 
   /** Requests any queued messages from the relay. Call when the app returns to the foreground. */
