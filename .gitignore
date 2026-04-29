@@ -17,3 +17,6 @@ docs/*.nav
 docs/*.out
 docs/*.snm
 docs/*.toc
+
+# Windows download metadata
+*:Zone.Identifier
