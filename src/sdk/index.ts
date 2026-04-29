@@ -236,9 +236,12 @@ export class MeshWhisper {
     this.storage = storage;
     this.identity = identity;
 
+    // When no developer key is provided, use all-zeros so that two apps with the
+    // same namespace string share the same routing namespace and can reach each other.
+    // Production apps should always supply their own key for namespace isolation.
     const developerKeyBytes = config.developerKey
       ? base64ToUint8Array(config.developerKey)
-      : randomBytes(32);
+      : new Uint8Array(32);
     this.namespaceManager = new NamespaceManager({
       appBundleId: config.namespace,
       developerPublicKey: developerKeyBytes,
@@ -1015,14 +1018,14 @@ export class MeshWhisper {
    * const found = await MeshWhisper.addContactByKey('a1b2c3...');
    * ```
    */
-  static async addContactByKey(publicKey: string): Promise<boolean> {
+  static async addContactByKey(publicKey: string): Promise<string | null> {
     return MeshWhisper.instance.addContactByKeyInstance(publicKey);
   }
 
-  async addContactByKeyInstance(query: string): Promise<boolean> {
+  async addContactByKeyInstance(query: string): Promise<string | null> {
     this.assertRunning();
     const result = await this.sessionManager.lookupPreKeyBundle(query);
-    if (!result) return false;
+    if (!result) return null;
 
     const { bundle, publicKey } = result;
     const edPubBytes = hexToUint8Array(publicKey);
@@ -1031,15 +1034,23 @@ export class MeshWhisper {
 
     this.sessionManager.setBundle(peerId, bundle);
     this.peerCache.addPeer(peerId, x25519PubBytes);
+    this.storage?.set(`peers/${peerId}`, uint8ArrayToHex(x25519PubBytes)).catch(() => {});
 
     if (this.config.permissionModel === 'mutual') {
       this.permissionManager.confirmMutualContact(peerId);
     } else {
       this.permissionManager.addContact(peerId);
     }
+    this.persistContacts().catch(() => {});
 
-    await this.sessionManager.initiateHandshake(peerId, bundle);
-    return true;
+    // Only initiate a new handshake if no session exists. When the remote peer
+    // already contacted us first (they sent an x3dh_init), we have a live session
+    // and sending a second x3dh_init would overwrite both sides' ratchet state,
+    // leaving the initiating peer with a receiver session that has no sending chain.
+    if (!this.sessionManager.hasSession(peerId)) {
+      await this.sessionManager.initiateHandshake(peerId, bundle);
+    }
+    return peerId;
   }
 
   static async introduceContacts(peerA: string, peerB: string): Promise<void> {
@@ -1200,6 +1211,22 @@ export class MeshWhisper {
         }
       }
     }
+  }
+
+  /** Removes a contact and wipes all local data for that conversation. */
+  static async deleteConversation(peerId: string): Promise<void> {
+    return MeshWhisper.instance.deleteConversationInstance(peerId);
+  }
+
+  async deleteConversationInstance(peerId: string): Promise<void> {
+    this.permissionManager.removeContact(peerId);
+    this.peerCache.removePeer(peerId);
+    await Promise.all([
+      this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())),
+      this.storage?.delete(`peers/${peerId}`),
+      this.storage?.delete(`messages/${peerId}`),
+      this.storage?.delete(`sessions/${peerId}`),
+    ].filter(Boolean));
   }
 
   static sendTyping(peerId: string): void {
@@ -1456,6 +1483,11 @@ export class MeshWhisper {
     this.permissionManager.addContact(peerId);
     this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())).catch(() => {});
 
+    // peerId is the hex-encoded X25519 public key — add it to peerCache so
+    // sendMessage can compute the dest hash. Persist immediately so it survives restarts.
+    this.peerCache.addPeer(peerId, hexToUint8Array(peerId));
+    this.storage?.set(`peers/${peerId}`, peerId).catch(() => {});
+
     // Issue an entropy challenge so we can assess whether this peer is a
     // real physical device. The result feeds into relay trust scoring.
     const { challengeData } = this.sybilManager.createChallenge(peerId);
@@ -1617,6 +1649,13 @@ export class MeshWhisper {
     const contactsRaw = await this.storage.get('contacts');
     if (contactsRaw) {
       this.permissionManager.loadContacts(JSON.parse(contactsRaw) as string[]);
+      // Rebuild peerCache from contacts — the X25519 peerId is the public key hex,
+      // so we can restore it without a relay lookup even if peers/ keys are missing.
+      for (const peerId of this.permissionManager.getContacts()) {
+        if (!this.peerCache.getPeerPublicKey(peerId)) {
+          this.peerCache.addPeer(peerId, hexToUint8Array(peerId));
+        }
+      }
     }
 
     // Blocked peers

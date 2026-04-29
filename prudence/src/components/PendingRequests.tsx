@@ -1,4 +1,4 @@
-import { MeshWhisper } from '@meshwhisper/sdk';
+import { getSDK } from '../sdk.ts';
 
 interface PendingRequest {
   peerId: string;
@@ -8,15 +8,20 @@ interface PendingRequest {
 
 interface Props {
   requests: PendingRequest[];
-  onAccept: (peerId: string) => void;
+  onAccept: (peerId: string, username?: string) => void;
   onDecline: (peerId: string) => void;
   onClose: () => void;
 }
 
 export default function PendingRequests({ requests, onAccept, onDecline, onClose }: Props) {
-  async function accept(peerId: string) {
-    await MeshWhisper.addContactByKey(peerId);
-    onAccept(peerId);
+  async function accept(req: PendingRequest) {
+    const sdk = getSDK();
+    if (!sdk) return;
+    const query = req.username ? `@${req.username}` : req.peerId;
+    console.log('[accept] calling addContactByKeyInstance with query:', query, 'peerId:', req.peerId);
+    const result = await sdk.addContactByKeyInstance(query);
+    console.log('[accept] addContactByKeyInstance returned:', result);
+    onAccept(req.peerId, req.username);
   }
 
   return (
@@ -52,7 +57,7 @@ export default function PendingRequests({ requests, onAccept, onDecline, onClose
                   </svg>
                 </button>
                 <button
-                  onClick={() => accept(req.peerId)}
+                  onClick={() => accept(req)}
                   className="w-8 h-8 rounded-full bg-brand-600 hover:bg-brand-500 flex items-center justify-center text-white transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">

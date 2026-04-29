@@ -10,6 +10,8 @@ interface Props {
   connected: boolean;
   onSelect: (id: string) => void;
   onPendingClick: () => void;
+  onContactAdded: (peerId: string, username: string) => void;
+  onLock: () => void;
 }
 
 function Avatar({ name, size = 'md' }: { name: string; size?: 'sm' | 'md' }) {
@@ -41,6 +43,8 @@ export default function ConversationList({
   connected,
   onSelect,
   onPendingClick,
+  onContactAdded,
+  onLock,
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
 
@@ -56,15 +60,26 @@ export default function ConversationList({
               <span className="text-slate-500 text-xs">@{myUsername}</span>
             </div>
           </div>
-          <button
-            onClick={() => setShowAdd(true)}
-            className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors"
-            title="Add contact"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={onLock}
+              className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-slate-300 transition-colors"
+              title="Lock"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+              </svg>
+            </button>
+            <button
+              onClick={() => setShowAdd(true)}
+              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors"
+              title="Add contact"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Pending requests banner */}
@@ -129,7 +144,13 @@ export default function ConversationList({
         </div>
       </div>
 
-      {showAdd && <AddContact onClose={() => setShowAdd(false)} />}
+      {showAdd && (
+        <AddContact
+          myUsername={myUsername}
+          onClose={() => setShowAdd(false)}
+          onAdded={(peerId, username) => { onContactAdded(peerId, username); setShowAdd(false); }}
+        />
+      )}
     </>
   );
 }

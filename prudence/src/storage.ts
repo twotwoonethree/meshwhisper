@@ -6,13 +6,12 @@ interface StorageBackend {
   keys(prefix: string): Promise<string[]>;
 }
 
-const DB_NAME = 'prudence';
 const STORE_NAME = 'kv';
 const DB_VERSION = 1;
 
-function openDb(): Promise<IDBDatabase> {
+function openDb(name: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(name, DB_VERSION);
     req.onupgradeneeded = () => {
       req.result.createObjectStore(STORE_NAME);
     };
@@ -22,8 +21,11 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+export function initStorage(username: string): void {
+  dbPromise = openDb(`prudence-${username}`);
+}
 function getDb(): Promise<IDBDatabase> {
-  if (!dbPromise) dbPromise = openDb();
+  if (!dbPromise) throw new Error('Storage not initialized — call initStorage(username) first');
   return dbPromise;
 }
 

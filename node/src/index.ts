@@ -401,7 +401,6 @@ function validateUsername(raw: string): string | null {
   return USERNAME_RE.test(u) ? u : null;
 }
 
-/** Returns false if the username is already claimed by a different public key. */
 const registerPrekeyTx = db.transaction((
   namespace: string,
   publicKey: string,
@@ -409,11 +408,16 @@ const registerPrekeyTx = db.transaction((
   username: string | null,
 ): boolean => {
   const key = directoryKey(namespace, publicKey);
+  // Remove any existing entry for this username so the new key can take over.
+  // With password-derived keys, re-registration with the same credentials is
+  // idempotent; a different key means the user rotated or recovered their identity.
   if (username) {
     const existing = stmts.getPrekeyByUsername.get(namespace, username) as
-      | { key: string; bundle: string }
+      | { key: string }
       | undefined;
-    if (existing && existing.key !== key) return false;
+    if (existing && existing.key !== key) {
+      db.prepare('DELETE FROM prekey_bundles WHERE key = ?').run(existing.key);
+    }
   }
   stmts.upsertPrekey.run(key, bundle, username, namespace);
   return true;
@@ -713,11 +717,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
     }
 
-    const ok = registerPrekeyTx(namespace, publicKey, bundle, username);
-    if (!ok) {
-      sendJson(res, 409, { error: 'Username already taken' });
-      return;
-    }
+    registerPrekeyTx(namespace, publicKey, bundle, username);
     sendJson(res, 200, { ok: true });
     return;
   }

@@ -11,6 +11,9 @@ export default defineConfig({
       'node:net': path.resolve(__dirname, 'src/stubs/empty.ts'),
     },
   },
+  optimizeDeps: {
+    include: ['buffer'],
+  },
   plugins: [
     react(),
     VitePWA({

@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { MeshWhisper } from '@meshwhisper/sdk';
-import { NAMESPACE, NODE } from '../sdk.ts';
+import { NAMESPACE, NODE, getSDK } from '../sdk.ts';
 
 interface Props {
+  myUsername: string;
   onClose: () => void;
+  onAdded: (peerId: string, username: string) => void;
 }
 
 type SearchState =
@@ -14,7 +15,7 @@ type SearchState =
   | { status: 'sent' }
   | { status: 'error'; message: string };
 
-export default function AddContact({ onClose }: Props) {
+export default function AddContact({ myUsername, onClose, onAdded }: Props) {
   const [query, setQuery] = useState('');
   const [state, setState] = useState<SearchState>({ status: 'idle' });
 
@@ -44,11 +45,33 @@ export default function AddContact({ onClose }: Props) {
 
   async function handleConnect() {
     if (state.status !== 'found') return;
+    const sdk = getSDK();
+    if (!sdk) {
+      setState({ status: 'error', message: 'Still connecting to relay — please try again in a moment.' });
+      return;
+    }
     try {
-      await MeshWhisper.addContactByKey(state.peerId);
+      console.log('[addContact] calling addContactByKeyInstance with', state.peerId);
+      const peerId = await sdk.addContactByKeyInstance(state.peerId);
+      console.log('[addContact] got peerId', peerId);
+      if (!peerId) {
+        setState({ status: 'error', message: 'Could not reach user — bundle not found on relay.' });
+        return;
+      }
+      // Send explicit contact request message so the recipient knows who wants to connect
+      const payload = new TextEncoder().encode(JSON.stringify({
+        __prudence_ctrl: 'contact_request',
+        username: myUsername,
+      }));
+      console.log('[addContact] sending contact_request to', peerId);
+      await sdk.sendMessage(peerId, payload);
+      console.log('[addContact] contact_request sent ok');
+      onAdded(peerId, state.username);
       setState({ status: 'sent' });
-    } catch {
-      setState({ status: 'error', message: 'Could not send request.' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[AddContact] failed:', err);
+      setState({ status: 'error', message: msg || 'Could not send request.' });
     }
   }
 
