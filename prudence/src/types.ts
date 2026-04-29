@@ -11,6 +11,17 @@ export interface GroupInfo {
   members: { peerId: string; username?: string; role: 'admin' | 'member' }[];
 }
 
+export interface AppMessageMedia {
+  url: string;
+  key: string;
+  mimeType: string;
+  thumb?: string;
+  fileName?: string;
+  fileSize?: number;
+  status: 'uploading' | 'pending' | 'downloading' | 'ready' | 'error';
+  objectUrl?: string;
+}
+
 export interface AppMessage {
   id: string;
   conversationId: string;
@@ -20,6 +31,7 @@ export interface AppMessage {
   status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
   senderId?: string;
   senderName?: string;
+  media?: AppMessageMedia;
 }
 
 export interface Conversation {

@@ -95,12 +95,18 @@ export interface SendOptions {
 export interface MediaSendOptions extends SendOptions {
   mimeType?: string;
   upload?: (encryptedData: Uint8Array) => Promise<string>;
+  thumb?: string;
+  fileName?: string;
+  fileSize?: number;
 }
 
 export interface MediaMessage {
   url: string;
   key: string;
   mimeType?: string;
+  thumb?: string;
+  fileName?: string;
+  fileSize?: number;
 }
 
 export interface CreateGroupOptions {
@@ -684,6 +690,9 @@ export class MeshWhisper {
       url,
       key: uint8ArrayToBase64(mediaKey),
       ...(options?.mimeType ? { mimeType: options.mimeType } : {}),
+      ...(options?.thumb ? { thumb: options.thumb } : {}),
+      ...(options?.fileName ? { fileName: options.fileName } : {}),
+      ...(options?.fileSize !== undefined ? { fileSize: options.fileSize } : {}),
     };
     const pointer = new TextEncoder().encode(JSON.stringify({ __mw_media: true, ...mediaMsg }));
     await this.sendMessage(recipientId, pointer, options);

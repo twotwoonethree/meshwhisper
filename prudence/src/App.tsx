@@ -8,7 +8,8 @@ import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
 import { saveContactName, getContactName, removeContactName } from './contact-names.ts';
 import { isHandled, markAccepted, markDeclined as markDeclinedContact } from './accepted-contacts.ts';
 import { loadGroups, upsertGroup } from './group-storage.ts';
-import type { AppState, AppMessage, Conversation, Contact, GroupInfo } from './types.ts';
+import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
+import type { AppState, AppMessage, AppMessageMedia, Conversation, Contact, GroupInfo } from './types.ts';
 import Onboarding from './components/Onboarding.tsx';
 import Login from './components/Login.tsx';
 import ConversationList from './components/ConversationList.tsx';
@@ -34,6 +35,14 @@ function isControlMessage(text: string): boolean {
   } catch {
     return false;
   }
+}
+
+function extractMediaPointer(text: string): { url: string; key: string; mimeType: string; thumb?: string; fileName?: string; fileSize?: number } | null {
+  try {
+    const obj = JSON.parse(text) as { __mw_media?: boolean; url?: string; key?: string; mimeType?: string; thumb?: string; fileName?: string; fileSize?: number };
+    if (!obj.__mw_media || !obj.url || !obj.key) return null;
+    return { url: obj.url, key: obj.key, mimeType: obj.mimeType ?? 'application/octet-stream', thumb: obj.thumb, fileName: obj.fileName, fileSize: obj.fileSize };
+  } catch { return null; }
 }
 
 function extractContactRequest(text: string): { username?: string } | null {
@@ -113,6 +122,9 @@ export default function App() {
     const text = decoder(Array.from(msg.payload));
     if (!text) return;
 
+    const conversationId = msg.groupId ?? msg.senderId;
+    const isGroup = !!msg.groupId;
+
     try {
       const ctrl = JSON.parse(text) as { __prudence_ctrl?: string; username?: string };
       if (ctrl.__prudence_ctrl === 'contact_request') {
@@ -136,8 +148,34 @@ export default function App() {
       }
     } catch { /* not a control message */ }
 
-    const conversationId = msg.groupId ?? msg.senderId;
-    const isGroup = !!msg.groupId;
+    const mediaPtr = extractMediaPointer(text);
+    if (mediaPtr) {
+      const mediaMsg: AppMessage = {
+        id: msg.id ?? crypto.randomUUID(),
+        conversationId,
+        text: isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'),
+        timestamp: msg.timestamp ?? Date.now(),
+        direction: 'inbound',
+        status: 'delivered',
+        media: { ...mediaPtr, status: 'pending' },
+        ...(isGroup && msg.groupSenderId ? { senderId: msg.groupSenderId, senderName: senderDisplayName(msg.groupSenderId) } : {}),
+      };
+      setState((prev) => {
+        const existingConv = prev.conversations.find((c) => c.id === conversationId);
+        const contact = existingConv?.contact ?? makeContact(conversationId);
+        const isActive = prev.activeConversationId === conversationId;
+        const updatedConv: Conversation = existingConv
+          ? { ...existingConv, lastMessage: mediaMsg, unread: isActive ? 0 : existingConv.unread + 1 }
+          : { id: conversationId, contact, lastMessage: mediaMsg, unread: 1, isTyping: false };
+        const conversations = existingConv
+          ? prev.conversations.map((c) => (c.id === conversationId ? updatedConv : c))
+          : [updatedConv, ...prev.conversations];
+        conversations.sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0));
+        return { ...prev, conversations, messages: { ...prev.messages, [conversationId]: [...(prev.messages[conversationId] ?? []), mediaMsg] } };
+      });
+      return;
+    }
+
     const appMsg: AppMessage = {
       id: msg.id ?? crypto.randomUUID(),
       conversationId,
@@ -299,10 +337,13 @@ export default function App() {
               }
               continue;
             }
+            const mediaPtr = extractMediaPointer(text);
             appMsgs.push({
               id: m.id,
               conversationId: c.peerId,
-              text,
+              text: mediaPtr
+                ? (isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'))
+                : text,
               timestamp: m.timestamp,
               direction: m.direction,
               status: m.status,
@@ -310,6 +351,7 @@ export default function App() {
                 senderId: m.groupSenderId,
                 senderName: senderDisplayName(m.groupSenderId),
               } : {}),
+              ...(mediaPtr ? { media: { ...mediaPtr, status: 'pending' as const } } : {}),
             });
           }
 
@@ -553,6 +595,115 @@ export default function App() {
     }));
   }
 
+  async function handleAttach(conversationId: string, file: File) {
+    const isImage = isImageMime(file.type || '');
+    const thumb = isImage ? await generateThumbnail(file).catch(() => undefined) : undefined;
+    const localObjectUrl = URL.createObjectURL(file);
+    const msgId = crypto.randomUUID();
+    const media: AppMessageMedia = {
+      url: '', key: '',
+      mimeType: file.type || 'application/octet-stream',
+      thumb, fileName: file.name, fileSize: file.size,
+      status: 'uploading', objectUrl: localObjectUrl,
+    };
+    const appMsg: AppMessage = {
+      id: msgId, conversationId,
+      text: isImage ? 'Photo' : file.name,
+      timestamp: Date.now(), direction: 'outbound', status: 'sending', media,
+    };
+    setState((prev) => {
+      const conv = prev.conversations.find((c) => c.id === conversationId);
+      if (!conv) return prev;
+      const conversations = prev.conversations
+        .map((c) => c.id === conversationId ? { ...c, lastMessage: appMsg } : c)
+        .sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0));
+      return { ...prev, conversations, messages: { ...prev.messages, [conversationId]: [...(prev.messages[conversationId] ?? []), appMsg] } };
+    });
+    try {
+      const bytes = await readFileBytes(file);
+      await MeshWhisper.sendMedia(conversationId, bytes, {
+        mimeType: file.type || 'application/octet-stream',
+        ...(thumb ? { thumb } : {}),
+        fileName: file.name, fileSize: file.size,
+      });
+      setState((prev) => ({
+        ...prev,
+        messages: {
+          ...prev.messages,
+          [conversationId]: prev.messages[conversationId]?.map((m) =>
+            m.id === msgId ? { ...m, status: 'sent' as const, media: m.media ? { ...m.media, status: 'ready' as const } : undefined } : m,
+          ) ?? [],
+        },
+      }));
+    } catch (err) {
+      console.error('[media] upload failed:', err);
+      URL.revokeObjectURL(localObjectUrl);
+      setState((prev) => ({
+        ...prev,
+        messages: {
+          ...prev.messages,
+          [conversationId]: prev.messages[conversationId]?.map((m) =>
+            m.id === msgId ? { ...m, status: 'failed' as const, media: m.media ? { ...m.media, status: 'error' as const } : undefined } : m,
+          ) ?? [],
+        },
+      }));
+    }
+  }
+
+  async function handleDownloadMedia(msgId: string, conversationId: string): Promise<string | null> {
+    const msg = state.messages[conversationId]?.find((m) => m.id === msgId);
+    if (!msg?.media?.url || !msg.media.key) return null;
+    setState((prev) => ({
+      ...prev,
+      messages: {
+        ...prev.messages,
+        [conversationId]: prev.messages[conversationId]?.map((m) =>
+          m.id === msgId ? { ...m, media: m.media ? { ...m.media, status: 'downloading' as const } : undefined } : m,
+        ) ?? [],
+      },
+    }));
+    try {
+      const bytes = await downloadAndDecrypt(msg.media.url, msg.media.key);
+      if (isImageMime(msg.media.mimeType)) {
+        const objectUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: msg.media.mimeType }));
+        setState((prev) => ({
+          ...prev,
+          messages: {
+            ...prev.messages,
+            [conversationId]: prev.messages[conversationId]?.map((m) =>
+              m.id === msgId ? { ...m, media: m.media ? { ...m.media, status: 'ready' as const, objectUrl } : undefined } : m,
+            ) ?? [],
+          },
+        }));
+        return objectUrl;
+      } else {
+        triggerDownload(bytes, msg.media.fileName ?? 'download', msg.media.mimeType);
+        setState((prev) => ({
+          ...prev,
+          messages: {
+            ...prev.messages,
+            [conversationId]: prev.messages[conversationId]?.map((m) =>
+              m.id === msgId ? { ...m, media: m.media ? { ...m.media, status: 'ready' as const } : undefined } : m,
+            ) ?? [],
+          },
+        }));
+        return null;
+      }
+    } catch (err) {
+      console.error('[media] download failed:', err);
+      setState((prev) => ({
+        ...prev,
+        messages: {
+          ...prev.messages,
+          [conversationId]: prev.messages[conversationId]?.map((m) =>
+            m.id === msgId ? { ...m, media: m.media ? { ...m.media, status: 'error' as const } : undefined } : m,
+          ) ?? [],
+        },
+      }));
+      return null;
+    }
+  }
+
   if (loading) {
     return (
       <div className="h-full bg-slate-950 flex items-center justify-center">
@@ -632,6 +783,8 @@ export default function App() {
             onBack={() => setState((prev) => ({ ...prev, activeConversationId: null }))}
             onSend={(text) => handleSend(activeConv.id, text)}
             onRemove={() => handleRemoveContact(activeConv.id)}
+            onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
+            onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center bg-slate-950">

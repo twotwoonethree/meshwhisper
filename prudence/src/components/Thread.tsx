@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppMessage, Contact, GroupInfo } from '../types.ts';
+import { isImageMime, formatFileSize, fileIconLabel } from '../media.ts';
 
 interface Props {
   contact: Contact;
@@ -9,6 +10,8 @@ interface Props {
   onBack: () => void;
   onSend: (text: string) => void;
   onRemove: () => void;
+  onAttach?: (file: File) => void;
+  onDownloadMedia?: (msgId: string) => Promise<string | null>;
 }
 
 function formatTimestamp(ts: number) {
@@ -24,20 +27,109 @@ function StatusIcon({ status }: { status: AppMessage['status'] }) {
   return null;
 }
 
-export default function Thread({ contact, group, messages, isTyping, onBack, onSend, onRemove }: Props) {
+function FileBadge({ mimeType }: { mimeType: string }) {
+  return (
+    <span className="text-[9px] font-bold tracking-wide bg-slate-600 text-slate-200 rounded px-1 py-0.5">
+      {fileIconLabel(mimeType)}
+    </span>
+  );
+}
+
+function ImageBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolean; onDownload: () => void }) {
+  const { media } = msg;
+  if (!media) return null;
+  const thumb = media.objectUrl ?? media.thumb;
+  const downloading = media.status === 'downloading' || media.status === 'uploading';
+
+  return (
+    <div
+      className={`relative rounded-2xl overflow-hidden max-w-[220px] cursor-pointer ${isOut ? 'rounded-br-sm' : 'rounded-bl-sm'}`}
+      onClick={onDownload}
+    >
+      {thumb ? (
+        <img src={thumb} alt="Photo" className="w-full object-cover block" />
+      ) : (
+        <div className="w-[160px] h-[120px] bg-slate-700 flex items-center justify-center">
+          <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+          </svg>
+        </div>
+      )}
+      {downloading && (
+        <div className="absolute inset-0 bg-slate-900/60 flex items-center justify-center">
+          <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+      {!downloading && media.status === 'pending' && !media.objectUrl && (
+        <div className="absolute inset-0 bg-slate-900/40 flex items-center justify-center">
+          <svg className="w-7 h-7 text-white drop-shadow" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+          </svg>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolean; onDownload: () => void }) {
+  const { media } = msg;
+  if (!media) return null;
+  const downloading = media.status === 'downloading';
+  const done = media.status === 'ready';
+
+  return (
+    <div className={`flex items-center gap-3 px-3.5 py-2.5 rounded-2xl min-w-[200px] max-w-[260px] ${isOut ? 'bg-brand-600 rounded-br-sm' : 'bg-slate-800 rounded-bl-sm'}`}>
+      <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${isOut ? 'bg-brand-700' : 'bg-slate-700'}`}>
+        <FileBadge mimeType={media.mimeType} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className={`text-sm truncate font-medium ${isOut ? 'text-white' : 'text-slate-100'}`}>
+          {media.fileName ?? 'File'}
+        </p>
+        {media.fileSize !== undefined && (
+          <p className={`text-xs ${isOut ? 'text-brand-200' : 'text-slate-400'}`}>
+            {formatFileSize(media.fileSize)}
+          </p>
+        )}
+      </div>
+      {!isOut && (
+        <button
+          onClick={onDownload}
+          disabled={downloading || done}
+          className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center transition-colors ${done ? 'text-slate-500' : 'text-slate-300 hover:text-white'}`}
+        >
+          {downloading ? (
+            <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+          ) : done ? (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+            </svg>
+          )}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
+
+export default function Thread({ contact, group, messages, isTyping, onBack, onSend, onRemove, onAttach, onDownloadMedia }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      submit();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
   }
 
   function submit() {
@@ -55,14 +147,25 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   }
 
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file && onAttach) onAttach(file);
+    e.target.value = '';
+  }
+
+  async function handleImageTap(msg: AppMessage) {
+    if (!onDownloadMedia) return;
+    if (msg.media?.objectUrl) { setLightboxUrl(msg.media.objectUrl); return; }
+    if (msg.media?.status === 'downloading' || msg.media?.status === 'uploading') return;
+    const url = await onDownloadMedia(msg.id);
+    if (url) setLightboxUrl(url);
+  }
+
   return (
     <div className="flex flex-col h-full bg-slate-950">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800 bg-slate-900">
-        <button
-          onClick={onBack}
-          className="sm:hidden text-slate-400 hover:text-white transition-colors mr-1"
-        >
+        <button onClick={onBack} className="sm:hidden text-slate-400 hover:text-white transition-colors mr-1">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
           </svg>
@@ -107,20 +210,22 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
               This will remove {contact.displayName} and all messages locally. This cannot be undone.
             </p>
             <div className="flex gap-3">
-              <button
-                onClick={() => setConfirmDelete(false)}
-                className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => { setConfirmDelete(false); onRemove(); }}
-                className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors"
-              >
-                Delete
-              </button>
+              <button onClick={() => setConfirmDelete(false)} className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium transition-colors">Cancel</button>
+              <button onClick={() => { setConfirmDelete(false); onRemove(); }} className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors">Delete</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Lightbox */}
+      {lightboxUrl && (
+        <div className="fixed inset-0 z-50 bg-slate-950/95 flex items-center justify-center p-4" onClick={() => setLightboxUrl(null)}>
+          <img src={lightboxUrl} alt="Photo" className="max-w-full max-h-full object-contain rounded-xl" />
+          <button className="absolute top-4 right-4 w-9 h-9 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
       )}
 
@@ -139,29 +244,29 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
         {messages.map((msg, i) => {
           const isOut = msg.direction === 'outbound';
           const prev = messages[i - 1];
-          const grouped = prev?.direction === msg.direction &&
-            msg.timestamp - prev.timestamp < 60_000;
+          const grouped = prev?.direction === msg.direction && msg.timestamp - prev.timestamp < 60_000;
+          const hasMedia = !!msg.media;
+          const isImage = hasMedia && isImageMime(msg.media!.mimeType);
 
           return (
-            <div
-              key={msg.id}
-              className={`flex ${isOut ? 'justify-end' : 'justify-start'} ${grouped ? 'mt-0.5' : 'mt-3'}`}
-            >
+            <div key={msg.id} className={`flex ${isOut ? 'justify-end' : 'justify-start'} ${grouped ? 'mt-0.5' : 'mt-3'}`}>
               <div className={`max-w-[75%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
                 {!isOut && !grouped && msg.senderName && (
-                  <span className="text-brand-400 text-[10px] font-medium mb-0.5 px-1">
-                    {msg.senderName}
-                  </span>
+                  <span className="text-brand-400 text-[10px] font-medium mb-0.5 px-1">{msg.senderName}</span>
                 )}
-                <div
-                  className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${
-                    isOut
-                      ? 'bg-brand-600 text-white rounded-br-sm'
-                      : 'bg-slate-800 text-slate-100 rounded-bl-sm'
-                  }`}
-                >
-                  {msg.text}
-                </div>
+
+                {hasMedia && isImage && (
+                  <ImageBubble msg={msg} isOut={isOut} onDownload={() => { void handleImageTap(msg); }} />
+                )}
+                {hasMedia && !isImage && (
+                  <FileBubble msg={msg} isOut={isOut} onDownload={() => { if (onDownloadMedia) void onDownloadMedia(msg.id); }} />
+                )}
+                {!hasMedia && (
+                  <div className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${isOut ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-100 rounded-bl-sm'}`}>
+                    {msg.text}
+                  </div>
+                )}
+
                 {!grouped && (
                   <div className={`flex items-center gap-1 mt-1 ${isOut ? 'flex-row-reverse' : ''}`}>
                     <span className="text-slate-600 text-[10px]">{formatTimestamp(msg.timestamp)}</span>
@@ -177,21 +282,30 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
           <div className="flex justify-start mt-3">
             <div className="bg-slate-800 rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
               {[0, 1, 2].map((i) => (
-                <div
-                  key={i}
-                  className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                  style={{ animationDelay: `${i * 0.15}s` }}
-                />
+                <div key={i} className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
               ))}
             </div>
           </div>
         )}
-
         <div ref={bottomRef} />
       </div>
 
       {/* Compose */}
-      <div className="border-t border-slate-800 bg-slate-900 px-4 py-3 flex items-end gap-3">
+      <div className="border-t border-slate-800 bg-slate-900 px-4 py-3 flex items-end gap-2">
+        {onAttach && (
+          <>
+            <input ref={fileRef} type="file" accept={ACCEPT} className="hidden" onChange={handleFileChange} />
+            <button
+              onClick={() => fileRef.current?.click()}
+              className="w-9 h-9 flex-shrink-0 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-slate-300 transition-colors"
+              title="Attach file"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
+              </svg>
+            </button>
+          </>
+        )}
         <textarea
           ref={inputRef}
           placeholder="Message"
