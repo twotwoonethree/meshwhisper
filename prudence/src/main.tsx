@@ -13,6 +13,25 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     window.location.reload();
   });
+
+  // Aggressively poll for new versions. The default service-worker update
+  // schedule is browser-dependent and can leave users on stale code for
+  // hours or days. We force an update check whenever the tab becomes
+  // visible and once a minute while visible. Combined with skipWaiting +
+  // clientsClaim and the controllerchange handler above, a new deploy
+  // typically activates within seconds of the user looking at the tab.
+  navigator.serviceWorker.ready.then((registration) => {
+    const checkForUpdate = () => {
+      if (document.visibilityState === 'visible') {
+        registration.update().catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', checkForUpdate);
+    window.addEventListener('focus', checkForUpdate);
+    setInterval(checkForUpdate, 60_000);
+    // First check immediately on boot.
+    checkForUpdate();
+  });
 }
 
 createRoot(document.getElementById('root')!).render(
