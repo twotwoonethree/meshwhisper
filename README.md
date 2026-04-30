@@ -1,8 +1,17 @@
-# MeshWhisper
+<h1 align="center">MeshWhisper</h1>
 
-Your entire messaging backend is one Docker container.
+<p align="center"><b>Your entire messaging backend is one Docker container.</b></p>
 
-Add end-to-end encrypted messaging to any app — PWA, React Native, Node.js — with a few lines of code and a single container running on the server you already have.
+<p align="center">
+Self-hosted, post-quantum end-to-end encrypted messaging for any app — PWA, React Native, or Node.js — with a few lines of code and a single container running on the server you already have.
+</p>
+
+<p align="center">
+<a href="https://meshwhisper.org">meshwhisper.org</a> ·
+<a href="docs/getting-started.md">Getting started</a> ·
+<a href="docs/api.md">API reference</a> ·
+<a href="docs/self-hosting.md">Self-hosting</a>
+</p>
 
 ---
 
@@ -16,13 +25,22 @@ MeshWhisper is different. You run the backend. It costs €4/month. And it **can
 
 ## How it works
 
-```
-Your users' devices               Your Node (on your server)
-───────────────────               ──────────────────────────
-MeshWhisper.init()  ──── wss ───► routes by destination hash
-send(userId, msg)   ────────────► stores encrypted blob
-                                  (cannot decrypt — ever)
-                    ◄────────────  delivers to recipient
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Alice's device
+    participant R as Your Node (relay)
+    participant B as Bob's device
+
+    Note over A,B: All encryption happens on-device.<br/>The relay only sees ciphertext.
+
+    A->>A: Encrypt with Double Ratchet<br/>(PQXDH session key)
+    A->>R: Send {destHash, ciphertext}
+    Note right of R: Stores opaque blob.<br/>Cannot decrypt — ever.
+    R-->>B: Wake push (no content)
+    B->>R: Pull queued blobs
+    R->>B: Deliver ciphertext
+    B->>B: Decrypt locally
 ```
 
 - Messages are encrypted on-device with the **Signal protocol** (X3DH + Double Ratchet) before they leave the user's device
@@ -34,6 +52,24 @@ send(userId, msg)   ────────────► stores encrypted blo
 ---
 
 ## What you deploy
+
+```mermaid
+flowchart LR
+    subgraph Server["Your VPS · ~€4/month"]
+        direction TB
+        N["meshwhisper-node<br/>relay · store-and-forward<br/>media · key directory"]
+        P["meshwhisper-push<br/>APNs · FCM · Web Push"]
+        DB[("SQLite")]
+        N --- DB
+        N <--> P
+    end
+    subgraph Devices["Your users' devices"]
+        direction TB
+        A["@meshwhisper/sdk<br/>PWA · React Native · Node.js"]
+    end
+    A <-->|"wss · ciphertext only"| N
+    P -. "content-free wake" .-> A
+```
 
 Two Docker containers alongside whatever is already on your server:
 
