@@ -5,9 +5,9 @@ interface Props {
 const { current } = Astro.props;
 
 const links = [
-  { href: '/how-it-works', label: 'How it works' },
-  { href: '/security', label: 'Security' },
-  { href: '#', label: 'Docs', comingSoon: true },
+  { href: '/how-it-works', label: 'How it works', external: false },
+  { href: '/security', label: 'Security', external: false },
+  { href: 'https://github.com/twotwoonethree/meshwhisper#documentation', label: 'Docs', external: true },
 ];
 ---
 
@@ -17,16 +17,21 @@ const links = [
       <img src="/logo-long.png" alt="MeshWhisper" class="h-16 object-contain object-left" />
     </a>
     <div class="flex items-center gap-6 text-sm">
-      {links.map(({ href, label, comingSoon }) => (
+      {links.map(({ href, label, external }) => (
         <a
           href={href}
-          data-coming-soon={comingSoon ? '' : undefined}
+          {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
           class={`transition-colors ${current === label ? 'text-white' : 'text-slate-400 hover:text-white'}`}
         >
           {label}
         </a>
       ))}
-      <a href="#" data-coming-soon class="text-slate-400 hover:text-white transition-colors">
+      <a
+        href="https://github.com/twotwoonethree/meshwhisper"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="text-slate-400 hover:text-white transition-colors"
+      >
         GitHub
       </a>
       <a href="/#integrate" class="bg-brand-500 hover:bg-brand-400 text-white px-4 py-1.5 rounded-md font-medium transition-colors">
