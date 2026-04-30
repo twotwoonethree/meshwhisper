@@ -68,7 +68,7 @@ interface MeshWhisperConfig {
 | `onPresence` | No | — | Called when a peer's online status changes. |
 | `onMessageStatus` | No | — | Called when an outbound message's delivery status changes (`sent` → `delivered` → `read`). |
 | `onTyping` | No | — | Called when a peer starts or stops typing. `isTyping` is `true` for start, `false` for stop. Ephemeral — not stored or reliable. |
-| `onContactRequest` | No | — | Called when a mutual contact introduces a new peer to you. Call `addContactByKey(peerId)` from this handler to accept. |
+| `onContactRequest` | No | — | Called when a new peer wants to talk to you. Fires in two cases: (1) a mutual contact introduces a new peer (`introducedBy` is the introducer's peer ID, `username` may be set); (2) a stranger initiates a direct handshake (`introducedBy === peerId`, `username` may be undefined until the peer's app sends a follow-up identifying themselves). Call `addContactByKey(peerId)` from this handler to confirm the contact, or ignore it to decline. |
 | `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
 
 ---

@@ -174,6 +174,9 @@ The intended use case is a developer who wants to add messaging to their existin
 - On startup with empty sessions but existing contacts, re-initiates X3DH automatically
 - Handles storage wipe and new-device-with-same-identity scenarios
 - Uses persisted prekey bundles (`prekeys/<peerId>` storage keys)
+- `addContactByKey` and `ensureSession` detect receive-only sessions (sending chain never initialised because no inbound ratchet message has yet arrived) and re-initiate. A receive-only session is a stuck state; overwriting it loses nothing
+- After every outbound `x3dh_init` the SDK sends a `__mw_ctrl: 'handshake_activate'` ratchet message immediately. Decrypting it on the receiver runs the first DH ratchet step and creates their sending chain — without this, the receiver could be stuck in receive-only mode until the initiator happened to send some application-level message
+- Inbound `x3dh_init` from a previously-unknown peer fires `onContactRequest(peerId, peerId, undefined)` so apps can surface a contact-request UI even if the peer's application-level follow-up never arrives
 
 ### Transport layer
 - `BrowserTransport` — native WebSocket, no Node.js dependencies, browser/PWA safe
