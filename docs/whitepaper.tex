@@ -8,7 +8,7 @@
 \usepackage{parskip}
 \usepackage{titlesec}
 \usepackage{titling}
-\usepackage{xcolor}
+\usepackage[table]{xcolor}
 \usepackage{tikz}
 \usepackage{pgfplots}
 \usepackage{hyperref}
@@ -35,10 +35,13 @@
 
 \pgfplotsset{compat=1.18}
 
-% ── Colour palette ────────────────────────────────────────────────────────────
-\definecolor{mwblue}{HTML}{1A3A5C}
-\definecolor{mwaccent}{HTML}{2D7DD2}
-\definecolor{mwlight}{HTML}{EBF4FF}
+% ── Colour palette — MeshWhisper brand (teal) ────────────────────────────────
+% Anchored to the brand 900 / 500 / 100 stops used in the site & SDK.
+\definecolor{mwblue}{HTML}{014451}    % brand 900 — deep teal (title pages, headings)
+\definecolor{mwaccent}{HTML}{0694A2}  % brand 500 — primary accent (links, accents)
+\definecolor{mwbright}{HTML}{16BDCA}  % brand 400 — bright highlight
+\definecolor{mwlight}{HTML}{D5F5F6}   % brand 100 — pale background
+\definecolor{mwpale}{HTML}{EDFAFA}    % brand 50  — palest background
 \definecolor{mwgray}{HTML}{6B7280}
 \definecolor{mwrule}{HTML}{D1D5DB}
 \definecolor{mwgreen}{HTML}{0E7C5B}
@@ -46,7 +49,7 @@
 \definecolor{mworange}{HTML}{E67E22}
 \definecolor{mwpurple}{HTML}{6B4FA0}
 \definecolor{mwyellow}{HTML}{F5A623}
-\definecolor{nodebg}{HTML}{F0F7FF}
+\definecolor{nodebg}{HTML}{EDFAFA}    % brand-tinted node background
 \definecolor{devicebg}{HTML}{F0FFF4}
 
 % ── Typography ────────────────────────────────────────────────────────────────
@@ -91,21 +94,22 @@
 \begin{titlepage}
   \pagecolor{mwblue}
   \color{white}
-  \vspace*{40mm}
-  {\fontsize{28}{34}\selectfont\bfseries MeshWhisper\par}
+  \centering
+  \vspace*{32mm}
+  \includegraphics[width=46mm]{mw-logo-mark.png}\par
+  \vspace{14mm}
+  {\fontsize{30}{36}\selectfont\bfseries MeshWhisper\par}
   \vspace{6pt}
-  {\fontsize{18}{24}\selectfont Messaging as Ambient Infrastructure\par}
+  {\fontsize{18}{24}\selectfont\color{mwbright} Messaging as Ambient Infrastructure\par}
   \vspace{20pt}
-  \color{mwaccent}
-  \rule{60mm}{1pt}
+  {\color{mwbright}\rule{60mm}{1pt}}\par
   \vspace{20pt}
-  \color{white!80!mwblue}
-  {\normalsize MeshWhisper Foundation\quad·\quad April 2026\par}
+  {\color{white!85!mwblue}\normalsize MeshWhisper Foundation\quad·\quad April 2026\par}
   \vfill
-  {\small\color{white!60!mwblue}
+  {\small\color{white!65!mwblue}
     Protocol \& Foundation: MeshWhisper Foundation, Ireland\\
     Commercial Services: GestureLoop Ltd\\
-    \texttt{anton@gestureloop.com}
+    \texttt{anton@gestureloop.com}\par
   }
 \end{titlepage}
 
@@ -560,6 +564,32 @@ A developer who knows the open-protocol landscape deserves a direct comparison r
 \textbf{XMPP} is the oldest federated alternative. E2EE via OMEMO is available but optional and inconsistently deployed across clients. The federation model shares Matrix's characteristics. No device-layer mesh exists.
 
 The comparison that most directly tests MeshWhisper's claims is Matrix. If the use case is a standalone federated messaging system and users will manage accounts directly, Matrix is a mature choice. MeshWhisper is designed for a different deployment pattern: a library that sits inside an existing application, uses the application's existing identity and user model, is invisible to users as infrastructure, and accumulates ambient relay capacity as a side effect of deployment. These are different tools for different problems, and a developer who has read this far should be able to tell which one fits their situation.
+
+\subsection*{Backup that doesn't betray the protocol}
+
+Most messengers solve cross-device continuity by exporting an encrypted backup to a third-party cloud — Google Drive, iCloud, a homeserver, the developer's own backup service. The backup itself is opaque to that third party, but its existence is not. Cloud providers learn that a given user has a WhatsApp backup, when it was made, and how large it is. For a protocol that goes to architectural lengths to prevent any single party from holding both ends of a conversation, leaking that metadata to a separate provider is a significant give-back.
+
+MeshWhisper's archive design avoids this. Backup colocates with the relay the user has already chosen to trust. The archive is a single AES-GCM blob, keyed by the user's peer ID, stored alongside the rest of the relay's opaque content. The relay sees no account, no email, no phone number, no username — only an unidentified peer-ID hash and an encrypted payload. The backup encryption key and the write-authentication token are both HKDF-derived from the user's identity key, which is itself derived from the username and password via PBKDF2. The user does not separately manage a recovery code, a security key, or a third-party account; the password they already use to unlock the application is sufficient to recover their full conversation history on any device. Sessions are intentionally excluded from the archive so that a stolen backup cannot decrypt past or future traffic — forward secrecy is preserved even at rest.
+
+\vspace{4pt}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{>{\bfseries}l p{42mm} p{52mm} p{38mm}}
+\toprule
+\rowcolor{mwlight}\color{mwblue}Approach & \color{mwblue}\bfseries Where backup lives & \color{mwblue}\bfseries Who sees metadata & \color{mwblue}\bfseries Recovery requires \\
+\midrule
+MeshWhisper & The same relay you already use for messaging & Relay sees an opaque blob keyed by an unidentified peer-ID hash. No account, email, or phone number. & Username + password \\
+WhatsApp    & Google Drive / iCloud & Google or Apple sees that you have a WhatsApp backup, when, and how big & Phone number + (optional) E2EE key \\
+Signal      & Local device or paired-device transfer only & Nothing — but no off-device backup historically & Local backup file with passphrase \\
+iMessage    & iCloud & Apple holds keys (default) or user-held with Advanced Data Protection & Apple ID \\
+Matrix      & Homeserver-stored encrypted key backup & Your homeserver knows the backup exists, who owns it, and its timing & Security key or passphrase \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{4pt}
+
+The result is a backup model with the same trust shape as the rest of the protocol. If the user self-hosts the relay, they self-host the backup. If they use a Foundation relay, the Foundation sees the same opaque blob it already routes for live traffic — nothing new becomes visible. This is qualitatively different from the standard pattern of ``encrypted messaging app, plus a separate cloud account that knows you use it.''
 
 \subsection*{How it is funded}
 

@@ -1,3 +1,4 @@
+\PassOptionsToPackage{table}{xcolor}
 \documentclass[aspectratio=169, 11pt]{beamer}
 
 \usepackage[T1]{fontenc}
@@ -10,23 +11,26 @@
 \usepackage{array}
 \usepackage{xcolor}
 \usepackage{mdframed}
+\usepackage{graphicx}
 
 \usetikzlibrary{
   arrows.meta, positioning, shapes.geometric, shapes.misc,
   fit, backgrounds, calc, shadows
 }
 
-% ── Colour palette (matches whitepaper) ──────────────────────────────────────
-\definecolor{mwblue}{HTML}{1A3A5C}
-\definecolor{mwaccent}{HTML}{2D7DD2}
-\definecolor{mwlight}{HTML}{EBF4FF}
+% ── Colour palette — MeshWhisper brand (teal) ────────────────────────────────
+\definecolor{mwblue}{HTML}{014451}    % brand 900 — deep teal (title pages, frame headers)
+\definecolor{mwaccent}{HTML}{0694A2}  % brand 500 — primary accent
+\definecolor{mwbright}{HTML}{16BDCA}  % brand 400 — bright highlight
+\definecolor{mwlight}{HTML}{D5F5F6}   % brand 100 — pale background
+\definecolor{mwpale}{HTML}{EDFAFA}    % brand 50  — palest background
 \definecolor{mwgray}{HTML}{6B7280}
 \definecolor{mwrule}{HTML}{D1D5DB}
 \definecolor{mwgreen}{HTML}{0E7C5B}
 \definecolor{mwred}{HTML}{C0392B}
 \definecolor{mworange}{HTML}{E67E22}
 \definecolor{mwpurple}{HTML}{6B4FA0}
-\definecolor{nodebg}{HTML}{F0F7FF}
+\definecolor{nodebg}{HTML}{EDFAFA}
 \definecolor{devicebg}{HTML}{F0FFF4}
 \definecolor{slidebg}{HTML}{F8FAFC}
 
@@ -80,12 +84,13 @@
 {
 \setbeamercolor{background canvas}{bg=mwblue}
 \begin{frame}[plain]
-\vspace{14mm}
+\vspace{8mm}
 \begin{center}
+  \includegraphics[width=22mm]{mw-logo-mark.png}\\[10pt]
   {\usebeamerfont{title}\color{white}MeshWhisper}\\[4pt]
-  {\color{mwlight}\large Messaging as Ambient Infrastructure}\\[16pt]
-  \color{mwrule}\rule{60mm}{0.4pt}\\[10pt]
-  {\color{mwgray}\small GestureLoop Ltd · meshwhisper.net · April 2026}
+  {\color{mwbright}\large Messaging as Ambient Infrastructure}\\[16pt]
+  \color{mwbright}\rule{60mm}{0.4pt}\\[10pt]
+  {\color{mwlight}\small GestureLoop Ltd · meshwhisper.net · April 2026}
 \end{center}
 \end{frame}
 }
@@ -369,6 +374,32 @@ The protocol is content-blind. It moves encrypted blobs between key pairs.\\
 \end{columns}
 \end{frame}
 
+% ── Backup design ─────────────────────────────────────────────────────────────
+\begin{frame}{Encrypted backup, no third-party cloud}
+\vspace{2mm}
+The relay you already trust holds the backup too. Nothing new becomes visible.\\
+\small\color{mwgray}One opaque AES-GCM blob, keyed by an unidentified peer-ID hash. Username + password recovers everything on any device.\normalcolor
+\vspace{3mm}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.18}
+\scriptsize
+\begin{tabular}{>{\color{mwblue}\bfseries}l p{32mm} p{42mm} p{30mm}}
+\toprule
+\rowcolor{mwlight} & \color{mwblue}\bfseries Where backup lives & \color{mwblue}\bfseries Who sees metadata & \color{mwblue}\bfseries Recovery requires \\
+\midrule
+\color{mwaccent}MeshWhisper & The relay you already use & Opaque blob, no account or email & Username + password \\
+WhatsApp                    & Google Drive / iCloud      & Google or Apple sees the backup, when, how big & Phone + (optional) E2EE key \\
+Signal                      & Local device / paired transfer & Nothing — no off-device backup & Local file + passphrase \\
+iMessage                    & iCloud                     & Apple holds keys (default) or user-held & Apple ID \\
+Matrix                      & Homeserver key backup      & Homeserver knows backup exists, owner, timing & Security key or passphrase \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{2mm}
+\centering{\small\color{mwgray}Same trust shape as the rest of the protocol. Self-host the relay and you self-host the backup.}
+\end{frame}
+
 % ── Network Effects ───────────────────────────────────────────────────────────
 \begin{frame}{Three stages of adoption}
 \vspace{3mm}
@@ -450,19 +481,20 @@ The protocol is content-blind. It moves encrypted blobs between key pairs.\\
 {
 \setbeamercolor{background canvas}{bg=mwblue}
 \begin{frame}[plain]
-\vspace{10mm}
+\vspace{6mm}
 \begin{center}
+  \includegraphics[width=18mm]{mw-logo-mark.png}\\[8pt]
   {\color{white}\Large\bfseries Get started}\\[10pt]
-  \color{mwrule}\rule{80mm}{0.4pt}\\[10pt]
+  \color{mwbright}\rule{80mm}{0.4pt}\\[10pt]
   \begin{tabular}{ll}
-    \color{mwlight}\textbf{SDK}     & \color{white}\texttt{npm install @meshwhisper/sdk} \\[4pt]
-    \color{mwlight}\textbf{Node}    & \color{white}\texttt{docker run meshwhisper/node} \\[4pt]
-    \color{mwlight}\textbf{Docs}    & \color{white}\texttt{meshwhisper.net} \\[4pt]
-    \color{mwlight}\textbf{Demo}    & \color{white}\texttt{prudence.meshwhisper.net} \\[4pt]
-    \color{mwlight}\textbf{Contact} & \color{white}\texttt{anton@gestureloop.com} \\
+    \color{mwbright}\textbf{SDK}     & \color{white}\texttt{npm install @meshwhisper/sdk} \\[4pt]
+    \color{mwbright}\textbf{Node}    & \color{white}\texttt{docker run meshwhisper/node} \\[4pt]
+    \color{mwbright}\textbf{Docs}    & \color{white}\texttt{meshwhisper.net} \\[4pt]
+    \color{mwbright}\textbf{Demo}    & \color{white}\texttt{prudence.meshwhisper.net} \\[4pt]
+    \color{mwbright}\textbf{Contact} & \color{white}\texttt{anton@gestureloop.com} \\
   \end{tabular}\\[14pt]
-  \color{mwrule}\rule{80mm}{0.4pt}\\[8pt]
-  {\color{mwgray}\small MIT licensed · Self-hosting always free · GestureLoop Ltd, Ireland}
+  \color{mwbright}\rule{80mm}{0.4pt}\\[8pt]
+  {\color{mwlight}\small MIT licensed · Self-hosting always free · GestureLoop Ltd, Ireland}
 \end{center}
 \end{frame}
 }
