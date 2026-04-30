@@ -586,11 +586,31 @@ export class MeshWhisper {
 
     await this.sessionManager.ensureSession(recipientId);
 
-    const session = this.sessionManager.getSession(recipientId);
+    let session = this.sessionManager.getSession(recipientId);
     if (!session) {
       const err = new Error(`Failed to establish session with ${recipientId}`);
       this.fireError(err);
       throw err;
+    }
+
+    // Belt-and-suspenders: if for any reason we still have a receive-only
+    // session (sendingChainKey is null), force a fresh handshake here.
+    // ensureSession should already have done this, but being defensive
+    // means a stuck state can never reach ratchetEncrypt and throw.
+    if (session.sendingChainKey === null) {
+      const bundle = this.sessionManager.getBundle(recipientId);
+      if (bundle) {
+        await this.sessionManager.initiateHandshake(recipientId, bundle);
+        session = this.sessionManager.getSession(recipientId);
+      }
+      if (!session || session.sendingChainKey === null) {
+        const err = new Error(
+          `Cannot send to ${recipientId}: session is in receive-only state and cannot be re-initiated. ` +
+          `The peer's pre-key bundle may be unavailable.`,
+        );
+        this.fireError(err);
+        throw err;
+      }
     }
 
     const messageId = generateMessageId();
