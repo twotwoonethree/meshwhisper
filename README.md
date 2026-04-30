@@ -142,7 +142,7 @@ Asks for your app bundle ID and server URL. Outputs your `.env` block, SDK init 
 |---|---|---|---|
 | Monthly cost | ~€4 (your VPS) | $2,000+ | Your engineers' time |
 | Can read messages | No — impossible | Yes | Depends on you |
-| Time to integrate | 2–4 hours | 1–2 days | Months |
+| Time to integrate | 2–4 hours | 1–2 days | Minutes |
 | Push notifications | Included | Add-on | Build separately |
 | Message history | Included | Included | Build separately |
 | Delivery receipts | Included | Included | Build separately |
