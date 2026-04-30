@@ -236,14 +236,16 @@ The intended use case is a developer who wants to add messaging to their existin
 
 ## What is scaffolded but not production-complete
 
-These modules exist with correct interfaces and reasonable implementations but have not been fully exercised or tested:
+Some modules exist as designs awaiting the conditions under which they need to be activated. The whitepaper is honest about this: the protocol's design is broader than the implementation, and load-bearing claims are kept tight.
 
-- **`src/routing/`** — SocialGraphRouter and PeerProximityTable exist; routing decisions in `sendMessage()` fall back to broadcasting rather than optimally routing
-- **`src/cluster/`** — DeviceCluster scaffolded; multi-device sync (same identity, two devices) not implemented
-- **`src/group/`** — GroupManager exists; sender key ratchet for groups is basic
-- **`src/sybil/`** — EntropyChallenger and ZKRelayReputation scaffolded; not wired into the Node
-- **`src/compliance/`** — audit hooks scaffolded; not production-hardened
-- **`src/reciprocity/`** — RelayLedger tracks bytes relayed; no enforcement logic
+- **`src/routing/`** — SocialGraphRouter and PeerProximityTable. `sendMessage()` currently routes via dest-hash broadcast; optimal routing becomes meaningful only at high mesh density (Stage 3 in the adoption arc). Kept as-is; not load-bearing yet.
+- **`src/sybil/`** — EntropyChallenger and ZKRelayReputation. The defence becomes meaningful when many independent relay operators exist; with one bootstrap operator there is nothing to attack and nothing to defend against. Kept; should not be claimed as production-grade sybil resistance until enforcement is wired into a multi-operator network.
+- **`src/compliance/`** — audit-log hooks. Scaffolded interfaces only; not production-hardened. Should be described as a planned interface in external materials, not a shipped feature.
+- **`src/reciprocity/`** — RelayLedger byte-tracking. The current direction is the Tor middle-node model: open forwarding without enforced tit-for-tat. The byte-tracking primitives may become inputs to future adaptive throttling; the BitTorrent-style enforcement scaffolding will not be used.
+- **`src/cluster/`** — DeviceCluster (primary-receiver election for same-identity-on-two-devices). Largely **superseded** by recent work: the encrypted relay archive solves the practical multi-device problem (history available on any device with the same password), and the hand-off model documented in `multi-device.md` solves simultaneous-active-device with much less ceremony. A future linked-devices implementation (per-device keys) would be built fresh, not on this scaffolding. Candidate for removal.
+- **`src/permissions/`** — only the `open` and `mutual` permission models are exercised. `introduction`, `transactional`, and `custom` are scaffolded modes that should not be claimed as features until something actually uses them.
+
+The honest framing across the codebase: layers that ship in real deployments are production. Layers that exist for problems emerging at scale are scaffolded, named clearly, and will be hardened in step with the conditions that make them necessary.
 
 ---
 

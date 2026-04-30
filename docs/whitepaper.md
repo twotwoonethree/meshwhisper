@@ -1,6 +1,6 @@
 # MeshWhisper: Messaging as Ambient Infrastructure
 
-**MeshWhisper Foundation — April 2026**
+**April 2026**
 
 ---
 
@@ -52,7 +52,7 @@ The network has two physical layers.
 
 The node handles what phones cannot: it is always on, always connectable, and holds messages for offline recipients. When a user is not running the app, the node fires a silent content-free wake signal via APNs or FCM — the same mechanism Signal and WhatsApp use — and the device wakes, connects, and pulls its waiting messages. The node never holds a decryption key. The wake signal contains no message content. The node is, architecturally, a post box, not a postman.
 
-Developers who prefer not to self-host use Foundation-operated nodes instead. The Foundation runs a small number of geographically distributed nodes as public infrastructure, with usage tiers ranging from a free tier for small apps to paid tiers for higher-volume deployments. Self-hosting is always free — the node binary is open source. The choice between Foundation-hosted and self-hosted is operational, not technical. The protocol behaves identically either way.
+Developers who prefer not to self-host can use a public-good relay — currently the first such node, live at `relay.meshwhisper.org` — or any other operator's relay they trust. Self-hosting is always free; the node binary is open source. The protocol behaves identically regardless of who operates the relay. Sustainability of public-good infrastructure is discussed later in the paper, in the section on operator economics.
 
 **The device layer** is the mesh. Every device running any SDK-embedded application is simultaneously a potential relay for every other such device. When two devices are nearby, they relay for each other directly using platform-native P2P (Apple Multipeer Connectivity on iOS, Google Nearby Connections on Android). When they are further apart but on the same network, they relay over the local subnet. Over the internet, devices that can accept inbound connections — laptops on broadband, desktops, home relay hardware — act as connectable peers; phones on cellular maintain outbound connections to their deployed node.
 
@@ -125,9 +125,9 @@ The aggregate of this is an ambient messaging infrastructure that did not requir
 
 ## What it is not
 
-MeshWhisper is not fully serverless in the engineering sense. The MeshWhisper Node is a server. Foundation nodes are servers. Developers self-hosting their own nodes are running servers. The protocol is honest about this.
+MeshWhisper is not fully serverless in the engineering sense. The MeshWhisper Node is a server. Public-good relays are servers. Developers self-hosting their own nodes are running servers. The protocol is honest about this.
 
-What it is serverless for is the developer experience. A developer integrating the SDK does not need to build, scale, or maintain messaging infrastructure. They deploy one Docker container (or use the Foundation's) and add ten lines of code to their application. The infrastructure complexity is solved once, at the protocol level, and reused by every integration.
+What it is serverless for is the developer experience. A developer integrating the SDK does not need to build, scale, or maintain messaging infrastructure. They deploy one Docker container (or point at any operator's relay) and add ten lines of code to their application. The infrastructure complexity is solved once, at the protocol level, and reused by every integration.
 
 The distinction matters because honesty about infrastructure is what makes the trust model credible. A protocol that claimed to have no servers while quietly depending on them would be making a claim about its threat model that its architecture couldn't support. MeshWhisper's nodes are explicitly and openly part of the architecture, with a precisely defined threat model: they relay opaque encrypted blobs, hold rotating destination hashes, and store push tokens for offline delivery. They are ISPs carrying encrypted traffic, not parties to the conversation.
 
@@ -161,7 +161,27 @@ MeshWhisper's archive design avoids this. Backup colocates with the relay the us
 
 The result is a backup model with the same trust shape as the rest of the protocol. If the user self-hosts the relay, they self-host the backup. If they use a Foundation relay, the Foundation sees the same opaque blob it already routes for live traffic — nothing new becomes visible. This is qualitatively different from the standard pattern of "encrypted messaging app, plus a separate cloud account that knows you use it."
 
-**How it is funded.** The SDK and node binary are MIT-licensed and self-hostable at no cost. Foundation-operated nodes — available via `node: "mesh"` in the SDK configuration — are offered on a usage-tiered basis: a free tier below a monthly active user threshold, and paid capacity tiers above it. Pricing is based on active user count rather than message volume. Because chaff traffic is proportional to active devices rather than to message activity, MAU is a reliable billing signal — a developer cannot reduce their bill by reducing message volume, and the Foundation cannot observe message activity to verify it. The metric is both accurate and honest. The business model does not depend on reading messages, retaining metadata, or restricting the self-hosted path.
+**Operator economics, in three layers.** Infrastructure economics and application economics are different problems and shouldn't be conflated. App developers monetise through their products. The protocol intentionally avoids any per-message-volume or per-user-count tax that an app would have to absorb out of its product margin. The same dynamic that makes Sendbird and PubNub painful — paying a layered cost to operate a feature your app needs — is exactly what MeshWhisper exists to escape.
+
+The right question is how the *infrastructure* sustains itself, on its own terms, by parties with direct interest in operating infrastructure. Three layers, with their own economics:
+
+*The protocol layer.* MIT-licensed, free, anyone can implement, anyone can extend. No commercial relationship with anyone is required to use it. This stays the case forever.
+
+*The infrastructure layer.* Anyone runs a relay node. The first such node is live at `relay.meshwhisper.org`, alongside Prudence (the reference PWA at `prudence.meshwhisper.org`). A public-good Foundation may eventually formalise as a non-commercial entity that operates backbone capacity funded by donations, grants, or aligned commercial sponsors — the same shape Mozilla Foundation, the Tor Project, or ICANN occupy in their domains. We are explicitly not proposing a freemium-on-Foundation model with per-MAU pricing, because that would create economic pressure for everyone to centralise on whoever runs the freemium tier — directly opposing the privacy-through-density property the protocol depends on.
+
+*The commercial-services layer.* Anyone — including but not limited to GestureLoop — can offer managed hosting, enterprise support, or custom deployment as a commercial service. This is a competitive market, not a protocol tax. Managed hosting competes on quality and price the way managed Postgres or managed Redis competes; it doesn't have privileged status, and it doesn't extract from app developers. A developer who wants to outsource ops pays a hosting provider; a developer who wants control runs the binary themselves; both paths remain first-class.
+
+The trap to name explicitly: a per-MAU tier on whatever entity ends up hosting public-good infrastructure would push every small developer toward that infrastructure, fragment the operator base, and undermine the whitepaper's strongest privacy claim. We're avoiding it by design.
+
+**Why operators open their nodes.** The protocol asks every operator to forward encrypted packets regardless of which application they belong to. There are three reasons to participate, in roughly increasing strength:
+
+*Philosophy.* You believe a content-blind, multi-operator messaging substrate is worth contributing to. Same energy that runs Tor middle nodes and seeds open-source torrents.
+
+*Reciprocity for your own privacy.* The privacy property that "no single operator sees both ends of a conversation" only activates when *your* users' messages can route through other operators. If you don't forward theirs, you don't get to expect them to forward yours. Selfish operators get a worse privacy posture for their own users.
+
+*Marginal cost.* The bandwidth involved in forwarding others' opaque blobs is small relative to a typical VPS budget. A €4 VPS typically includes ample bandwidth that a small app uses a fraction of. Closing your node saves you almost nothing and removes you from the mesh property entirely.
+
+Promiscuous relay does not mean uncapped relay. The current reference implementation forwards openly without any reciprocity enforcement — the closest analog is Tor's middle-node model, where operators contribute capacity without expecting tit-for-tat accounting. Adaptive throttling — protecting a small operator from being overwhelmed by a much larger app's traffic — is a future direction, not a v1 feature. The reasoning: at low density that protection matters in theory but the load isn't actually present; at higher density the load spreads naturally across more operators and any single node carries a smaller share. The architecture relies on operators collectively maintaining the relay-promiscuously norm; the protocol can encourage but not enforce.
 
 ---
 
@@ -195,9 +215,9 @@ MeshWhisper is an attempt to give messaging its SMTP moment: an open protocol, i
 
 The SMTP analogy is instructive but cuts both ways. SMTP succeeded partly because institutions had structural incentives to run mail servers before there was a meaningful network to participate in. MeshWhisper's adoption chain is similar in shape and worth naming directly.
 
-**Stage one** is foundation: GestureLoop deploys MeshWhisper in its own applications, creating real running infrastructure with real users. The first Foundation node launches at `meshwhisper.net` alongside Prudence — a reference PWA messaging application built entirely on the SDK. MeshWhisper is simultaneously being integrated into two existing live applications. A developer evaluating the SDK in stage one finds a working relay network with active users, not a proposal.
+**Stage one** is bootstrap: GestureLoop deploys MeshWhisper in its own applications, creating real running infrastructure with real users. The first relay node is live at `relay.meshwhisper.org` alongside Prudence — a reference PWA messaging application built entirely on the SDK, available at `prudence.meshwhisper.org`. MeshWhisper is being integrated into existing GestureLoop applications. A developer evaluating the SDK at this stage finds a working relay network with active users, not a proposal.
 
-**Stage two** is early developer adoption: other developers integrate the SDK and deploy nodes. Multi-node privacy routing becomes real — messages route across independent operators rather than through a single party. The Foundation's share of total relay capacity shrinks as developer-deployed infrastructure grows.
+**Stage two** is early developer adoption: other developers integrate the SDK and deploy nodes. Multi-node privacy routing becomes real — messages route across independent operators rather than through a single party. The bootstrap operator's share of total relay capacity shrinks as developer-deployed infrastructure grows.
 
 **Stage three** is mesh density: as the SDK-embedded user base across all applications grows, device-layer relay capacity becomes meaningful and the privacy properties of multi-hop routing become typical rather than exceptional.
 
@@ -207,9 +227,18 @@ Whether the full arc is reached depends on execution. The technical foundation i
 
 ---
 
+## History
+
+MeshWhisper began as a late-night text-message conversation between Anton Mannering and Kevin Collins. Anton proposed an end-to-end-encrypted peer-to-peer messaging protocol and sent over a PRD. Kevin had been drafting one independently from the same conversation; he combined them, and within thirty minutes a working prototype existed — a long way from usable, but a real running starting point. Anton has architected the protocol and led its evolution since, adapting the idealised design to the realities of mobile devices, intermittent connectivity, and modern threat models.
+
+**From prototype to protocol.** The first commit landed at 00:18 on 10 April 2026 — a 27-file, 11,693-line drop that implemented the protocol's outline end-to-end: X3DH, Double Ratchet, packet framing, transports, routing, relay logic, namespace isolation. It was an impressive sketch and an unusable product. It had no persistence, no post-quantum layer, no standalone relay server, no browser support, no push notifications, and a single test file. Most of the work since has been turning that sketch into something that survives real devices: persisting state across restarts, splitting the relay into a deployable server with SQLite-backed durability, adding PQXDH and ML-KEM-768, building a push pipeline that preserves end-to-end encryption, writing tests that found bugs that code review missed (an OPK derivation mismatch, `Math.random` used where a CSPRNG was required), designing a multi-device archive, and deferring the speculative modules that hadn't earned their place. The current codebase is many orders of magnitude removed from that first commit; the original repository is preserved in git history for anyone who wants to see the distance.
+
+**Implementation status, honestly.** Some layers are production: end-to-end encryption (PQXDH + Double Ratchet), persistence, push notifications, group messaging, encrypted media, the multi-device archive, safety numbers. Other layers are *scaffolded* — they sketch how the protocol intends to handle problems that emerge at scale, but they aren't load-bearing in current deployments and we don't claim otherwise. Sybil resistance for relay reputation, social-graph-aware routing, and audit-log compliance hooks all fall into this category. They are real interfaces with real designs, awaiting the conditions under which they need to be activated. As the protocol moves into the multi-operator regime described above, these layers will be hardened in step.
+
+---
+
 *MeshWhisper is open source. The protocol specification, SDK, and node binary are published under the MIT licence. The SDK is available at `npm install @meshwhisper/sdk`. The node binary is available as a Docker image. Self-hosting is free, always.*
 
-*Foundation node: `meshwhisper.net` · Reference app: Prudence (`prudence.meshwhisper.net`)*
+*Live: `relay.meshwhisper.org` · Reference app: Prudence (`prudence.meshwhisper.org`)*
 
-*MeshWhisper Foundation, Ireland. Commercial services by GestureLoop Ltd.*
 *Contact: anton@gestureloop.com*

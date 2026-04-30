@@ -63,7 +63,7 @@
 
 \setbeamertemplate{footline}{
   \begin{beamercolorbox}[wd=\paperwidth, ht=4mm, dp=1.5mm, leftskip=4mm, rightskip=4mm]{normal text}
-    \color{mwgray}\tiny meshwhisper.net \hfill \insertframenumber\,/\,\inserttotalframenumber
+    \color{mwgray}\tiny meshwhisper.org \hfill \insertframenumber\,/\,\inserttotalframenumber
   \end{beamercolorbox}
 }
 
@@ -74,7 +74,7 @@
 % ── Title page ────────────────────────────────────────────────────────────────
 \title{MeshWhisper}
 \subtitle{Messaging as Ambient Infrastructure}
-\author{GestureLoop Ltd · meshwhisper.net}
+\author{GestureLoop Ltd · meshwhisper.org}
 \date{April 2026}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@
   {\usebeamerfont{title}\color{white}MeshWhisper}\\[4pt]
   {\color{mwbright}\large Messaging as Ambient Infrastructure}\\[16pt]
   \color{mwbright}\rule{60mm}{0.4pt}\\[10pt]
-  {\color{mwlight}\small GestureLoop Ltd · meshwhisper.net · April 2026}
+  {\color{mwlight}\small GestureLoop Ltd · meshwhisper.org · April 2026}
 \end{center}
 \end{frame}
 }
@@ -405,12 +405,11 @@ Matrix                      & Homeserver key backup      & Homeserver knows back
 \vspace{3mm}
 \begin{columns}[T]
   \begin{column}{0.32\textwidth}
-    \begin{block}{Stage 1 — Foundation \textcolor{mwgreen}{(now)}}
+    \begin{block}{Stage 1 — Bootstrap \textcolor{mwgreen}{(now)}}
       \small GestureLoop deploys MeshWhisper in its own applications.\\[4pt]
-      \textbf{meshwhisper.net} node live.\\
-      \textbf{Prudence} reference PWA.\\
-      Two live app integrations.\\[4pt]
-      A developer evaluating the SDK finds a working relay network, not a proposal.
+      \textbf{relay.meshwhisper.org} live.\\
+      \textbf{Prudence} reference PWA at \texttt{prudence.meshwhisper.org}.\\[4pt]
+      A developer evaluating the SDK finds a working relay network with active users, not a proposal.
     \end{block}
   \end{column}
   \begin{column}{0.32\textwidth}
@@ -418,7 +417,7 @@ Matrix                      & Homeserver key backup      & Homeserver knows back
       \small Other developers integrate the SDK and deploy nodes.\\[4pt]
       Multi-node privacy routing becomes real.\\
       Messages route across independent operators.\\[4pt]
-      Foundation's share of relay capacity shrinks as developer infrastructure grows.
+      Bootstrap operator's share of relay capacity shrinks as developer infrastructure grows.
     \end{block}
   \end{column}
   \begin{column}{0.32\textwidth}
@@ -469,9 +468,9 @@ Matrix                      & Homeserver key backup      & Homeserver knows back
     \color{mwgray}
     \texttt{npm install @meshwhisper/sdk}\\[4pt]
     \texttt{docker run meshwhisper/node}\\[8pt]
-    \textbf{meshwhisper.net}\\[2pt]
+    \textbf{relay.meshwhisper.org}\\[2pt]
     \textcolor{mwaccent}{Prudence demo app}\\
-    \texttt{prudence.meshwhisper.net}
+    \texttt{prudence.meshwhisper.org}
     \end{mdframed}
   \end{column}
 \end{columns}
@@ -489,8 +488,8 @@ Matrix                      & Homeserver key backup      & Homeserver knows back
   \begin{tabular}{ll}
     \color{mwbright}\textbf{SDK}     & \color{white}\texttt{npm install @meshwhisper/sdk} \\[4pt]
     \color{mwbright}\textbf{Node}    & \color{white}\texttt{docker run meshwhisper/node} \\[4pt]
-    \color{mwbright}\textbf{Docs}    & \color{white}\texttt{meshwhisper.net} \\[4pt]
-    \color{mwbright}\textbf{Demo}    & \color{white}\texttt{prudence.meshwhisper.net} \\[4pt]
+    \color{mwbright}\textbf{Docs}    & \color{white}\texttt{meshwhisper.org} \\[4pt]
+    \color{mwbright}\textbf{Demo}    & \color{white}\texttt{prudence.meshwhisper.org} \\[4pt]
     \color{mwbright}\textbf{Contact} & \color{white}\texttt{anton@gestureloop.com} \\
   \end{tabular}\\[14pt]
   \color{mwbright}\rule{80mm}{0.4pt}\\[8pt]
