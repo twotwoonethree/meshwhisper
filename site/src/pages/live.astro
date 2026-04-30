@@ -1,0 +1,362 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+---
+
+<Layout
+  title="Live activity — MeshWhisper"
+  description="Real-time visualisation of encrypted traffic flowing through the relay. The relay can't read it. Neither can you."
+>
+  <Nav current="Live" />
+
+  <main>
+
+    <!-- Intro -->
+    <section class="max-w-4xl mx-auto px-6 pt-20 pb-12 text-center">
+      <h1 class="text-5xl font-bold text-white tracking-tight leading-tight mb-6 text-balance">
+        Live activity at the relay
+      </h1>
+      <p class="text-xl text-slate-400 max-w-2xl mx-auto leading-relaxed">
+        What you're watching is real encrypted traffic flowing through
+        <code class="text-brand-300">relay.meshwhisper.org</code>. Each pulse
+        is a blob the relay just routed. The relay can't read them — and neither can you.
+      </p>
+    </section>
+
+    <!-- Visualisation -->
+    <section class="max-w-4xl mx-auto px-6 pb-12">
+      <div class="relative bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8">
+        <div class="absolute top-4 right-4 flex items-center gap-2 z-10">
+          <div id="live-indicator" class="w-2 h-2 rounded-full bg-slate-600"></div>
+          <span id="live-status" class="text-xs text-slate-500 font-mono uppercase tracking-widest">
+            Connecting…
+          </span>
+        </div>
+
+        <canvas
+          id="pulse-canvas"
+          class="w-full max-w-2xl mx-auto block"
+          width="800"
+          height="600"
+        ></canvas>
+
+        <!-- Counters -->
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 mt-6 pt-6 border-t border-slate-800">
+          {[
+            ['in', 'Received', 'mwbright'],
+            ['fwd', 'Forwarded', 'mwaccent'],
+            ['queue', 'Queued', 'amber'],
+            ['wake', 'Push wakes', 'rose'],
+            ['drain', 'Drained', 'emerald'],
+          ].map(([key, label]) => (
+            <div class="text-center">
+              <div id={`counter-${key}`} class="text-2xl sm:text-3xl font-bold text-white font-mono tabular-nums">0</div>
+              <div class="text-xs text-slate-500 uppercase tracking-widest mt-1">{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- Explanation -->
+    <section class="border-t border-slate-800 bg-slate-900/40">
+      <div class="max-w-4xl mx-auto px-6 py-20 grid sm:grid-cols-2 gap-8">
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">What's actually flowing</div>
+          <h2 class="text-xl font-bold text-white mb-3">Blobs, not messages</h2>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Each pulse is a single encrypted blob arriving, being forwarded, queued for an
+            offline recipient, triggering a push wake, or draining from the queue when its
+            recipient comes online. The relay knows what category to count it under — it
+            does not know what's inside. Every device on the network also generates a constant
+            stream of indistinguishable chaff packets, so the relay can't even tell real
+            messages from background noise.
+          </p>
+        </div>
+        <div>
+          <div class="text-brand-400 font-mono text-xs font-medium mb-3 uppercase tracking-widest">What this page knows</div>
+          <h2 class="text-xl font-bold text-white mb-3">Counts only — no identity</h2>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            The data feeding this visualisation is just five integers per ~250 ms window:
+            received, forwarded, queued, woken, drained. No source IPs. No destination hashes.
+            No per-event timing. The relay batches counts before emitting them so individual
+            sends blur into the chaff stream — even an attacker watching this page in real time
+            can't infer "Alice just sent something."
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stream details -->
+    <section class="max-w-4xl mx-auto px-6 py-20">
+      <h2 class="text-2xl font-bold text-white text-center mb-3">The data feeding this page</h2>
+      <p class="text-slate-400 text-center max-w-xl mx-auto mb-10 text-sm">
+        A public Server-Sent Events stream at <code class="text-brand-300">relay.meshwhisper.org/events</code>.
+        Try it from a terminal — every event you see here, you see there.
+      </p>
+      <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 font-mono text-xs sm:text-sm leading-relaxed text-slate-400 max-w-2xl mx-auto overflow-x-auto">
+        <span class="text-slate-500">$</span> <span class="text-white">curl https://relay.meshwhisper.org/events</span><br />
+        <span class="text-slate-600">: connected</span><br />
+        <span class="text-brand-400">data:</span> <span class="text-slate-300">{'{"in":3,"fwd":2,"queue":1,"wake":0,"drain":0}'}</span><br />
+        <span class="text-brand-400">data:</span> <span class="text-slate-300">{'{"in":1,"fwd":1,"queue":0,"wake":0,"drain":0}'}</span><br />
+        <span class="text-brand-400">data:</span> <span class="text-slate-300">{'{"in":7,"fwd":5,"queue":2,"wake":1,"drain":0}'}</span><br />
+        <span class="text-slate-600">…</span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer (matches other pages) -->
+  <footer class="border-t border-slate-800">
+    <div class="max-w-6xl mx-auto px-6 py-12 flex flex-col sm:flex-row justify-between gap-6 text-sm text-slate-500">
+      <div>
+        <div class="text-white font-semibold mb-1">MeshWhisper</div>
+        <div>MIT licensed. Self-hosting always free.</div>
+      </div>
+      <div class="flex gap-8">
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Learn</div>
+          <div><a href="/how-it-works" class="hover:text-white transition-colors">How it works</a></div>
+          <div><a href="/security" class="hover:text-white transition-colors">Security</a></div>
+          <div><a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/whitepaper.pdf" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">Whitepaper</a></div>
+        </div>
+        <div class="space-y-2">
+          <div class="text-slate-400 font-medium">Developers</div>
+          <div><a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/api.md" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">API reference</a></div>
+          <div><a href="https://github.com/twotwoonethree/meshwhisper" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">GitHub</a></div>
+          <div><a href="https://relay.meshwhisper.org/health" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">Relay status</a></div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</Layout>
+
+<script>
+  // ============================================================
+  // Hex-mesh pulse visualisation
+  //
+  // Reads the public anonymous activity stream at
+  // relay.meshwhisper.org/events and renders pulses traversing the
+  // edges of the MeshWhisper hex mark. No identifying data is ever
+  // sent or rendered — only counts per ~250 ms window.
+  // ============================================================
+
+  type ActivityType = 'in' | 'fwd' | 'queue' | 'wake' | 'drain';
+  interface ActivityBucket { in: number; fwd: number; queue: number; wake: number; drain: number; }
+
+  const RELAY_EVENTS_URL = 'https://relay.meshwhisper.org/events';
+
+  const COLORS: Record<ActivityType, string> = {
+    in:    '#16BDCA', // brand 400 — bright teal
+    fwd:   '#0694A2', // brand 500 — primary teal
+    queue: '#F59E0B', // amber
+    wake:  '#F472B6', // rose
+    drain: '#10B981', // emerald
+  };
+
+  // ----------------------------------------------------------------
+  // Hex geometry — 6 outer nodes, 1 centre node, 12 edges
+  // (6 outer ring + 6 spokes), giving a "WW" mark feel.
+  // ----------------------------------------------------------------
+  interface Node { x: number; y: number; }
+  interface Edge { a: Node; b: Node; }
+
+  function buildHex(cx: number, cy: number, r: number): { nodes: Node[]; edges: Edge[] } {
+    const nodes: Node[] = [];
+    // 6 outer corners, starting at top
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 3) * i - Math.PI / 2;
+      nodes.push({ x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
+    }
+    const centre: Node = { x: cx, y: cy };
+    nodes.push(centre);
+
+    const edges: Edge[] = [];
+    // outer ring
+    for (let i = 0; i < 6; i++) {
+      edges.push({ a: nodes[i], b: nodes[(i + 1) % 6] });
+    }
+    // spokes
+    for (let i = 0; i < 6; i++) {
+      edges.push({ a: nodes[i], b: centre });
+    }
+    return { nodes, edges };
+  }
+
+  // ----------------------------------------------------------------
+  // Pulse particles
+  // ----------------------------------------------------------------
+  interface Pulse {
+    edge: Edge;
+    progress: number;     // 0..1 along the edge
+    speed: number;        // progress per ms
+    color: string;
+    born: number;
+  }
+
+  const canvas = document.getElementById('pulse-canvas') as HTMLCanvasElement | null;
+  if (!canvas) throw new Error('canvas missing');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('2d ctx missing');
+
+  const dpr = window.devicePixelRatio || 1;
+
+  function resize() {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  let hex: { nodes: Node[]; edges: Edge[] };
+  function rebuildHex() {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const r = Math.min(rect.width, rect.height) * 0.38;
+    hex = buildHex(cx, cy, r);
+  }
+  rebuildHex();
+  window.addEventListener('resize', rebuildHex);
+
+  const pulses: Pulse[] = [];
+  const MAX_PULSES = 400;
+
+  function spawn(type: ActivityType) {
+    if (pulses.length >= MAX_PULSES) return;
+    const edge = hex.edges[Math.floor(Math.random() * hex.edges.length)];
+    pulses.push({
+      edge,
+      progress: 0,
+      speed: 0.0010 + Math.random() * 0.0008, // ~ 1.0 – 1.8 s edge transit
+      color: COLORS[type],
+      born: performance.now(),
+    });
+  }
+
+  // ----------------------------------------------------------------
+  // Render loop
+  // ----------------------------------------------------------------
+  let lastFrame = performance.now();
+
+  function render(now: number) {
+    if (!canvas || !ctx) return;
+    const dt = now - lastFrame;
+    lastFrame = now;
+
+    const rect = canvas.getBoundingClientRect();
+
+    // Clear with a subtle fade to leave brief trails.
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.22)'; // slate-900-ish, low alpha
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    // Draw hex skeleton.
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)'; // slate-400 / 0.16
+    ctx.lineWidth = 1;
+    for (const e of hex.edges) {
+      ctx.beginPath();
+      ctx.moveTo(e.a.x, e.a.y);
+      ctx.lineTo(e.b.x, e.b.y);
+      ctx.stroke();
+    }
+    // Nodes.
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+    for (const n of hex.nodes) {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Update + draw pulses.
+    for (let i = pulses.length - 1; i >= 0; i--) {
+      const p = pulses[i];
+      p.progress += p.speed * dt;
+      if (p.progress >= 1) {
+        pulses.splice(i, 1);
+        continue;
+      }
+      const x = p.edge.a.x + (p.edge.b.x - p.edge.a.x) * p.progress;
+      const y = p.edge.a.y + (p.edge.b.y - p.edge.a.y) * p.progress;
+
+      // Glow.
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, 14);
+      grad.addColorStop(0, p.color);
+      grad.addColorStop(1, p.color + '00');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, 14, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Core.
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+
+  // ----------------------------------------------------------------
+  // SSE consumer — feeds pulses + counters
+  // ----------------------------------------------------------------
+  const totals: ActivityBucket = { in: 0, fwd: 0, queue: 0, wake: 0, drain: 0 };
+  const counterEls: Record<ActivityType, HTMLElement | null> = {
+    in:    document.getElementById('counter-in'),
+    fwd:   document.getElementById('counter-fwd'),
+    queue: document.getElementById('counter-queue'),
+    wake:  document.getElementById('counter-wake'),
+    drain: document.getElementById('counter-drain'),
+  };
+  const indicator = document.getElementById('live-indicator');
+  const statusLabel = document.getElementById('live-status');
+
+  function setStatus(state: 'connecting' | 'live' | 'offline') {
+    if (!indicator || !statusLabel) return;
+    indicator.className =
+      state === 'live'    ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse' :
+      state === 'offline' ? 'w-2 h-2 rounded-full bg-rose-500' :
+                            'w-2 h-2 rounded-full bg-slate-600';
+    statusLabel.textContent =
+      state === 'live'    ? 'Live' :
+      state === 'offline' ? 'Offline' :
+                            'Connecting…';
+  }
+
+  function applyBucket(b: ActivityBucket) {
+    (Object.keys(totals) as ActivityType[]).forEach((k) => {
+      totals[k] += b[k];
+      const el = counterEls[k];
+      if (el) el.textContent = totals[k].toLocaleString();
+      // Spawn pulses for each event in this window. Cap to keep busy
+      // periods visually readable rather than a solid wall of light.
+      const n = Math.min(b[k], 24);
+      for (let i = 0; i < n; i++) spawn(k);
+    });
+  }
+
+  function connect() {
+    setStatus('connecting');
+    const es = new EventSource(RELAY_EVENTS_URL);
+    es.onopen = () => setStatus('live');
+    es.onerror = () => {
+      setStatus('offline');
+      es.close();
+      // Try again in 5 seconds.
+      setTimeout(connect, 5_000);
+    };
+    es.onmessage = (ev) => {
+      try {
+        const bucket = JSON.parse(ev.data) as ActivityBucket;
+        applyBucket(bucket);
+      } catch { /* malformed event — ignore */ }
+    };
+  }
+  connect();
+</script>

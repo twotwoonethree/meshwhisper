@@ -524,6 +524,51 @@ const clientsByHash = new Map<string, WebSocket>();
 /** Reverse map so we can clean up on disconnect. */
 const hashesPerClient = new Map<WebSocket, Set<string>>();
 
+// ============================================================
+// Anonymous activity stream — for the public live-traffic page
+//
+// Events are content-blind tags only: in/fwd/queue/wake/drain. No IPs,
+// no destination hashes, no timestamps fine enough to fingerprint a
+// single send. The relay can't distinguish chaff from real traffic, so
+// even a perfect observer can't say "Alice just sent something."
+// ============================================================
+
+type ActivityType = 'in' | 'fwd' | 'queue' | 'wake' | 'drain';
+
+interface ActivityBucket {
+  in: number;
+  fwd: number;
+  queue: number;
+  wake: number;
+  drain: number;
+}
+
+const activitySubscribers = new Set<ServerResponse>();
+let activityBucket: ActivityBucket = { in: 0, fwd: 0, queue: 0, wake: 0, drain: 0 };
+
+function bumpActivity(type: ActivityType): void {
+  if (activitySubscribers.size === 0) return; // no-op when nobody is watching
+  activityBucket[type] += 1;
+}
+
+function flushActivity(): void {
+  if (activitySubscribers.size === 0) return;
+  const total =
+    activityBucket.in + activityBucket.fwd + activityBucket.queue +
+    activityBucket.wake + activityBucket.drain;
+  if (total === 0) return;
+
+  const payload = `data: ${JSON.stringify(activityBucket)}\n\n`;
+  for (const res of activitySubscribers) {
+    try { res.write(payload); } catch { /* dead connection — cleaned on close */ }
+  }
+  activityBucket = { in: 0, fwd: 0, queue: 0, wake: 0, drain: 0 };
+}
+
+// Flush at ~4 Hz: fast enough to feel live, slow enough to obscure
+// individual sends and keep CPU usage trivial.
+setInterval(flushActivity, 250);
+
 function registerClient(ws: WebSocket, destHashes: string[]): void {
   const existing = hashesPerClient.get(ws);
   if (existing) {
@@ -554,6 +599,7 @@ function deliverQueuedBlobs(ws: WebSocket, destHashes: string[]): void {
     for (const blob of blobs) {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(blob, { binary: true });
+        bumpActivity('drain');
       }
     }
   }
@@ -568,6 +614,8 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
 
   const destHash = readDestHash(data);
   if (!destHash) return; // malformed header
+
+  bumpActivity('in');
 
   // Always store the blob first so it survives regardless of delivery outcome.
   // This prevents a race where the recipient's WebSocket is still in the
@@ -585,14 +633,19 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
       if (!err) {
         // Delivery succeeded — purge from store so it isn't delivered twice
         stmts.deleteBlob.run(blobId);
+        bumpActivity('fwd');
       }
       // On error: blob remains in store for reconnect delivery
     });
   } else {
     // Recipient offline (or same socket) — already stored above.
+    bumpActivity('queue');
     // Wake the recipient via push if they have a registered token.
     const pushReg = getPushRegistration(destHash);
-    if (pushReg) notifyPush(destHash, pushReg);
+    if (pushReg) {
+      notifyPush(destHash, pushReg);
+      bumpActivity('wake');
+    }
   }
 }
 
@@ -699,6 +752,30 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     });
     res.end();
+    return;
+  }
+
+  // Anonymous live activity stream (Server-Sent Events) — public, no auth.
+  // Emits a JSON object every ~250ms when the relay handled any traffic in
+  // that window. Counts only — no destination hashes, no IPs, no per-event
+  // metadata. Safe to expose to anyone watching the public site.
+  if (url.pathname === '/events' && method === 'GET') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-store',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no', // disable nginx buffering for SSE
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.write(': connected\n\n');
+    activitySubscribers.add(res);
+    const heartbeat = setInterval(() => {
+      try { res.write(': hb\n\n'); } catch { /* ignored */ }
+    }, 15_000);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      activitySubscribers.delete(res);
+    });
     return;
   }
 
