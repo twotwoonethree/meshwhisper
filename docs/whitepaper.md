@@ -241,4 +241,4 @@ MeshWhisper began as a late-night text-message conversation between Anton Manner
 
 *Live: `relay.meshwhisper.org` · Reference app: Prudence (`prudence.meshwhisper.org`)*
 
-*Contact: anton@gestureloop.com*
+*Contact: anton@meshwhisper.org*
