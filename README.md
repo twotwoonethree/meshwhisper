@@ -10,7 +10,9 @@ Self-hosted, post-quantum end-to-end encrypted messaging for any app — PWA, Re
 <a href="https://meshwhisper.org">meshwhisper.org</a> ·
 <a href="docs/getting-started.md">Getting started</a> ·
 <a href="docs/api.md">API reference</a> ·
-<a href="docs/self-hosting.md">Self-hosting</a>
+<a href="docs/self-hosting.md">Self-hosting</a> ·
+<a href="docs/whitepaper.md">Whitepaper</a> ·
+<a href="docs/presentation.pdf">Presentation</a>
 </p>
 
 ---
@@ -189,6 +191,8 @@ In the future, node operators can choose to **peer** with other nodes for redund
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers
 - **[docs/multi-device.md](docs/multi-device.md)** — strategy for multi-device support (hand-off, hard boot, linked devices)
+- **[docs/whitepaper.md](docs/whitepaper.md)** — full protocol whitepaper ([PDF](docs/whitepaper.pdf))
+- **[docs/presentation.pdf](docs/presentation.pdf)** — slide deck overview of the protocol and project
 
 ---
 
