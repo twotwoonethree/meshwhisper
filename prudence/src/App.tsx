@@ -146,7 +146,18 @@ export default function App() {
         if (ctrl.username) saveContactName(msg.senderId, ctrl.username);
         if (!isHandled(msg.senderId)) {
           setState((prev) => {
-            if (prev.pendingRequests.some((r) => r.peerId === msg.senderId)) return prev;
+            // If the SDK already surfaced this peer as a pending request when
+            // their x3dh_init arrived, just fill in the username we now have.
+            const existing = prev.pendingRequests.find((r) => r.peerId === msg.senderId);
+            if (existing) {
+              if (!ctrl.username || existing.username === ctrl.username) return prev;
+              return {
+                ...prev,
+                pendingRequests: prev.pendingRequests.map((r) =>
+                  r.peerId === msg.senderId ? { ...r, username: ctrl.username } : r,
+                ),
+              };
+            }
             return {
               ...prev,
               pendingRequests: [...prev.pendingRequests, {

@@ -1651,6 +1651,11 @@ export class MeshWhisper {
   // ================================================================
 
   private onContactEstablished(peerId: string): void {
+    // Capture pre-add state so we can tell whether this is a brand-new peer
+    // contacting us, vs. someone we already knew re-handshaking (e.g. recovery
+    // from a stuck receiver-only session, or a rotated key on the peer side).
+    const isNewPeer = !this.permissionManager.isContact(peerId);
+
     this.permissionManager.addContact(peerId);
     this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())).catch(() => {});
 
@@ -1668,6 +1673,15 @@ export class MeshWhisper {
     const proof = this.sybilManager.getLocalProof();
     if (proof) {
       this.sendControl(peerId, { __mw_ctrl: 'reputation_proof', reputationProof: proof });
+    }
+
+    // Surface a contact request to the app the moment a stranger's x3dh_init
+    // arrives, even if their application-level follow-up never lands. Apps
+    // that depend on follow-up control messages (e.g. for username display)
+    // can update the entry when the follow-up arrives. introducedBy is set to
+    // peerId itself to signal a direct self-introduction (no introducer).
+    if (isNewPeer) {
+      this.onContactRequestHandler?.(peerId, peerId, undefined)?.catch(() => {});
     }
   }
 
