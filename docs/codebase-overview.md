@@ -141,6 +141,8 @@ The intended use case is a developer who wants to add messaging to their existin
 - `MeshWhisper.createGroup()`, `getGroup()`, `getGroups()`, `sendToGroup()` — group messaging
 - `MeshWhisper.acceptGroupInvite(groupId)`, `getPendingGroupInvites()` — group invite flow; `onGroupInvite` callback
 - `MeshWhisper.getSafetyNumber(peerId)`, `verifySafetyNumber(peerId, candidate)` — Signal-style safety numbers
+- `MeshWhisper.exportArchive()` / `importArchive()` / `pushArchive()` / `pullArchive()` — encrypted archive backed by the relay; merge-based restore so multi-device state converges
+- `MeshWhisper.deriveBackupKey(identityKeyBytes)` — static HKDF derivation used by the archive subsystem
 - `MeshWhisper.shutdown()` — graceful stop + state persistence
 
 ### Persistence (`src/persistence/`)
@@ -149,6 +151,13 @@ The intended use case is a developer who wants to add messaging to their existin
 - `NodeStorage` — filesystem backend, atomic writes (temp+rename), mode 0600, path traversal protection
 - `serializeRatchetState()` / `deserializeRatchetState()` — versioned JSON (v1), all Uint8Arrays as hex
 - Persisted: identity key, sessions, prekey bundles, peers, contacts, message history, seen message IDs
+
+### Archive (`src/sdk/archive.ts`)
+- HKDF-derived backup key and write-auth token, both rooted in the identity key (never sent to the relay)
+- AES-GCM blob format: `nonce(12) | ciphertext+tag`
+- `collectKv()` selects archive-eligible storage keys (`contacts`, `peers/*`, `messages/*`, `seen_ids`, `blocked`); identity, sessions, and short-lived key material are excluded
+- `mergeKv()` merges remote KV into local storage: arrays are unioned, `messages/*` deduplicated by id, peers updated from remote — used on restore so multi-device state converges
+- Relay endpoints: `PUT /archive/:peerId` (auth via `Bearer` of the HKDF-derived token, first writer claims the slot), `GET /archive/:peerId` (unauthenticated, content is encrypted)
 
 ### Delivery receipts
 - DELIVERED sent automatically when recipient decrypts a message
@@ -183,6 +192,7 @@ The intended use case is a developer who wants to add messaging to their existin
 - Push token store: persisted to SQLite, survives WebSocket disconnect and server restart
 - Prekey directory: `POST /directory`, `GET /directory` — rate limited, persisted to SQLite
 - Media store: `POST /media`, `GET /media/:id` — TTL 7 days, max 50MB/file, persisted to SQLite
+- Archive store: `PUT /archive/:peerId`, `GET /archive/:peerId` — encrypted user backup, max 12MB/blob, SQLite-persisted, write-authenticated by SHA-256 of HKDF-derived token (first writer claims the slot)
 - Push webhook: POSTs to `PUSH_WEBHOOK_URL` when blob arrives for offline device
 - Rate limiting: sliding window per IP, configurable via env vars, `X-Forwarded-For` aware (in-memory, intentionally — ephemeral)
 - CORS: all HTTP endpoints include `Access-Control-Allow-Origin: *` and handle OPTIONS preflight

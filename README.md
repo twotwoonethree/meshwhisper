@@ -29,6 +29,7 @@ send(userId, msg)   ────────────► stores encrypted blo
 - Your Node sees only encrypted ciphertext. It routes, stores, and delivers — nothing more
 - Push notifications wake the app when a message arrives while it is closed — without the push service seeing message content
 - Sessions, identity, and message history persist automatically across page reloads and restarts
+- **Encrypted backup is included** — contacts and message history are backed up to your own relay as opaque AES-GCM blobs. No Google Drive, no iCloud, no separate recovery code. Sign in with the same username and password on any device to restore.
 
 ---
 
@@ -151,6 +152,7 @@ In the future, node operators can choose to **peer** with other nodes for redund
 - **[docs/api.md](docs/api.md)** — full SDK API reference
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers
+- **[docs/multi-device.md](docs/multi-device.md)** — strategy for multi-device support (hand-off, hard boot, linked devices)
 
 ---
 

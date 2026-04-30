@@ -439,6 +439,121 @@ const ok = MeshWhisper.verifySafetyNumber(peerId: string, candidate: string): bo
 
 ---
 
+## Backup & restore
+
+MeshWhisper provides an encrypted archive of the user's contacts, message history, and peer state.
+The archive lives on the same relay the user is already connected to — no third-party cloud is
+involved. The archive key is derived from the user's identity key via HKDF, so the relay only ever
+holds opaque ciphertext.
+
+**What is included in the archive:**
+- `contacts` — accepted peer IDs
+- `peers/*` — peer public keys
+- `messages/*` — full message history per conversation
+- `seen_ids` — deduplication state
+- `blocked` — blocked peer list
+
+**What is excluded (intentionally):**
+- `identity` — re-derivable from the user's password
+- `sessions/*` — Double Ratchet state. Excluded for forward secrecy: a stolen archive must not be
+  able to decrypt past or future traffic. Sessions rebuild automatically on next exchange.
+- `prekeys/*`, `edkeys/*`, `opks/*`, `pq_*` — short-lived key material
+
+The archive is a single AES-GCM blob keyed by the user's peer ID. The relay enforces write
+authentication via SHA-256 of an HKDF-derived token (first writer claims the slot). Reads are
+unauthenticated since the contents are encrypted.
+
+### `MeshWhisper.deriveBackupKey(identityKeyBytes)` (static)
+
+Derives the AES-GCM backup key from raw identity key bytes via HKDF. Useful if you want to encrypt
+or decrypt archives outside an SDK instance.
+
+```ts
+const backupKey = await MeshWhisper.deriveBackupKey(identityKeyBytes: Uint8Array): Promise<Uint8Array>
+```
+
+### `mw.exportArchive(extra?)`
+
+Encrypts and returns the archive blob as a `Uint8Array`. The relay is not contacted. Use for
+device-to-device handoff, manual backup to user-controlled storage, or testing.
+
+```ts
+const blob = await mw.exportArchive(extra?: Record<string, unknown>): Promise<Uint8Array>
+```
+
+`extra` is an optional object stored alongside the encrypted KV map — useful for app-level state
+the SDK doesn't manage (e.g. UI preferences, contact display names).
+
+### `mw.importArchive(blob)`
+
+Decrypts and **merges** an archive blob into local storage. Existing local data is preserved:
+- `contacts`, `seen_ids`, `blocked` arrays are unioned.
+- `messages/*` arrays are merged and deduplicated by message `id`, sorted by timestamp.
+- `peers/*` are updated from the archive.
+
+```ts
+const { extra } = await mw.importArchive(blob: Uint8Array): Promise<{ extra?: Record<string, unknown> }>
+```
+
+Returns the `extra` object the archive was created with, if any.
+
+### `mw.pushArchive(extra?)`
+
+Encrypts and uploads the current archive to the relay. Throttle on the caller side — the SDK does
+not debounce automatically.
+
+```ts
+await mw.pushArchive(extra?: Record<string, unknown>): Promise<void>
+```
+
+The archive endpoint is the same relay configured via `node` in `init()`. The maximum plaintext
+size is 10 MB; oversized archives are skipped with a console warning rather than truncated.
+
+### `mw.pullArchive()`
+
+Downloads the archive from the relay and merges it into local storage. Returns `restored: false`
+if no archive exists yet.
+
+```ts
+const { restored, extra } = await mw.pullArchive(): Promise<{ restored: boolean; extra?: Record<string, unknown> }>
+```
+
+Typical pattern: call `pullArchive()` on every app boot to pick up changes from other devices,
+then `pushArchive()` after each significant state change (debounced 5–10 seconds in the calling app).
+
+```ts
+const mw = await MeshWhisper.init({ /* ... */ });
+const { restored, extra } = await mw.pullArchive();
+if (restored && extra?.uiPreferences) restoreUiPreferences(extra.uiPreferences);
+
+// Later, after a message send:
+debounce(() => mw.pushArchive({ uiPreferences }).catch(console.warn), 5_000);
+```
+
+### How this differs from other messengers
+
+| Approach | Where backup lives | Who can see metadata | Recovery |
+|---|---|---|---|
+| **MeshWhisper** | The relay you already use | The relay sees an opaque blob keyed by an unidentified peer-ID hash. No account, no email, no phone number. | Username + password (re-derives identity key, then archive key) |
+| **WhatsApp** | Google Drive / iCloud | Google or Apple knows you have a WhatsApp backup, when it was made, and how big it is | Phone number + (optional) end-to-end key |
+| **Signal** | Local device or transfer to a paired device only | Nothing — but no off-device backup historically | Local backup file with passphrase |
+| **iMessage** | iCloud | Apple holds keys (default) or user-held with Advanced Data Protection | Apple ID |
+| **Matrix** | Homeserver-stored encrypted key backup | Your homeserver knows the backup exists, who owns it, and its timing | Security key or passphrase |
+
+Two things stand out about MeshWhisper's approach:
+
+1. **No third-party cloud.** Backup colocates with the relay you've already chosen to trust for
+   real-time messages — there's nothing new to trust. If you self-host the relay, you also
+   self-host the backup.
+2. **No separate backup passphrase.** Identity key, archive key, and write-auth token are all
+   derived from the same username + password input. Users don't have to remember a recovery code,
+   write down a security key, or link their backup to a third-party account.
+
+The trade-off is that recovery is gated on remembering the password — there's no "forgot password"
+flow. By design.
+
+---
+
 ## Identity
 
 ### `mw.getLocalPeerId()`

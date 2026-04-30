@@ -241,8 +241,26 @@ The Node exposes these HTTP endpoints in addition to the WebSocket relay:
 | `GET` | `/directory?namespace=&publicKey=` | Fetch a prekey bundle |
 | `POST` | `/media` | Upload an encrypted media blob (binary body, returns `{id, url, expiresAt}`) |
 | `GET` | `/media/:id` | Download an encrypted media blob |
+| `PUT` | `/archive/:peerId` | Upload encrypted user archive (binary body, requires `Authorization: Bearer <token>`) |
+| `GET` | `/archive/:peerId` | Download encrypted user archive (unauthenticated; content is encrypted) |
 
 The SDK calls these automatically. You do not need to call them directly.
+
+**CORS preflight.** All HTTP endpoints respond to `OPTIONS` with `Access-Control-Allow-Origin: *`,
+methods `GET, POST, PUT, OPTIONS`, and headers `Content-Type, Authorization`. If you front the Node
+with a reverse proxy that rewrites or strips CORS headers, archive uploads will fail silently in the
+browser — preserve the response headers from the Node verbatim.
+
+**Archive endpoint authentication.** The `PUT /archive/:peerId` endpoint stores `SHA-256(token)`
+on first write. Subsequent writes must present the same token; mismatches return `403`. Tokens are
+derived by the client via HKDF from the user's identity key — the relay never sees the raw token,
+the identity key, or the archive plaintext. The slot is rate-limited to one write per second per
+peer ID.
+
+**Storage sizing.** Each archive is capped at 12 MB on the relay (10 MB plaintext ceiling on the
+client side). Plan capacity at roughly `12 MB × active users × 1.2` (SQLite overhead) for the
+archives table at saturation. Archives are not auto-expired — they persist indefinitely until the
+client overwrites them.
 
 ---
 
