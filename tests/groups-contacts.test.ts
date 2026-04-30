@@ -234,7 +234,7 @@ describe('contact management', () => {
       storage: new NodeStorage(aliceDir),
     });
     const found = await MeshWhisper.addContactByKey(bobEdKey);
-    expect(found).toBe(true);
+    expect(found).not.toBeNull();
     expect(MeshWhisper.getContacts().length).toBeGreaterThan(0);
     await MeshWhisper.instance.shutdown();
   }, 20000);

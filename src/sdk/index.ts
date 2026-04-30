@@ -319,6 +319,7 @@ export class MeshWhisper {
       this.storage,
       (packet, peerId) => this.routeAndSend(packet, peerId),
       (peerId) => this.onContactEstablished(peerId),
+      (peerId) => this.sendHandshakeActivation(peerId),
       config.namespace,
       config.node ?? 'mesh',
       this.namespaceManager.getNamespaceId(),
@@ -1097,11 +1098,17 @@ export class MeshWhisper {
     }
     this.persistContacts().catch(() => {});
 
-    // Only initiate a new handshake if no session exists. When the remote peer
-    // already contacted us first (they sent an x3dh_init), we have a live session
-    // and sending a second x3dh_init would overwrite both sides' ratchet state,
-    // leaving the initiating peer with a receiver session that has no sending chain.
-    if (!this.sessionManager.hasSession(peerId)) {
+    // Initiate a new handshake if either:
+    //   - No session exists at all, or
+    //   - The existing session is in pure receive-only mode (sending chain
+    //     never initialised because we never received a ratchet message after
+    //     the inbound x3dh_init). That is a stuck state — overwriting it loses
+    //     nothing, since we couldn't send through it anyway.
+    // Otherwise the existing session is healthy: re-initiating would
+    // unnecessarily reset both sides' ratchet state.
+    const existing = this.sessionManager.getSession(peerId);
+    const canSend = existing && existing.sendingChainKey !== null;
+    if (!canSend) {
       await this.sessionManager.initiateHandshake(peerId, bundle);
     }
     return peerId;
@@ -1673,6 +1680,19 @@ export class MeshWhisper {
     this.sendMessage(peerId, bytes, { urgency: 'background' }).catch(() => {});
   }
 
+  /**
+   * Send a tiny ratchet message immediately after we initiate an x3dh_init.
+   * The receiver running ratchetDecrypt on this advances their session from
+   * receive-only to fully usable (sending chain initialised). Without this,
+   * the receiver is stuck unable to send back until the initiator happens
+   * to send some other message.
+   *
+   * Best-effort and silently swallowed by the receiver's control handler.
+   */
+  private sendHandshakeActivation(peerId: string): void {
+    this.sendControl(peerId, { __mw_ctrl: 'handshake_activate' });
+  }
+
   // ================================================================
   // Internal — Sybil control message handling
   // ================================================================
@@ -1752,6 +1772,11 @@ export class MeshWhisper {
           ?.catch(() => {});
         break;
       }
+
+      case 'handshake_activate':
+        // Silent: the very act of decrypting this message ran the receiver's
+        // first DH ratchet step, which is the whole point. Nothing else to do.
+        break;
     }
   }
 

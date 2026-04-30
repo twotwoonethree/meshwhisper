@@ -117,6 +117,15 @@ export class SessionManager {
      * coordinator can register the new contact with the permission manager.
      */
     private readonly onContactEstablished: (peerId: string) => void,
+    /**
+     * Called immediately after we send an outbound x3dh_init. The coordinator
+     * uses this to send a tiny ratchet "activate" message so the receiver's
+     * sending chain is initialised on first decrypt — without it, a receiver
+     * is stuck in receive-only mode until the initiator happens to send a
+     * real ratchet message, which can leave Prudence-style apps unable to
+     * surface the contact request UI.
+     */
+    private readonly onHandshakeInitiated: (peerId: string) => void,
     private readonly namespace: string,
     private readonly nodeUrl: string | string[] | 'mesh',
     private readonly namespaceId: Uint8Array,
@@ -508,12 +517,14 @@ export class SessionManager {
   // ----------------------------------------------------------------
 
   /**
-   * Ensures a Double Ratchet session exists with `recipientId`.
-   * If no session exists but a pre-key bundle is cached, initiates X3DH.
+   * Ensures a Double Ratchet session exists with `recipientId` and is
+   * capable of sending. If no session exists, or the existing session is
+   * stuck in receive-only mode (no sending chain yet), initiates X3DH.
    * Throws if no bundle is available.
    */
   async ensureSession(recipientId: string): Promise<void> {
-    if (this.sessions.has(recipientId)) return;
+    const existing = this.sessions.get(recipientId);
+    if (existing && existing.sendingChainKey !== null) return;
 
     const cached = this.peerPreKeyBundles.get(recipientId);
     if (cached) {
@@ -603,6 +614,11 @@ export class SessionManager {
       },
       timer,
     });
+
+    // Tell the coordinator to send a handshake-activate ratchet message.
+    // This advances the receiver's state from receive-only to fully usable
+    // on first decrypt. See the constructor doc comment.
+    this.onHandshakeInitiated(peerId);
   }
 
   completeIncomingHandshake(envelope: HandshakeEnvelope): void {

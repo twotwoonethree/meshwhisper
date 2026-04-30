@@ -110,7 +110,8 @@ export interface ControlMessage {
     | 'reputation_proof'
     | 'contact_request'
     | 'group_invite'
-    | 'delete';
+    | 'delete'
+    | 'handshake_activate';
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];
