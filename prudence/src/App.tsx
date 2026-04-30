@@ -306,26 +306,24 @@ export default function App() {
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
-      // Archive sync: pull if this device has no local data (fresh install /
-      // cleared storage), then always push current state to seed / update relay.
+      // Archive sync: always pull from relay (merge with local data) so that
+      // conversations started on another device appear here too. Then push the
+      // merged state back so the relay stays up to date.
       try {
-        const localContacts = MeshWhisper.getContacts();
-        if (localContacts.length === 0) {
-          // Fresh device — try to restore from relay archive.
-          const { restored, extra } = await sdk.pullArchive();
-          if (restored && extra) {
-            if (extra.contactNames && typeof extra.contactNames === 'object') {
-              for (const [pid, name] of Object.entries(extra.contactNames as Record<string, string>)) {
-                saveContactName(pid, name);
-              }
-            }
-            if (Array.isArray(extra.acceptedContacts)) {
-              restoreAccepted(extra.acceptedContacts as string[]);
+        const { restored, extra } = await sdk.pullArchive();
+        if (restored && extra) {
+          if (extra.contactNames && typeof extra.contactNames === 'object') {
+            for (const [pid, name] of Object.entries(extra.contactNames as Record<string, string>)) {
+              // Only fill in names we don't already have locally.
+              if (!getContactName(pid)) saveContactName(pid, name);
             }
           }
-          if (cancelled) return;
+          if (Array.isArray(extra.acceptedContacts)) {
+            restoreAccepted(extra.acceptedContacts as string[]);
+          }
         }
-        // Always push current state so relay archive is up to date.
+        if (cancelled) return;
+        // Push merged state so the relay archive reflects all devices.
         scheduleArchiveSync(sdk);
       } catch (e) {
         console.warn('[archive] sync failed:', e);

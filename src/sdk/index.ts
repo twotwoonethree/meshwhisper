@@ -88,7 +88,7 @@ import {
   encryptArchive,
   decryptArchive,
   collectKv,
-  restoreKv,
+  mergeKv,
   uploadArchive,
   downloadArchive,
   MAX_ARCHIVE_BYTES,
@@ -1336,7 +1336,7 @@ export class MeshWhisper {
     const identityKey = this.identity.getEdPrivateKey();
     const backupKey = await _deriveBackupKey(identityKey);
     const payload = await decryptArchive(blob, backupKey);
-    await restoreKv(payload.kv, this.storage);
+    await mergeKv(payload.kv, this.storage);
     await this.loadPersistedState();
     return { extra: payload.extra };
   }

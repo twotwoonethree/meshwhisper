@@ -142,6 +142,51 @@ export async function restoreKv(
   }
 }
 
+/**
+ * Merges remote KV data into local storage rather than overwriting it.
+ * - JSON arrays (contacts, seen_ids, blocked): union of unique values
+ * - messages/*: message objects merged and deduplicated by `id` field
+ * - peers/*: remote wins (public keys are deterministic, not user-editable)
+ *
+ * Use this instead of restoreKv when local data may already exist — it
+ * ensures no data is lost from either device.
+ */
+export async function mergeKv(
+  kv: Record<string, string>,
+  storage: StorageBackend,
+): Promise<void> {
+  for (const [k, v] of Object.entries(kv)) {
+    const existing = await storage.get(k);
+    if (!existing) {
+      await storage.set(k, v);
+      continue;
+    }
+    try {
+      const local = JSON.parse(existing) as unknown;
+      const remote = JSON.parse(v) as unknown;
+      if (Array.isArray(local) && Array.isArray(remote)) {
+        if (k.startsWith('messages/')) {
+          // Merge message arrays, deduplicate by id, preserve order
+          type MsgLike = { id?: string; timestamp?: number };
+          const byId = new Map<string, MsgLike>();
+          for (const m of local as MsgLike[]) if (m.id) byId.set(m.id, m);
+          for (const m of remote as MsgLike[]) if (m.id && !byId.has(m.id)) byId.set(m.id, m);
+          const merged = [...byId.values()].sort(
+            (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
+          );
+          await storage.set(k, JSON.stringify(merged));
+        } else {
+          // Union for contacts, seen_ids, blocked
+          await storage.set(k, JSON.stringify([...new Set([...(local as string[]), ...(remote as string[])])]));
+        }
+        continue;
+      }
+    } catch { /* not JSON arrays — fall through */ }
+    // peers/* and other string values: remote wins
+    await storage.set(k, v);
+  }
+}
+
 // ============================================================
 // Relay transport — PUT / GET /archive/:peerId
 // ============================================================
