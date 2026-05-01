@@ -1930,15 +1930,17 @@ export class MeshWhisper {
     const xPub = this.identity.getPublicKey();
     const nsId = this.namespaceManager.getNamespaceId();
     const hour = getCurrentEpochHour();
-    // Listen on a 72-hour window (matching the relay's default blob TTL).
-    // Without this, hourly destHash rotation causes "push notification but
-    // no message" symptoms: a blob queued at hour H is stored under
-    // destHash(H), but a recipient reconnecting at H+2 only asks for
-    // destHash(H+1) and destHash(H+2). The blob is stranded in the relay
-    // until TTL expiry. Listening on the full TTL window means anything
-    // the relay still has stored, we will receive.
+    // Listen on the full blob-TTL window (30 days = 720 hours). Without
+    // this, hourly destHash rotation causes "push notification but no
+    // message" symptoms: a blob queued at hour H is stored under
+    // destHash(H), but a recipient reconnecting at H+N only asks for
+    // recent hashes. The blob is stranded until TTL expiry. Listening on
+    // the full TTL window means anything the relay still has, we will
+    // receive — at the cost of telling the relay "I might have been away
+    // for up to 30 days," which is a coarse-grained signal compared to
+    // the per-message timing the relay sees in real time anyway.
     const hashes: string[] = [];
-    for (let i = 0; i < 72; i++) {
+    for (let i = 0; i < 720; i++) {
       hashes.push(uint8ArrayToHex(deriveDestHash(nsId, xPub, hour - i)));
     }
     return hashes;

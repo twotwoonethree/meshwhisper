@@ -42,7 +42,12 @@ import Database from 'better-sqlite3';
 // ============================================================
 
 const PORT = parseInt(process.env.PORT ?? '8080', 10);
-const BLOB_TTL_HOURS = parseInt(process.env.BLOB_TTL_HOURS ?? '72', 10);
+// Default 30 days. The previous 72h was tight enough that anyone offline
+// for a long weekend lost messages. Storage cost is small in absolute terms
+// because chaff dominates the relay's traffic, not real blobs. SDK clients
+// listen on the same window to ensure blobs aren't stranded under
+// destHashes the recipient stops asking for.
+const BLOB_TTL_HOURS = parseInt(process.env.BLOB_TTL_HOURS ?? '720', 10);
 const MAX_BLOB_SIZE = parseInt(process.env.MAX_BLOB_SIZE ?? String(256 * 1024), 10); // 256 KB
 const MAX_BLOBS_PER_HASH = parseInt(process.env.MAX_BLOBS_PER_HASH ?? '500', 10);
 const MEDIA_TTL_HOURS = parseInt(process.env.MEDIA_TTL_HOURS ?? String(7 * 24), 10); // 7 days
