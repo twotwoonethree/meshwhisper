@@ -24,6 +24,7 @@ import {
   type ControlMessage,
   type MessageEnvelope,
 } from './utils.js';
+import { KeyedMutex } from './keyed-mutex.js';
 
 /** Prefix that marks a group message envelope inside the pairwise channel. */
 const GROUP_ENVELOPE_PREFIX = '{"__mw_grp":';
@@ -32,6 +33,12 @@ export class MessageHandler {
   // Rolling set of seen message IDs to prevent duplicate delivery.
   // Keyed by message ID; value is the timestamp for TTL pruning.
   private readonly seenMessageIds: Map<string, number> = new Map();
+
+  // Serialises read-modify-write on `messages/${conversationId}`.
+  // Without this, two messages arriving in the same JS tick (or a live
+  // message racing with mergeKv on boot) lose one of the two writes.
+  // Exposed so the archive merge path can lock the same keys.
+  readonly storageMutex = new KeyedMutex();
 
   constructor(
     private readonly sessionManager: SessionManager,
@@ -317,31 +324,37 @@ export class MessageHandler {
 
   async saveMessage(message: StoredMessage): Promise<void> {
     if (!this.storage) return;
+    const storage = this.storage;
     const key = `messages/${message.conversationId}`;
-    const raw = await this.storage.get(key);
-    const messages: StoredMessage[] = raw ? JSON.parse(raw) : [];
-    const existing = messages.findIndex((m) => m.id === message.id);
-    if (existing >= 0) {
-      messages[existing] = message;
-    } else {
-      messages.push(message);
-      if (messages.length > MessageHandler.MAX_STORED_MESSAGES) {
-        messages.splice(0, messages.length - MessageHandler.MAX_STORED_MESSAGES);
+    await this.storageMutex.run(key, async () => {
+      const raw = await storage.get(key);
+      const messages: StoredMessage[] = raw ? JSON.parse(raw) : [];
+      const existing = messages.findIndex((m) => m.id === message.id);
+      if (existing >= 0) {
+        messages[existing] = message;
+      } else {
+        messages.push(message);
+        if (messages.length > MessageHandler.MAX_STORED_MESSAGES) {
+          messages.splice(0, messages.length - MessageHandler.MAX_STORED_MESSAGES);
+        }
       }
-    }
-    await this.storage.set(key, JSON.stringify(messages));
+      await storage.set(key, JSON.stringify(messages));
+    });
   }
 
   async removeMessage(messageId: string, conversationId: string): Promise<void> {
     if (!this.storage) return;
+    const storage = this.storage;
     const key = `messages/${conversationId}`;
-    const raw = await this.storage.get(key);
-    if (!raw) return;
-    const messages: StoredMessage[] = JSON.parse(raw);
-    const filtered = messages.filter((m) => m.id !== messageId);
-    if (filtered.length !== messages.length) {
-      await this.storage.set(key, JSON.stringify(filtered));
-    }
+    await this.storageMutex.run(key, async () => {
+      const raw = await storage.get(key);
+      if (!raw) return;
+      const messages: StoredMessage[] = JSON.parse(raw);
+      const filtered = messages.filter((m) => m.id !== messageId);
+      if (filtered.length !== messages.length) {
+        await storage.set(key, JSON.stringify(filtered));
+      }
+    });
   }
 
   async updateMessageStatus(
@@ -350,15 +363,20 @@ export class MessageHandler {
     status: StoredMessage['status'],
   ): Promise<void> {
     if (!this.storage) return;
+    const storage = this.storage;
     const key = `messages/${conversationId}`;
-    const raw = await this.storage.get(key);
-    if (!raw) return;
-    const messages: StoredMessage[] = JSON.parse(raw);
-    const msg = messages.find((m) => m.id === messageId);
-    if (!msg) return;
-    msg.status = status;
-    await this.storage.set(key, JSON.stringify(messages));
-    if (this.onMessageStatus) {
+    let updated = false;
+    await this.storageMutex.run(key, async () => {
+      const raw = await storage.get(key);
+      if (!raw) return;
+      const messages: StoredMessage[] = JSON.parse(raw);
+      const msg = messages.find((m) => m.id === messageId);
+      if (!msg) return;
+      msg.status = status;
+      await storage.set(key, JSON.stringify(messages));
+      updated = true;
+    });
+    if (updated && this.onMessageStatus) {
       this.onMessageStatus(messageId, status);
     }
   }

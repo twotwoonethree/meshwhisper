@@ -1363,7 +1363,9 @@ export class MeshWhisper {
     const identityKey = this.identity.getEdPrivateKey();
     const backupKey = await _deriveBackupKey(identityKey);
     const payload = await decryptArchive(blob, backupKey);
-    await mergeKv(payload.kv, this.storage);
+    await mergeKv(payload.kv, this.storage, (key, fn) =>
+      this.messageHandler.storageMutex.run(key, fn),
+    );
     await this.loadPersistedState();
     return { extra: payload.extra };
   }

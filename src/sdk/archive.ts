@@ -150,23 +150,29 @@ export async function restoreKv(
  *
  * Use this instead of restoreKv when local data may already exist — it
  * ensures no data is lost from either device.
+ *
+ * The optional `lock` callback lets the caller serialise per-key
+ * read-modify-write against other concurrent operations (e.g. live
+ * messages arriving via the SDK while the boot-time merge is running).
+ * Without a lock, a live message arriving during merge can be silently
+ * overwritten when the merge writes the pre-arrival snapshot back.
  */
 export async function mergeKv(
   kv: Record<string, string>,
   storage: StorageBackend,
+  lock?: <T>(key: string, fn: () => Promise<T>) => Promise<T>,
 ): Promise<void> {
-  for (const [k, v] of Object.entries(kv)) {
+  const merge = async (k: string, v: string): Promise<void> => {
     const existing = await storage.get(k);
     if (!existing) {
       await storage.set(k, v);
-      continue;
+      return;
     }
     try {
       const local = JSON.parse(existing) as unknown;
       const remote = JSON.parse(v) as unknown;
       if (Array.isArray(local) && Array.isArray(remote)) {
         if (k.startsWith('messages/')) {
-          // Merge message arrays, deduplicate by id, preserve order
           type MsgLike = { id?: string; timestamp?: number };
           const byId = new Map<string, MsgLike>();
           for (const m of local as MsgLike[]) if (m.id) byId.set(m.id, m);
@@ -176,14 +182,20 @@ export async function mergeKv(
           );
           await storage.set(k, JSON.stringify(merged));
         } else {
-          // Union for contacts, seen_ids, blocked
           await storage.set(k, JSON.stringify([...new Set([...(local as string[]), ...(remote as string[])])]));
         }
-        continue;
+        return;
       }
     } catch { /* not JSON arrays — fall through */ }
-    // peers/* and other string values: remote wins
     await storage.set(k, v);
+  };
+
+  for (const [k, v] of Object.entries(kv)) {
+    if (lock && k.startsWith('messages/')) {
+      await lock(k, () => merge(k, v));
+    } else {
+      await merge(k, v);
+    }
   }
 }
 
