@@ -489,6 +489,25 @@ export class SessionManager {
     return this.sessions.has(peerId);
   }
 
+  /**
+   * Drop a session entirely — both in-memory and persisted. Also clears
+   * any cached pre-key bundle and ed25519 identity key for the peer.
+   * Used by deleteConversation to ensure that re-adding a contact really
+   * starts from scratch rather than reusing a stale (possibly corrupted)
+   * ratchet state.
+   */
+  deleteSession(peerId: string): void {
+    this.sessions.delete(peerId);
+    this.peerPreKeyBundles.delete(peerId);
+    this.peerEdKeys.delete(peerId);
+    // Also drop any DH-key-index entries that point at this peer.
+    for (const [dhKey, indexedPeer] of this.dhKeyIndex) {
+      if (indexedPeer === peerId) this.dhKeyIndex.delete(dhKey);
+    }
+    this.storage?.delete(`sessions/${peerId}`).catch(() => {});
+    this.storage?.delete(`edkeys/${peerId}`).catch(() => {});
+  }
+
   getBundle(peerId: string): PreKeyBundle | undefined {
     return this.peerPreKeyBundles.get(peerId);
   }

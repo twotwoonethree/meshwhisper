@@ -1288,11 +1288,15 @@ export class MeshWhisper {
   async deleteConversationInstance(peerId: string): Promise<void> {
     this.permissionManager.removeContact(peerId);
     this.peerCache.removePeer(peerId);
+    // Drop the in-memory ratchet state too — wiping IDB without clearing
+    // SessionManager.sessions left the corrupted state alive until the
+    // next page reload, which meant "remove and re-add" silently reused
+    // the old session instead of building a fresh one.
+    this.sessionManager.deleteSession(peerId);
     await Promise.all([
       this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())),
       this.storage?.delete(`peers/${peerId}`),
       this.storage?.delete(`messages/${peerId}`),
-      this.storage?.delete(`sessions/${peerId}`),
     ].filter(Boolean));
   }
 
