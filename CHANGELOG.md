@@ -19,6 +19,7 @@ preserved in git history but not enumerated here.
 - **`onContactRequest` now fires for direct inbound `x3dh_init`** from new peers (previously only fired via the directory lookup path).
 - **Live network activity page** at [meshwhisper.org/live](https://meshwhisper.org/live) — anonymous SSE stream of relay activity, no peer-identifying data.
 - **PWA aggressive update polling** — Prudence picks up new deploys within roughly 60 seconds without a manual reload.
+- **Foreground rich notifications in Prudence.** When the app is open in any tab, even backgrounded, a new message produces a Notification API alert with the sender's `@username` and a preview. Tapping the notification opens the conversation. Suppressed when the user is actively viewing that conversation in a focused tab. Closed-app notifications still fall back to the service worker's generic "You have a new message" message — closing that gap (decrypting the encrypted blob in the SW) is planned in `docs/shipping.md` Phase 1.5.
 
 ### Changed
 
