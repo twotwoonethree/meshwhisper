@@ -161,7 +161,14 @@ export class GroupHandle {
     this.sdk['groupManager'].removeMember(this.group.id, peerId);
   }
 
-  leave(): void {
+  /**
+   * Leave the group: send a group_leave control message to every other
+   * current member so they remove us from their roster, then wipe local
+   * state. Returns once the broadcast is enqueued; relay store-and-
+   * forward handles delivery to offline peers.
+   */
+  async leave(): Promise<void> {
+    await this.sdk['leaveGroupBroadcast'](this.group.id);
     this.sdk['groupManager'].leaveGroup(this.group.id);
   }
 }
@@ -221,6 +228,7 @@ export class MeshWhisper {
   private onTypingHandler: ((peerId: string, isTyping: boolean) => void) | null = null;
   private onContactRequestHandler: ((peerId: string, introducedBy: string, username?: string) => void | Promise<void>) | null = null;
   private onGroupInviteHandler: ((groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>) | null = null;
+  private onGroupMemberLeftHandler: ((groupId: string, peerId: string) => void) | null = null;
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -350,6 +358,7 @@ export class MeshWhisper {
     this.onTypingHandler = config.onTyping ?? null;
     this.onContactRequestHandler = config.onContactRequest ?? null;
     this.onGroupInviteHandler = config.onGroupInvite ?? null;
+    this.onGroupMemberLeftHandler = config.onGroupMemberLeft ?? null;
   }
 
   // ================================================================
@@ -1803,6 +1812,33 @@ export class MeshWhisper {
         // Silent: the very act of decrypting this message ran the receiver's
         // first DH ratchet step, which is the whole point. Nothing else to do.
         break;
+
+      case 'group_leave': {
+        if (!ctrl.groupId) break;
+        const group = this.groupManager.getGroup(ctrl.groupId);
+        if (!group || !group.members.has(fromPeerId)) break;
+        // GroupManager.removeMember also rotates remaining sender keys for
+        // forward secrecy — exactly what we want when someone leaves.
+        this.groupManager.removeMember(ctrl.groupId, fromPeerId);
+        this.onGroupMemberLeftHandler?.(ctrl.groupId, fromPeerId);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Internal: broadcast a group_leave control message to every other
+   * current member of the group. Used by GroupHandle.leave(). Each
+   * message is queued through sendControl, so the relay's store-and-
+   * forward delivers to offline members when they come back.
+   */
+  private async leaveGroupBroadcast(groupId: string): Promise<void> {
+    const group = this.groupManager.getGroup(groupId);
+    if (!group) return;
+    const me = this.getLocalPeerId();
+    for (const memberId of group.members.keys()) {
+      if (memberId === me) continue;
+      this.sendControl(memberId, { __mw_ctrl: 'group_leave', groupId });
     }
   }
 

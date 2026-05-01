@@ -110,8 +110,11 @@ export interface ControlMessage {
     | 'reputation_proof'
     | 'contact_request'
     | 'group_invite'
+    | 'group_leave'
     | 'delete'
     | 'handshake_activate';
+  /** group_leave / group_invite reference */
+  groupId?: string;
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];

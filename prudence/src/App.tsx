@@ -7,7 +7,7 @@ import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
 import { saveContactName, getContactName, getAllContactNames, removeContactName } from './contact-names.ts';
 import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as getAllAccepted, restoreAll as restoreAccepted } from './accepted-contacts.ts';
-import { loadGroups, upsertGroup } from './group-storage.ts';
+import { loadGroups, upsertGroup, removeStoredGroup } from './group-storage.ts';
 import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
 import { showMessageNotification } from './notifications.ts';
 import type { AppState, AppMessage, AppMessageMedia, Conversation, Contact, GroupInfo } from './types.ts';
@@ -331,6 +331,50 @@ export default function App() {
     [],
   );
 
+  // Fires when another group member leaves and their group_leave control
+  // message arrives. The SDK has already removed them from its in-memory
+  // roster and rotated remaining sender keys. We mirror the change in
+  // IDB-stored group state and inject a system message into the
+  // conversation so the user sees "@alice left the group."
+  const handleGroupMemberLeft = useCallback((groupId: string, peerId: string) => {
+    const leftName = getContactName(peerId) ?? peerId.slice(0, 8) + '…';
+    void (async () => {
+      const groups = await loadGroups();
+      const stored = groups.find((g) => g.id === groupId);
+      if (stored) {
+        const updated = { ...stored, members: stored.members.filter((m) => m.peerId !== peerId) };
+        await upsertGroup(updated).catch(() => {});
+      }
+    })();
+
+    const systemMsg: AppMessage = {
+      id: crypto.randomUUID(),
+      conversationId: groupId,
+      text: `@${leftName} left the group`,
+      timestamp: Date.now(),
+      direction: 'inbound',
+      status: 'delivered',
+    };
+    setState((prev) => {
+      const conv = prev.conversations.find((c) => c.id === groupId);
+      if (!conv?.group) return prev;
+      const newGroup: GroupInfo = {
+        ...conv.group,
+        members: conv.group.members.filter((m) => m.peerId !== peerId),
+      };
+      return {
+        ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
+        ),
+        messages: {
+          ...prev.messages,
+          [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+        },
+      };
+    });
+  }, []);
+
   const handleConnectionStatus = useCallback((status: 'connected' | 'disconnected') => {
     setState((prev) => ({ ...prev, connected: status === 'connected' }));
   }, []);
@@ -355,6 +399,7 @@ export default function App() {
         onContactRequest: handleContactRequest,
         onConnectionStatus: handleConnectionStatus,
         onGroupInvite: handleGroupInvite,
+        onGroupMemberLeft: handleGroupMemberLeft,
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
@@ -628,8 +673,21 @@ export default function App() {
 
   async function handleRemoveContact(peerId: string) {
     const sdk = getSDK();
-    if (sdk) await sdk.deleteConversationInstance(peerId).catch(console.error);
-    removeContactName(peerId);
+    // If this is a group, the leave path differs: broadcast a group_leave
+    // control message to remaining members, drop SDK + IDB group state,
+    // skip the contact-name cleanup (groups don't have contact names).
+    const conv = state.conversations.find((c) => c.id === peerId);
+    const isGroup = !!conv?.group;
+    if (sdk && isGroup) {
+      const handle = MeshWhisper.getGroup(peerId);
+      if (handle) {
+        await handle.leave().catch((e) => console.error('[group leave] broadcast failed:', e));
+      }
+      await removeStoredGroup(peerId).catch(() => {});
+    } else if (sdk) {
+      await sdk.deleteConversationInstance(peerId).catch(console.error);
+      removeContactName(peerId);
+    }
     setState((prev) => ({
       ...prev,
       activeConversationId: null,

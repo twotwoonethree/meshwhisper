@@ -19,6 +19,7 @@ export async function initSDK(
     onContactRequest: (peerId: string, introducedBy: string, username?: string) => void;
     onConnectionStatus: (status: 'connected' | 'disconnected') => void;
     onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void;
+    onGroupMemberLeft?: (groupId: string, peerId: string) => void;
   },
   pushSubscription?: WebPushSubscription | null,
 ) {
@@ -34,6 +35,7 @@ export async function initSDK(
     onContactRequest: handlers.onContactRequest,
     onConnectionStatus: handlers.onConnectionStatus,
     ...(handlers.onGroupInvite ? { onGroupInvite: handlers.onGroupInvite } : {}),
+    ...(handlers.onGroupMemberLeft ? { onGroupMemberLeft: handlers.onGroupMemberLeft } : {}),
   });
   return instance;
 }

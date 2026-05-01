@@ -187,7 +187,7 @@ describe('group invite and messaging', () => {
       storage: new NodeStorage(dir),
     });
     const group = MeshWhisper.createGroup({ name: 'Goodbye Group' });
-    group.leave();
+    await group.leave();
     expect(MeshWhisper.getGroup(group.id)).toBeNull();
     await MeshWhisper.instance.shutdown();
   }, 15000);

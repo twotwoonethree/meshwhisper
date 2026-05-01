@@ -355,6 +355,14 @@ export interface MeshWhisperConfig {
    * Decline by simply not calling it, or call `MeshWhisper.declineGroupInvite(groupId)`.
    */
   onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>;
+
+  /**
+   * Fires when an existing group member leaves and sends a group_leave
+   * control message. The peer has already been removed from the local
+   * roster by the time this fires; the application typically responds by
+   * persisting the change and surfacing an in-conversation system message.
+   */
+  onGroupMemberLeft?: (groupId: string, peerId: string) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;
