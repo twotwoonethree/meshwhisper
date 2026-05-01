@@ -67,10 +67,14 @@ export async function register(user: TestUser): Promise<void> {
 /**
  * Reload the page, simulating the user closing and re-opening Prudence
  * on the same device. IDB persists; service worker stays registered.
+ *
+ * `networkidle` is unsuitable here because the relay WebSocket never
+ * goes idle. `domcontentloaded` + a short stabilisation pause is what
+ * we want.
  */
 export async function reload(user: TestUser): Promise<void> {
-  await user.page.reload({ waitUntil: 'networkidle' });
-  await user.page.waitForTimeout(2000);
+  await user.page.reload({ waitUntil: 'domcontentloaded' });
+  await user.page.waitForTimeout(3000);
 }
 
 /**
@@ -147,12 +151,12 @@ export async function aliceAddContact(user: TestUser, peerUsername: string): Pro
 }
 
 export async function acceptIncomingRequest(user: TestUser, timeout = 30_000): Promise<void> {
-  // Wait for the contact requests UI (modal or banner). It pops up
-  // automatically when a request arrives.
   await user.page.locator('text=/Contact requests/i').waitFor({ state: 'visible', timeout });
-  // The accept button is the brand-coloured ✓ button in the request row.
   await user.page.locator('button.bg-brand-600, button.bg-brand-500').first().click();
-  await user.page.waitForTimeout(1500);
+  // Generous settle window — accept triggers a directory lookup, addContactByKey,
+  // and several control messages bouncing between peers. Give all of that time
+  // to land before the test starts sending real traffic.
+  await user.page.waitForTimeout(4000);
 }
 
 export async function openConversation(user: TestUser, peerUsername: string): Promise<void> {

@@ -17,14 +17,18 @@ import {
   await register(alice);
   await register(bob);
   await aliceAddContact(alice, bob.username);
+  await snap(bob, '03a-bob-after-alice-add');
   await acceptIncomingRequest(bob);
+  await snap(bob, '03b-bob-after-accept');
   await openConversation(alice, bob.username);
   await openConversation(bob, alice.username);
+  await snap(bob, '03c-bob-after-open-convo');
 
   console.log('--- baseline message ---');
   await sendMessage(alice, 'pre-reload');
-  await snap(alice, '03-alice-after-send-debug');
-  await snap(bob, '03-bob-before-wait-debug');
+  await alice.page.waitForTimeout(2000);
+  await snap(alice, '03d-alice-after-send');
+  await snap(bob, '03e-bob-after-alice-send');
   await waitForMessage(bob, 'pre-reload');
 
   console.log('--- bob reloads ---');
