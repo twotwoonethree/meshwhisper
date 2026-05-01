@@ -331,6 +331,65 @@ export default function App() {
     [],
   );
 
+  // Fires when the group's admin adds someone new to a group we're already
+  // in. The SDK has already added them to the in-memory roster and stored
+  // their sender + Ed25519 keys. We persist the membership change and
+  // surface a "@alice added @carol" system message.
+  const handleGroupMemberAdded = useCallback((groupId: string, peerId: string, addedBy: string) => {
+    void (async () => {
+      let addedName = getContactName(peerId);
+      if (!addedName) {
+        addedName = (await MeshWhisper.resolveUsername(peerId).catch(() => undefined))
+          ?? (peerId.slice(0, 8) + '…');
+        if (addedName && !addedName.includes('…')) saveContactName(peerId, addedName);
+      }
+      let adderName = getContactName(addedBy);
+      if (!adderName) {
+        adderName = (await MeshWhisper.resolveUsername(addedBy).catch(() => undefined))
+          ?? (addedBy.slice(0, 8) + '…');
+        if (adderName && !adderName.includes('…')) saveContactName(addedBy, adderName);
+      }
+
+      const groups = await loadGroups();
+      const stored = groups.find((g) => g.id === groupId);
+      if (stored && !stored.members.some((m) => m.peerId === peerId)) {
+        const updated = {
+          ...stored,
+          members: [...stored.members, { peerId, role: 'member' as const, username: addedName }],
+        };
+        await upsertGroup(updated).catch(() => {});
+      }
+
+      const systemMsg: AppMessage = {
+        id: crypto.randomUUID(),
+        conversationId: groupId,
+        text: `@${adderName} added @${addedName}`,
+        timestamp: Date.now(),
+        direction: 'inbound',
+        status: 'delivered',
+      };
+      setState((prev) => {
+        const conv = prev.conversations.find((c) => c.id === groupId);
+        if (!conv?.group) return prev;
+        if (conv.group.members.some((m) => m.peerId === peerId)) return prev;
+        const newGroup: GroupInfo = {
+          ...conv.group,
+          members: [...conv.group.members, { peerId, role: 'member', username: addedName }],
+        };
+        return {
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
+          ),
+          messages: {
+            ...prev.messages,
+            [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+          },
+        };
+      });
+    })();
+  }, []);
+
   // Fires when another group member leaves and their group_leave control
   // message arrives. The SDK has already removed them from its in-memory
   // roster and rotated remaining sender keys. We mirror the change in
@@ -408,6 +467,7 @@ export default function App() {
         onConnectionStatus: handleConnectionStatus,
         onGroupInvite: handleGroupInvite,
         onGroupMemberLeft: handleGroupMemberLeft,
+        onGroupMemberAdded: handleGroupMemberAdded,
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
@@ -750,6 +810,61 @@ export default function App() {
     }));
   }
 
+  async function handleAddGroupMember(groupId: string, peerId: string) {
+    const handle = MeshWhisper.getGroup(groupId);
+    if (!handle) return;
+    try {
+      await handle.addMember(peerId);
+    } catch (err) {
+      console.error('[group add] failed:', err);
+      return;
+    }
+    // Update local state to reflect the addition immediately. The
+    // stored-group + system-message side mirrors what we'd otherwise
+    // get from the receive handler, but since we initiated the add we
+    // need to apply it ourselves.
+    const newName = getContactName(peerId)
+      ?? (await MeshWhisper.resolveUsername(peerId).catch(() => undefined))
+      ?? (peerId.slice(0, 8) + '…');
+    const myName = MeshWhisper.instance['config'].username ?? 'you';
+    const groups = await loadGroups();
+    const stored = groups.find((g) => g.id === groupId);
+    if (stored && !stored.members.some((m) => m.peerId === peerId)) {
+      const updated = {
+        ...stored,
+        members: [...stored.members, { peerId, role: 'member' as const, username: newName }],
+      };
+      await upsertGroup(updated).catch(() => {});
+    }
+    const systemMsg: AppMessage = {
+      id: crypto.randomUUID(),
+      conversationId: groupId,
+      text: `@${myName} added @${newName}`,
+      timestamp: Date.now(),
+      direction: 'outbound',
+      status: 'delivered',
+    };
+    setState((prev) => {
+      const conv = prev.conversations.find((c) => c.id === groupId);
+      if (!conv?.group) return prev;
+      if (conv.group.members.some((m) => m.peerId === peerId)) return prev;
+      const newGroup: GroupInfo = {
+        ...conv.group,
+        members: [...conv.group.members, { peerId, role: 'member', username: newName }],
+      };
+      return {
+        ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
+        ),
+        messages: {
+          ...prev.messages,
+          [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+        },
+      };
+    });
+  }
+
   async function handleAcceptGroupInvite(groupId: string) {
     const inv = state.pendingGroupInvites.find((i) => i.groupId === groupId);
     if (!inv) return;
@@ -983,11 +1098,27 @@ export default function App() {
           <Thread
             contact={activeConv.contact}
             group={activeConv.group}
+            isGroupAdmin={
+              !!activeConv.group &&
+              (() => {
+                const sdkGroup = MeshWhisper.getGroup(activeConv.id)?.group;
+                return sdkGroup?.treeRoot === MeshWhisper.getLocalPeerId();
+              })()
+            }
+            addableContacts={
+              activeConv.group
+                ? state.conversations
+                    .filter((c) => !c.group)
+                    .map((c) => c.contact)
+                    .filter((c) => !activeConv.group!.members.some((m) => m.peerId === c.peerId))
+                : undefined
+            }
             messages={state.messages[activeConv.id] ?? []}
             isTyping={activeConv.isTyping}
             onBack={() => setState((prev) => ({ ...prev, activeConversationId: null }))}
             onSend={(text) => handleSend(activeConv.id, text)}
             onRemove={() => handleRemoveContact(activeConv.id)}
+            onAddMember={activeConv.group ? (peerId) => handleAddGroupMember(activeConv.id, peerId) : undefined}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
           />

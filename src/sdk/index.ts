@@ -153,8 +153,16 @@ export class GroupHandle {
     await this.sdk.sendToGroup(this.group.id, payload);
   }
 
-  addMember(peerId: string): void {
-    this.sdk['groupManager'].addMember(this.group.id, peerId);
+  /**
+   * Add a new member to the group. Only the group's creator (admin) can
+   * call this — others get an Error. The admin generates a sender key
+   * for the new member, sends them a regular `group_invite` control
+   * message (so they see the invitation modal and can accept), and
+   * broadcasts a `group_member_added` to existing members so they
+   * update their roster and store the new member's sender + Ed25519 keys.
+   */
+  async addMember(peerId: string): Promise<void> {
+    await this.sdk['addGroupMemberBroadcast'](this.group.id, peerId);
   }
 
   removeMember(peerId: string): void {
@@ -229,6 +237,7 @@ export class MeshWhisper {
   private onContactRequestHandler: ((peerId: string, introducedBy: string, username?: string) => void | Promise<void>) | null = null;
   private onGroupInviteHandler: ((groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>) | null = null;
   private onGroupMemberLeftHandler: ((groupId: string, peerId: string) => void) | null = null;
+  private onGroupMemberAddedHandler: ((groupId: string, peerId: string, addedBy: string) => void) | null = null;
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -359,6 +368,7 @@ export class MeshWhisper {
     this.onContactRequestHandler = config.onContactRequest ?? null;
     this.onGroupInviteHandler = config.onGroupInvite ?? null;
     this.onGroupMemberLeftHandler = config.onGroupMemberLeft ?? null;
+    this.onGroupMemberAddedHandler = config.onGroupMemberAdded ?? null;
   }
 
   // ================================================================
@@ -1861,6 +1871,33 @@ export class MeshWhisper {
         this.onGroupMemberLeftHandler?.(ctrl.groupId, fromPeerId);
         break;
       }
+
+      case 'group_member_added': {
+        if (!ctrl.groupId || !ctrl.addedPeerId || !ctrl.addedSenderKey) break;
+        const group = this.groupManager.getGroup(ctrl.groupId);
+        if (!group) break;
+        // Sender authorisation: only the group's tree root (creator/admin)
+        // may add members. Reject otherwise — prevents a malicious member
+        // from injecting peers into the roster.
+        if (group.treeRoot !== fromPeerId) break;
+        if (group.members.has(ctrl.addedPeerId)) break;
+
+        const senderKey = new Uint8Array(ctrl.addedSenderKey);
+        this.groupManager.addMember(ctrl.groupId, ctrl.addedPeerId, senderKey);
+
+        // Make sure we can reach the new peer for pairwise messages.
+        if (ctrl.addedEdKey) {
+          const edKey = new Uint8Array(ctrl.addedEdKey);
+          this.sessionManager.rememberPeerEdKey(ctrl.addedPeerId, edKey);
+        }
+        if (!this.peerCache.getPeerPublicKey(ctrl.addedPeerId)) {
+          this.peerCache.addPeer(ctrl.addedPeerId, hexToUint8Array(ctrl.addedPeerId));
+        }
+        this.storage?.set(`peers/${ctrl.addedPeerId}`, ctrl.addedPeerId).catch(() => {});
+
+        this.onGroupMemberAddedHandler?.(ctrl.groupId, ctrl.addedPeerId, fromPeerId);
+        break;
+      }
     }
   }
 
@@ -1877,6 +1914,73 @@ export class MeshWhisper {
     for (const memberId of group.members.keys()) {
       if (memberId === me) continue;
       this.sendControl(memberId, { __mw_ctrl: 'group_leave', groupId });
+    }
+  }
+
+  /**
+   * Internal: add a member to a group and tell everyone about it. Used
+   * by GroupHandle.addMember. The local user must be the group's
+   * creator/admin; throws otherwise.
+   */
+  private async addGroupMemberBroadcast(groupId: string, newPeerId: string): Promise<void> {
+    const group = this.groupManager.getGroup(groupId);
+    if (!group) throw new Error(`Unknown group ${groupId}`);
+    const me = this.getLocalPeerId();
+    if (group.treeRoot !== me) {
+      throw new Error('Only the group admin can add members');
+    }
+    if (group.members.has(newPeerId)) return;
+
+    const newMemberEdKey = this.sessionManager.getPeerEdKey(newPeerId);
+    if (!newMemberEdKey) {
+      throw new Error(
+        `Cannot add ${newPeerId} to group: no Ed25519 key cached. Add them as a contact first.`,
+      );
+    }
+
+    // Generate the new member's sender key locally and stash it. The
+    // same key is then sent both to the new member (in the invite) and
+    // to existing members (in group_member_added) so everyone agrees.
+    this.groupManager.addMember(groupId, newPeerId);
+    const newSenderKey = this.groupManager.getSenderKey(groupId, newPeerId);
+    if (!newSenderKey) throw new Error('Failed to generate sender key for new member');
+
+    const updatedMembers = this.groupManager.getMembers(groupId);
+
+    // 1) Tell the new member they've been invited (regular group_invite
+    //    flow — they'll see the invitation modal and choose to accept).
+    const senderKeysRecord: Record<string, number[]> = {};
+    const memberEdKeysRecord: Record<string, number[]> = {};
+    for (const m of updatedMembers) {
+      const key = this.groupManager.getSenderKey(groupId, m.id);
+      if (key) senderKeysRecord[m.id] = Array.from(key);
+      if (m.id === me) continue;
+      const edKey = this.sessionManager.getPeerEdKey(m.id);
+      if (edKey) memberEdKeysRecord[m.id] = Array.from(edKey);
+    }
+    this.sendControl(newPeerId, {
+      __mw_ctrl: 'group_invite',
+      groupInvite: {
+        groupId,
+        groupName: group.name,
+        invitedBy: me,
+        members: updatedMembers.map((m) => m.id),
+        senderKeys: senderKeysRecord,
+        memberEdKeys: memberEdKeysRecord,
+      },
+    });
+
+    // 2) Tell each existing member about the new addition so they can
+    //    update their roster and store the new member's keys.
+    for (const m of updatedMembers) {
+      if (m.id === me || m.id === newPeerId) continue;
+      this.sendControl(m.id, {
+        __mw_ctrl: 'group_member_added',
+        groupId,
+        addedPeerId: newPeerId,
+        addedEdKey: Array.from(newMemberEdKey),
+        addedSenderKey: Array.from(newSenderKey),
+      });
     }
   }
 

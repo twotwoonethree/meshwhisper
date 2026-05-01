@@ -363,6 +363,15 @@ export interface MeshWhisperConfig {
    * persisting the change and surfacing an in-conversation system message.
    */
   onGroupMemberLeft?: (groupId: string, peerId: string) => void;
+
+  /**
+   * Fires when the group's admin adds a new member to a group we're
+   * already in. By the time this fires the new member has been added
+   * to the local roster, their sender key has been stored, and their
+   * Ed25519 key has been registered with the session manager so that
+   * sending pairwise messages to them works without further setup.
+   */
+  onGroupMemberAdded?: (groupId: string, peerId: string, addedBy: string) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

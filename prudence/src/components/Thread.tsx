@@ -5,11 +5,16 @@ import { isImageMime, formatFileSize, fileIconLabel } from '../media.ts';
 interface Props {
   contact: Contact;
   group?: GroupInfo;
+  /** True if the local user is the group's admin (creator). Enables group-management UI. */
+  isGroupAdmin?: boolean;
+  /** Available contacts that aren't already in the group — passed to the add-members picker. */
+  addableContacts?: Contact[];
   messages: AppMessage[];
   isTyping: boolean;
   onBack: () => void;
   onSend: (text: string) => void;
   onRemove: () => void;
+  onAddMember?: (peerId: string) => void;
   onAttach?: (file: File) => void;
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
 }
@@ -117,11 +122,12 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, messages, isTyping, onBack, onSend, onRemove, onAttach, onDownloadMedia }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onAttach, onDownloadMedia }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showAddMember, setShowAddMember] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -189,6 +195,17 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
             <p className="text-slate-500 text-xs">@{contact.username}</p>
           ) : null}
         </div>
+        {group && isGroupAdmin && onAddMember && (
+          <button
+            onClick={() => setShowAddMember(true)}
+            className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors"
+            title="Add member"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={() => setConfirmDelete(true)}
           className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-red-400 transition-colors"
@@ -199,6 +216,41 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
           </svg>
         </button>
       </div>
+
+      {/* Add-member picker (group admin only) */}
+      {showAddMember && group && onAddMember && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setShowAddMember(false)} />
+          <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm flex flex-col max-h-[80vh]">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+              <h2 className="text-white font-semibold text-sm">Add member</h2>
+              <button onClick={() => setShowAddMember(false)} className="text-slate-500 hover:text-white transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2">
+              {!addableContacts || addableContacts.length === 0 ? (
+                <p className="text-slate-500 text-sm text-center py-6">No contacts available to add.</p>
+              ) : (
+                addableContacts.map((c) => (
+                  <button
+                    key={c.peerId}
+                    onClick={() => { onAddMember(c.peerId); setShowAddMember(false); }}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 transition-colors text-left"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+                      {c.displayName[0]?.toUpperCase() ?? '?'}
+                    </div>
+                    <span className="text-white text-sm">{c.displayName}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete / Leave confirmation */}
       {confirmDelete && (

@@ -260,9 +260,12 @@ export class GroupManager {
   // ---- Member Management ----
 
   /**
-   * Adds a new member to the group and generates a sender key for them.
+   * Adds a new member to the group. The admin (creator) generates a fresh
+   * sender key locally; non-admin members reach this via a
+   * group_member_added control message and pass through `providedKey` so
+   * everyone agrees on the new member's sender key.
    */
-  addMember(groupId: string, peerId: string): void {
+  addMember(groupId: string, peerId: string, providedKey?: Uint8Array): void {
     const state = this.requireGroupState(groupId);
 
     if (state.group.members.has(peerId)) {
@@ -270,7 +273,7 @@ export class GroupManager {
     }
 
     const now = Date.now();
-    const memberKey = this.generateSenderKey();
+    const memberKey = providedKey ?? this.generateSenderKey();
 
     state.group.members.set(peerId, {
       id: peerId,

@@ -111,10 +111,17 @@ export interface ControlMessage {
     | 'contact_request'
     | 'group_invite'
     | 'group_leave'
+    | 'group_member_added'
     | 'delete'
     | 'handshake_activate';
-  /** group_leave / group_invite reference */
+  /** group_leave / group_invite / group_member_added reference */
   groupId?: string;
+  /** group_member_added: peerId of the newly added member */
+  addedPeerId?: string;
+  /** group_member_added: ed25519 identity key of the newly added member */
+  addedEdKey?: number[];
+  /** group_member_added: sender key the admin generated for the new member */
+  addedSenderKey?: number[];
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];
