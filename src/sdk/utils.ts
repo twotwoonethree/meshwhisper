@@ -112,9 +112,10 @@ export interface ControlMessage {
     | 'group_invite'
     | 'group_leave'
     | 'group_member_added'
+    | 'group_admin_change'
     | 'delete'
     | 'handshake_activate';
-  /** group_leave / group_invite / group_member_added reference */
+  /** group_leave / group_invite / group_member_added / group_admin_change reference */
   groupId?: string;
   /** group_member_added: peerId of the newly added member */
   addedPeerId?: string;
@@ -122,6 +123,11 @@ export interface ControlMessage {
   addedEdKey?: number[];
   /** group_member_added: sender key the admin generated for the new member */
   addedSenderKey?: number[];
+  /**
+   * group_admin_change: peerId of the new admin, or '' for adminless.
+   * The current admin is the only sender allowed to issue this.
+   */
+  newAdminId?: string;
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];

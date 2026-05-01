@@ -426,6 +426,23 @@ export class GroupManager {
   }
 
   /**
+   * Update a group's admin ('treeRoot'). Pass `''` for adminless. Used
+   * when the admin transfers their role or steps down. Also called
+   * implicitly when the admin leaves without an explicit transfer —
+   * the receiving side falls back to adminless rather than leaving the
+   * group in a permanently broken state.
+   */
+  setAdmin(groupId: string, newAdminId: string): void {
+    const state = this.groups.get(groupId);
+    if (!state) return;
+    // Adminless is allowed (newAdminId === ''). Otherwise the new admin
+    // must already be a current member.
+    if (newAdminId !== '' && !state.group.members.has(newAdminId)) return;
+    state.group.treeRoot = newAdminId;
+    state.relayTree = null;
+  }
+
+  /**
    * Returns the sender key for a specific member in a group, or null if unknown.
    */
   getSenderKey(groupId: string, memberId: string): Uint8Array | null {

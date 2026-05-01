@@ -154,15 +154,36 @@ export class GroupHandle {
   }
 
   /**
-   * Add a new member to the group. Only the group's creator (admin) can
-   * call this — others get an Error. The admin generates a sender key
-   * for the new member, sends them a regular `group_invite` control
-   * message (so they see the invitation modal and can accept), and
-   * broadcasts a `group_member_added` to existing members so they
-   * update their roster and store the new member's sender + Ed25519 keys.
+   * Add a new member to the group. Allowed if the local user is the
+   * group's admin (treeRoot), or if the group is adminless (treeRoot
+   * is the empty string). Throws otherwise.
    */
   async addMember(peerId: string): Promise<void> {
     await this.sdk['addGroupMemberBroadcast'](this.group.id, peerId);
+  }
+
+  /**
+   * Transfer the admin role to another member, or pass '' to make the
+   * group adminless (anyone can add new members). Only the current
+   * admin can call this.
+   */
+  async transferAdmin(newAdminId: string): Promise<void> {
+    await this.sdk['transferGroupAdminBroadcast'](this.group.id, newAdminId);
+  }
+
+  /** Convenience for transferAdmin('') — make the group adminless. */
+  async becomeAdminless(): Promise<void> {
+    await this.transferAdmin('');
+  }
+
+  /** True if the local user is the group's admin. */
+  isAdmin(): boolean {
+    return this.group.treeRoot === this.sdk.getLocalPeerId();
+  }
+
+  /** True if the group has no admin (anyone can add members). */
+  isAdminless(): boolean {
+    return this.group.treeRoot === '';
   }
 
   removeMember(peerId: string): void {
@@ -238,6 +259,7 @@ export class MeshWhisper {
   private onGroupInviteHandler: ((groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>) | null = null;
   private onGroupMemberLeftHandler: ((groupId: string, peerId: string) => void) | null = null;
   private onGroupMemberAddedHandler: ((groupId: string, peerId: string, addedBy: string) => void) | null = null;
+  private onGroupAdminChangedHandler: ((groupId: string, newAdminId: string, changedBy: string) => void) | null = null;
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -369,6 +391,7 @@ export class MeshWhisper {
     this.onGroupInviteHandler = config.onGroupInvite ?? null;
     this.onGroupMemberLeftHandler = config.onGroupMemberLeft ?? null;
     this.onGroupMemberAddedHandler = config.onGroupMemberAdded ?? null;
+    this.onGroupAdminChangedHandler = config.onGroupAdminChanged ?? null;
   }
 
   // ================================================================
@@ -1865,8 +1888,14 @@ export class MeshWhisper {
         if (!ctrl.groupId) break;
         const group = this.groupManager.getGroup(ctrl.groupId);
         if (!group || !group.members.has(fromPeerId)) break;
-        // GroupManager.removeMember also rotates remaining sender keys for
-        // forward secrecy — exactly what we want when someone leaves.
+        // If the leaver was the admin and didn't explicitly transfer first,
+        // fall back to making the group adminless rather than leaving it
+        // permanently un-administered. (An admin who wants to nominate a
+        // successor sends group_admin_change before group_leave.)
+        if (group.treeRoot === fromPeerId) {
+          this.groupManager.setAdmin(ctrl.groupId, '');
+          this.onGroupAdminChangedHandler?.(ctrl.groupId, '', fromPeerId);
+        }
         this.groupManager.removeMember(ctrl.groupId, fromPeerId);
         this.onGroupMemberLeftHandler?.(ctrl.groupId, fromPeerId);
         break;
@@ -1877,9 +1906,12 @@ export class MeshWhisper {
         const group = this.groupManager.getGroup(ctrl.groupId);
         if (!group) break;
         // Sender authorisation: only the group's tree root (creator/admin)
-        // may add members. Reject otherwise — prevents a malicious member
-        // from injecting peers into the roster.
-        if (group.treeRoot !== fromPeerId) break;
+        // may add members. Adminless groups (treeRoot === '') let any
+        // current member add — they are explicitly opting into trust.
+        const senderIsAdmin = group.treeRoot === fromPeerId;
+        const adminless = group.treeRoot === '';
+        const senderIsMember = group.members.has(fromPeerId);
+        if (!senderIsAdmin && !(adminless && senderIsMember)) break;
         if (group.members.has(ctrl.addedPeerId)) break;
 
         const senderKey = new Uint8Array(ctrl.addedSenderKey);
@@ -1896,6 +1928,19 @@ export class MeshWhisper {
         this.storage?.set(`peers/${ctrl.addedPeerId}`, ctrl.addedPeerId).catch(() => {});
 
         this.onGroupMemberAddedHandler?.(ctrl.groupId, ctrl.addedPeerId, fromPeerId);
+        break;
+      }
+
+      case 'group_admin_change': {
+        if (!ctrl.groupId || ctrl.newAdminId === undefined) break;
+        const group = this.groupManager.getGroup(ctrl.groupId);
+        if (!group) break;
+        // Only the current admin can transfer the role. Reject otherwise.
+        if (group.treeRoot !== fromPeerId) break;
+        // newAdminId === '' → adminless. Otherwise must be a member.
+        if (ctrl.newAdminId !== '' && !group.members.has(ctrl.newAdminId)) break;
+        this.groupManager.setAdmin(ctrl.groupId, ctrl.newAdminId);
+        this.onGroupAdminChangedHandler?.(ctrl.groupId, ctrl.newAdminId, fromPeerId);
         break;
       }
     }
@@ -1926,7 +1971,9 @@ export class MeshWhisper {
     const group = this.groupManager.getGroup(groupId);
     if (!group) throw new Error(`Unknown group ${groupId}`);
     const me = this.getLocalPeerId();
-    if (group.treeRoot !== me) {
+    // Permission: admin (treeRoot === me) OR group is adminless (treeRoot === '').
+    // Otherwise: refuse.
+    if (group.treeRoot !== '' && group.treeRoot !== me) {
       throw new Error('Only the group admin can add members');
     }
     if (group.members.has(newPeerId)) return;
@@ -1980,6 +2027,33 @@ export class MeshWhisper {
         addedPeerId: newPeerId,
         addedEdKey: Array.from(newMemberEdKey),
         addedSenderKey: Array.from(newSenderKey),
+      });
+    }
+  }
+
+  /**
+   * Internal: transfer the admin role of a group, or convert it to
+   * adminless (newAdminId === ''). Only the current admin (treeRoot)
+   * can call this. Updates local state and broadcasts a
+   * group_admin_change control message to every other current member.
+   */
+  private async transferGroupAdminBroadcast(groupId: string, newAdminId: string): Promise<void> {
+    const group = this.groupManager.getGroup(groupId);
+    if (!group) throw new Error(`Unknown group ${groupId}`);
+    const me = this.getLocalPeerId();
+    if (group.treeRoot !== me) {
+      throw new Error('Only the current admin can transfer the admin role');
+    }
+    if (newAdminId !== '' && !group.members.has(newAdminId)) {
+      throw new Error(`New admin ${newAdminId} is not a current group member`);
+    }
+    this.groupManager.setAdmin(groupId, newAdminId);
+    for (const memberId of group.members.keys()) {
+      if (memberId === me) continue;
+      this.sendControl(memberId, {
+        __mw_ctrl: 'group_admin_change',
+        groupId,
+        newAdminId,
       });
     }
   }

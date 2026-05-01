@@ -7,6 +7,10 @@ interface Props {
   group?: GroupInfo;
   /** True if the local user is the group's admin (creator). Enables group-management UI. */
   isGroupAdmin?: boolean;
+  /** True if the group has no admin (anyone can add members). */
+  isAdminless?: boolean;
+  /** The local user's own peerId — used to filter group member lists. */
+  localPeerId?: string;
   /** Available contacts that aren't already in the group — passed to the add-members picker. */
   addableContacts?: Contact[];
   messages: AppMessage[];
@@ -15,6 +19,8 @@ interface Props {
   onSend: (text: string) => void;
   onRemove: () => void;
   onAddMember?: (peerId: string) => void;
+  /** Transfer admin role to another member, or pass '' to make adminless. */
+  onTransferAdmin?: (newAdminId: string) => Promise<void>;
   onAttach?: (file: File) => void;
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
 }
@@ -122,12 +128,42 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onAttach, onDownloadMedia }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onAttach, onDownloadMedia }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
+  const [adminChoice, setAdminChoice] = useState<'idle' | 'choose'>('idle');
+
+  // When the local user is the admin AND there are other members, the
+  // leave button takes them through the admin-handoff dialog first.
+  // For an adminless group OR an admined group with no other members,
+  // the regular confirm dialog applies.
+  const otherMembers = group?.members.filter((m) => m.peerId !== localPeerId) ?? [];
+  const adminMustHandOff =
+    !!group && !!isGroupAdmin && !!onTransferAdmin && otherMembers.length > 0;
+
+  function handleLeaveClick() {
+    if (adminMustHandOff) setAdminChoice('choose');
+    else setConfirmDelete(true);
+  }
+
+  async function chooseAdminless() {
+    setAdminChoice('idle');
+    if (!onTransferAdmin) return;
+    try { await onTransferAdmin(''); }
+    catch (e) { console.error('[group] transfer to adminless failed:', e); }
+    onRemove();
+  }
+
+  async function chooseSuccessor(peerId: string) {
+    setAdminChoice('idle');
+    if (!onTransferAdmin) return;
+    try { await onTransferAdmin(peerId); }
+    catch (e) { console.error('[group] transfer to', peerId, 'failed:', e); }
+    onRemove();
+  }
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -195,7 +231,7 @@ export default function Thread({ contact, group, isGroupAdmin, addableContacts, 
             <p className="text-slate-500 text-xs">@{contact.username}</p>
           ) : null}
         </div>
-        {group && isGroupAdmin && onAddMember && (
+        {group && (isGroupAdmin || isAdminless) && onAddMember && (
           <button
             onClick={() => setShowAddMember(true)}
             className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors"
@@ -207,7 +243,7 @@ export default function Thread({ contact, group, isGroupAdmin, addableContacts, 
           </button>
         )}
         <button
-          onClick={() => setConfirmDelete(true)}
+          onClick={handleLeaveClick}
           className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-red-400 transition-colors"
           title={group ? 'Leave group' : 'Delete conversation'}
         >
@@ -247,6 +283,53 @@ export default function Thread({ contact, group, isGroupAdmin, addableContacts, 
                   </button>
                 ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-leave handoff: pick a successor or convert to adminless */}
+      {adminChoice === 'choose' && group && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setAdminChoice('idle')} />
+          <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm flex flex-col max-h-[80vh]">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+              <h2 className="text-white font-semibold text-sm">Before you leave</h2>
+              <button onClick={() => setAdminChoice('idle')} className="text-slate-500 hover:text-white transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-5 py-4 border-b border-slate-800 text-sm text-slate-400">
+              You're the admin of <span className="text-white">{group.name}</span>. Choose a successor or make the group admin-less so anyone can add members.
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2">
+              <p className="text-slate-500 text-xs uppercase tracking-widest font-medium px-3 pt-2 pb-1">Nominate admin</p>
+              {otherMembers.length === 0 ? (
+                <p className="text-slate-600 text-sm px-3 py-2">No other members.</p>
+              ) : (
+                otherMembers.map((m) => (
+                  <button
+                    key={m.peerId}
+                    onClick={() => { void chooseSuccessor(m.peerId); }}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 transition-colors text-left"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+                      {(m.username ?? m.peerId)[0]?.toUpperCase() ?? '?'}
+                    </div>
+                    <span className="text-white text-sm">{m.username ? `@${m.username}` : m.peerId.slice(0, 12) + '…'}</span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="px-5 py-4 border-t border-slate-800">
+              <button
+                onClick={() => { void chooseAdminless(); }}
+                className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium transition-colors"
+              >
+                Make admin-less and leave
+              </button>
             </div>
           </div>
         </div>

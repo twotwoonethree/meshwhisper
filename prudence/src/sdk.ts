@@ -21,6 +21,7 @@ export async function initSDK(
     onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void;
     onGroupMemberLeft?: (groupId: string, peerId: string) => void;
     onGroupMemberAdded?: (groupId: string, peerId: string, addedBy: string) => void;
+    onGroupAdminChanged?: (groupId: string, newAdminId: string, changedBy: string) => void;
   },
   pushSubscription?: WebPushSubscription | null,
 ) {
@@ -38,6 +39,7 @@ export async function initSDK(
     ...(handlers.onGroupInvite ? { onGroupInvite: handlers.onGroupInvite } : {}),
     ...(handlers.onGroupMemberLeft ? { onGroupMemberLeft: handlers.onGroupMemberLeft } : {}),
     ...(handlers.onGroupMemberAdded ? { onGroupMemberAdded: handlers.onGroupMemberAdded } : {}),
+    ...(handlers.onGroupAdminChanged ? { onGroupAdminChanged: handlers.onGroupAdminChanged } : {}),
   });
   return instance;
 }

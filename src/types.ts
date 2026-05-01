@@ -372,6 +372,15 @@ export interface MeshWhisperConfig {
    * sending pairwise messages to them works without further setup.
    */
   onGroupMemberAdded?: (groupId: string, peerId: string, addedBy: string) => void;
+
+  /**
+   * Fires when the admin of a group transfers their role or makes the
+   * group adminless. `newAdminId === ''` means the group is now adminless
+   * (any current member can add new members). Also fires implicitly when
+   * the admin leaves without an explicit transfer — in that case
+   * `changedBy` is the leaver and `newAdminId` is `''`.
+   */
+  onGroupAdminChanged?: (groupId: string, newAdminId: string, changedBy: string) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

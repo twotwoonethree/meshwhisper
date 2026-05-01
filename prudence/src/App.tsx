@@ -468,6 +468,7 @@ export default function App() {
         onGroupInvite: handleGroupInvite,
         onGroupMemberLeft: handleGroupMemberLeft,
         onGroupMemberAdded: handleGroupMemberAdded,
+        onGroupAdminChanged: handleGroupAdminChanged,
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
@@ -865,6 +866,77 @@ export default function App() {
     });
   }
 
+  async function handleTransferGroupAdmin(groupId: string, newAdminId: string) {
+    const handle = MeshWhisper.getGroup(groupId);
+    if (!handle) return;
+    try {
+      await handle.transferAdmin(newAdminId);
+    } catch (err) {
+      console.error('[group transfer admin] failed:', err);
+      return;
+    }
+    // Mirror the change locally and inject a system message.
+    const newAdminName = newAdminId === ''
+      ? null
+      : (getContactName(newAdminId)
+        ?? (await MeshWhisper.resolveUsername(newAdminId).catch(() => undefined))
+        ?? (newAdminId.slice(0, 8) + '…'));
+    const text = newAdminId === ''
+      ? 'The group is now admin-less'
+      : `@${newAdminName} is now the admin`;
+    const systemMsg: AppMessage = {
+      id: crypto.randomUUID(),
+      conversationId: groupId,
+      text,
+      timestamp: Date.now(),
+      direction: 'outbound',
+      status: 'delivered',
+    };
+    setState((prev) => ({
+      ...prev,
+      messages: {
+        ...prev.messages,
+        [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+      },
+    }));
+  }
+
+  // Fires when the admin transfers admin or makes the group adminless.
+  // The SDK has updated treeRoot already; we surface a system message.
+  const handleGroupAdminChanged = useCallback((groupId: string, newAdminId: string, changedBy: string) => {
+    void (async () => {
+      let changedByName = getContactName(changedBy);
+      if (!changedByName) {
+        changedByName = (await MeshWhisper.resolveUsername(changedBy).catch(() => undefined))
+          ?? (changedBy.slice(0, 8) + '…');
+      }
+      let newAdminName: string | null = null;
+      if (newAdminId !== '') {
+        newAdminName = getContactName(newAdminId)
+          ?? (await MeshWhisper.resolveUsername(newAdminId).catch(() => undefined))
+          ?? (newAdminId.slice(0, 8) + '…');
+      }
+      const text = newAdminId === ''
+        ? `@${changedByName} made the group admin-less`
+        : `@${changedByName} made @${newAdminName} the admin`;
+      const systemMsg: AppMessage = {
+        id: crypto.randomUUID(),
+        conversationId: groupId,
+        text,
+        timestamp: Date.now(),
+        direction: 'inbound',
+        status: 'delivered',
+      };
+      setState((prev) => ({
+        ...prev,
+        messages: {
+          ...prev.messages,
+          [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+        },
+      }));
+    })();
+  }, []);
+
   async function handleAcceptGroupInvite(groupId: string) {
     const inv = state.pendingGroupInvites.find((i) => i.groupId === groupId);
     if (!inv) return;
@@ -1098,11 +1170,19 @@ export default function App() {
           <Thread
             contact={activeConv.contact}
             group={activeConv.group}
+            localPeerId={MeshWhisper.getLocalPeerId()}
             isGroupAdmin={
               !!activeConv.group &&
               (() => {
                 const sdkGroup = MeshWhisper.getGroup(activeConv.id)?.group;
                 return sdkGroup?.treeRoot === MeshWhisper.getLocalPeerId();
+              })()
+            }
+            isAdminless={
+              !!activeConv.group &&
+              (() => {
+                const sdkGroup = MeshWhisper.getGroup(activeConv.id)?.group;
+                return sdkGroup?.treeRoot === '';
               })()
             }
             addableContacts={
@@ -1119,6 +1199,7 @@ export default function App() {
             onSend={(text) => handleSend(activeConv.id, text)}
             onRemove={() => handleRemoveContact(activeConv.id)}
             onAddMember={activeConv.group ? (peerId) => handleAddGroupMember(activeConv.id, peerId) : undefined}
+            onTransferAdmin={activeConv.group ? (newAdminId) => handleTransferGroupAdmin(activeConv.id, newAdminId) : undefined}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
           />
