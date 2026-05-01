@@ -103,3 +103,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 - All tests must pass (`npm test`)
 - Type check must be clean (`npx tsc --noEmit`)
 - Add or update tests for any changed behaviour
+
+## Maintaining the changelog
+
+PRs that change developer-facing behaviour should add a bullet under the `[Unreleased]` section of `CHANGELOG.md` in the appropriate subsection (`Added`, `Changed`, `Fixed`, `Security`, `Removed`, or `Deprecated`). Keep entries terse and action-first — one line each, written for someone using the SDK or running their own relay. Internal refactors, doc-only changes, and test infrastructure don't need entries. On release, the maintainer moves `[Unreleased]` under a new dated version heading and starts a fresh `[Unreleased]` block.
