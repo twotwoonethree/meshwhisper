@@ -20,3 +20,6 @@ docs/*.toc
 
 # Windows download metadata
 *:Zone.Identifier
+
+# Playwright
+e2e/screenshots/

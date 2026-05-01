@@ -423,9 +423,13 @@ export class SessionManager {
       .replace(/^wss:\/\//, 'https://')
       .replace(/^ws:\/\//, 'http://');
 
-    const param = query.startsWith('@') ? 'username' : 'publicKey';
+    const isUsername = query.startsWith('@');
+    const param = isUsername ? 'username' : 'publicKey';
+    // Strip the leading '@' for the wire query — the relay's validateUsername
+    // requires a bare `[a-z0-9_-]{3,30}` and rejects '@' with a 400.
+    const value = isUsername ? query.slice(1) : query;
     const res = await fetch(
-      `${httpUrl}/directory?namespace=${encodeURIComponent(this.namespace)}&${param}=${encodeURIComponent(query)}`,
+      `${httpUrl}/directory?namespace=${encodeURIComponent(this.namespace)}&${param}=${encodeURIComponent(value)}`,
     );
     if (!res.ok) return null;
 
