@@ -111,6 +111,10 @@ export async function newPersistentUser(label: string, profileDir: string): Prom
   });
   const page = context.pages()[0] ?? await context.newPage();
   attachLogging(page, label);
+  // Navigate so the page is in a known state. Subsequent `register` will
+  // navigate again, but this lets a relaunch (where storage is preserved)
+  // resume on Prudence directly.
+  await page.goto(PRUDENCE_URL, { waitUntil: 'domcontentloaded' });
   // launchPersistentContext returns a context whose .browser() is null;
   // wrap so closeAll/relaunch can still tear it down.
   const browserShim = { close: () => context.close() } as unknown as Browser;

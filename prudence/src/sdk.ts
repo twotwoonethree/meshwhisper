@@ -4,7 +4,10 @@ import { idbStorage } from './storage.ts';
 import type { WebPushSubscription } from './push.ts';
 
 export const NAMESPACE = 'org.meshwhisper.prudence';
-export const NODE = 'wss://relay.meshwhisper.org';
+// Relay URL is configurable via the VITE_RELAY_URL env var so e2e tests
+// (and dev contributors) can point at a local relay without forking.
+// In production builds this falls back to the Foundation relay.
+export const NODE = (import.meta.env.VITE_RELAY_URL as string | undefined) ?? 'wss://relay.meshwhisper.org';
 
 let instance: MeshWhisper | null = null;
 

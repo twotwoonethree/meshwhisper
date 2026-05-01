@@ -521,14 +521,22 @@ export class SessionManager {
   // ----------------------------------------------------------------
 
   /**
-   * Ensures a Double Ratchet session exists with `recipientId` and is
-   * capable of sending. If no session exists, or the existing session is
-   * stuck in receive-only mode (no sending chain yet), initiates X3DH.
-   * Throws if no bundle is available.
+   * Ensures a Double Ratchet session exists with `recipientId`.
+   * If no session exists at all, initiates X3DH from a cached or
+   * directory-fetched bundle. If a session exists — even a fresh
+   * receiver session that hasn't yet received its first inbound
+   * ratchet message — we leave it alone. Auto-reinitiating in that
+   * window causes a session ping-pong: an internal `sendControl`
+   * (e.g. entropy_challenge fired by onContactEstablished) on a
+   * just-created receiver session would trigger a fresh x3dh_init
+   * back at the original sender, who would then overwrite their
+   * sender session, who would then auto-reinitiate, etc. The
+   * `handshake_activate` ratchet message that initiateHandshake now
+   * sends covers the original "stuck receiver-only" concern.
+   * Recovery from genuinely-stuck states is via addContactByKey.
    */
   async ensureSession(recipientId: string): Promise<void> {
-    const existing = this.sessions.get(recipientId);
-    if (existing && existing.sendingChainKey !== null) return;
+    if (this.sessions.has(recipientId)) return;
 
     const cached = this.peerPreKeyBundles.get(recipientId);
     if (cached) {

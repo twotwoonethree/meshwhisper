@@ -162,6 +162,10 @@ export class MessageHandler {
       }
 
       if (!decrypted || !matchedPeerId) {
+        console.warn(
+          '[meshwhisper] decrypt failed for inbound packet — no session matched. ' +
+          `dhKey=${uint8ArrayToHex(header.dhPublicKey).slice(0, 16)}…`,
+        );
         this.onDecryptFailure?.();
         return;
       }
