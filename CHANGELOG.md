@@ -22,15 +22,17 @@ preserved in git history but not enumerated here.
 
 ### Changed
 
-- **Listen window 2h → 72h** to match the relay's default blob TTL. Fixes "got the push notification but the message never arrived" symptoms when a recipient reconnects more than two hours after a sender queued traffic for them.
+- **Blob TTL and listen window 72h → 30 days.** The relay queues unredeemed blobs for up to 30 days (`BLOB_TTL_HOURS=720` default; override per deployment) and SDK clients ask for the full 30-day window of dest hashes on reconnect. Anyone offline for a long weekend or a holiday now comes back to a working inbox. Trade-off: the relay sees a coarser "this client has been away for at most 30 days" signal instead of "at most 72 hours." Live presence visibility is unchanged.
 - **Automatic `handshake_activate` after every outbound `x3dh_init`** — receivers no longer need a separate trigger to promote a freshly-handshaken session into the active state.
 
 ### Fixed
 
+- **Session ping-pong on first contact.** When Bob received Alice's `x3dh_init`, his SDK's auto-fired control messages (entropy challenge, reputation proof) ran through `ensureSession`, which auto-reinitiated his fresh receiver session and bounced an `x3dh_init` back at Alice — who then auto-reinitiated and bounced one back at Bob, etc. Real ratchet messages decrypt-failed silently on both sides until the conversation was unrecoverable. `ensureSession` no longer auto-reinitiates; recovery from genuinely stuck sessions is via `addContactByKey`, which is user-driven and explicit so it doesn't participate in the loop.
+- **`deleteConversation` now wipes in-memory ratchet state.** Previously it only deleted the persisted session in IDB, so the SDK kept using the stale (possibly corrupted) session in memory until the next reload. Re-adding a contact silently reused the bad state. Now removing and re-adding really does start fresh.
 - **Receive-only sessions can no longer get stuck.** A peer that has only ever received messages now correctly recovers an active session when it tries to send.
 - **Per-conversation keyed mutex** around storage read-modify-write paths. Concurrent sends and receives on the same conversation can no longer drop messages by clobbering each other's storage writes.
 - **Deliver messages queued at the relay regardless of reconnect timing.** Recipients now drain queued blobs on reconnect rather than only on the original delivery attempt.
 - **`lookupPreKeyBundle('@username')`** previously sent the literal `@username` to the relay, which rejected the directory query with HTTP 400. The `@` prefix is now stripped before the wire query.
-- **Belt-and-suspenders receiver-only check in `sendMessage`** to catch a residual case the session-recovery fix did not cover.
+- **Decrypt-failure path now logs** a `[meshwhisper] decrypt failed for inbound packet` warning instead of silently dropping. The next regression in this code path will surface in browser consoles and e2e tests immediately.
 
 [Unreleased]: https://github.com/twotwoonethree/meshwhisper/compare/main...HEAD
