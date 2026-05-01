@@ -531,6 +531,18 @@ export class SessionManager {
     return this.peerEdKeys.get(peerId) ?? null;
   }
 
+  /**
+   * Register an Ed25519 identity key for a peer we haven't met directly
+   * yet. Used by the group-invite acceptance flow so that fellow group
+   * members can be looked up in the relay directory and X3DH-handshaked
+   * on demand. Persisted so it survives restarts.
+   */
+  rememberPeerEdKey(peerId: string, edKey: Uint8Array): void {
+    if (this.peerEdKeys.has(peerId)) return; // don't overwrite a known good value
+    this.peerEdKeys.set(peerId, edKey);
+    this.storage?.set(`edkeys/${peerId}`, uint8ArrayToHex(edKey)).catch(() => {});
+  }
+
   getSignedPreKeyPair(): KeyPair | null {
     return this.signedPreKeyPair;
   }

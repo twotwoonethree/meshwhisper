@@ -337,42 +337,50 @@ export default function App() {
   // IDB-stored group state and inject a system message into the
   // conversation so the user sees "@alice left the group."
   const handleGroupMemberLeft = useCallback((groupId: string, peerId: string) => {
-    const leftName = getContactName(peerId) ?? peerId.slice(0, 8) + '…';
     void (async () => {
+      // Try to resolve the leaver's @username — local contact name first,
+      // relay directory as fallback. If both fail, show a truncated peer ID.
+      let leftName = getContactName(peerId);
+      if (!leftName) {
+        leftName = (await MeshWhisper.resolveUsername(peerId).catch(() => undefined))
+          ?? (peerId.slice(0, 8) + '…');
+        if (leftName && !leftName.includes('…')) saveContactName(peerId, leftName);
+      }
+
       const groups = await loadGroups();
       const stored = groups.find((g) => g.id === groupId);
       if (stored) {
         const updated = { ...stored, members: stored.members.filter((m) => m.peerId !== peerId) };
         await upsertGroup(updated).catch(() => {});
       }
-    })();
 
-    const systemMsg: AppMessage = {
-      id: crypto.randomUUID(),
-      conversationId: groupId,
-      text: `@${leftName} left the group`,
-      timestamp: Date.now(),
-      direction: 'inbound',
-      status: 'delivered',
-    };
-    setState((prev) => {
-      const conv = prev.conversations.find((c) => c.id === groupId);
-      if (!conv?.group) return prev;
-      const newGroup: GroupInfo = {
-        ...conv.group,
-        members: conv.group.members.filter((m) => m.peerId !== peerId),
+      const systemMsg: AppMessage = {
+        id: crypto.randomUUID(),
+        conversationId: groupId,
+        text: `@${leftName} left the group`,
+        timestamp: Date.now(),
+        direction: 'inbound',
+        status: 'delivered',
       };
-      return {
-        ...prev,
-        conversations: prev.conversations.map((c) =>
-          c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
-        ),
-        messages: {
-          ...prev.messages,
-          [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
-        },
-      };
-    });
+      setState((prev) => {
+        const conv = prev.conversations.find((c) => c.id === groupId);
+        if (!conv?.group) return prev;
+        const newGroup: GroupInfo = {
+          ...conv.group,
+          members: conv.group.members.filter((m) => m.peerId !== peerId),
+        };
+        return {
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
+          ),
+          messages: {
+            ...prev.messages,
+            [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+          },
+        };
+      });
+    })();
   }, []);
 
   const handleConnectionStatus = useCallback((status: 'connected' | 'disconnected') => {

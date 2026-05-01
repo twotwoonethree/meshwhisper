@@ -44,6 +44,16 @@ export interface GroupInvite {
   invitedBy: string;
   senderKeys: Map<string, Uint8Array>;
   members: string[];
+  /**
+   * Per-member Ed25519 identity keys, keyed by peer ID. Required so that
+   * accepting members can establish pairwise X3DH sessions with other
+   * group members they haven't met before — X3DH lookup needs the
+   * Ed25519 key, not just the X25519 routing key (= peer ID).
+   * Optional for backwards-compat with invites generated before this field
+   * existed; missing entries fall back to a relay directory lookup keyed
+   * by the X25519 conversion (which the SDK can derive itself when needed).
+   */
+  memberEdKeys?: Map<string, Uint8Array>;
 }
 
 /** Distribution message for a single sender key. */
@@ -277,9 +287,23 @@ export class GroupManager {
   }
 
   /**
-   * Removes a member from the group and triggers rotation of all sender keys
-   * to maintain forward secrecy — the removed member must not be able to
-   * decrypt future messages.
+   * Removes a member from the group. Each remaining member calls this
+   * locally on receipt of a group_leave (or group_kick) control message
+   * to keep their roster in sync.
+   *
+   * KNOWN LIMITATION — forward secrecy on member removal: a previous
+   * version of this method also called rotateAllSenderKeys to invalidate
+   * the leaver's keys. That rotation is local-only and was never
+   * distributed to the other remaining members, so every member ended
+   * up with a different "new" key and group messaging silently broke.
+   * The rotation is disabled here until proper key-distribution is
+   * implemented (each member rotates only their own key and broadcasts
+   * the new key to other current members via a future
+   * `group_sender_key_update` control message). Until then, a leaver
+   * who keeps a copy of the other members' sender keys can still
+   * decrypt traffic they intercept after leaving. The relay never
+   * sees plaintext, so this only matters against an adversary with
+   * separate wire-level intercept capability.
    */
   removeMember(groupId: string, peerId: string): void {
     const state = this.requireGroupState(groupId);
@@ -292,9 +316,6 @@ export class GroupManager {
     state.senderKeys.delete(peerId);
     state.keyIterations.delete(peerId);
     state.activity.delete(peerId);
-
-    // Rotate all remaining sender keys (Signal protocol requirement)
-    this.rotateAllSenderKeys(groupId);
 
     // Invalidate cached tree
     state.relayTree = null;

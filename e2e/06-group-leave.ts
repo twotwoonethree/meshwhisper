@@ -128,11 +128,13 @@ async function leaveGroup(user: TestUser) {
   await snap(alice, '06-alice-after-bob-left');
   await snap(carol, '06-carol-after-bob-left');
 
-  // Alice and carol should see a "left" system message.
-  const leftPattern = `@${bob.username} left the group`;
+  // Alice and carol should see a "left" system message. We match on the
+  // "left the group" suffix rather than the exact @username because the
+  // recipient may not have the leaver as a saved contact and the
+  // username resolution is best-effort.
   for (const u of [alice, carol]) {
     try {
-      await waitForMessage(u, leftPattern, 15_000);
+      await waitForMessage(u, 'left the group', 15_000);
       console.log(`  ✓ ${u.label} saw the leave system message`);
     } catch {
       console.log(`  ✗ ${u.label} did NOT see the leave system message`);
@@ -150,8 +152,8 @@ async function leaveGroup(user: TestUser) {
   }
 
   // Final messages from Alice should still reach Carol but NOT Bob.
+  // Alice is already in the group conversation, so we don't re-click.
   console.log('--- alice sends one more after bob left ---');
-  await openGroup(alice, groupName);
   await sendMessage(alice, 'after bob left');
   try {
     await waitForMessage(carol, 'after bob left', 15_000);

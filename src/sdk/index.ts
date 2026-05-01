@@ -788,6 +788,16 @@ export class MeshWhisper {
       const key = this.groupManager.getSenderKey(group.id, m.id);
       if (key) senderKeysRecord[m.id] = Array.from(key);
     }
+    // Include per-member Ed25519 identity keys so that accepting members
+    // can open X3DH sessions with one another. Without this, non-creator
+    // members can't message each other — they only have peerIds (X25519)
+    // but X3DH directory lookup needs Ed25519 keys.
+    const memberEdKeysRecord: Record<string, number[]> = {};
+    for (const m of members) {
+      if (m.id === this.getLocalPeerId()) continue;
+      const edKey = this.sessionManager.getPeerEdKey(m.id);
+      if (edKey) memberEdKeysRecord[m.id] = Array.from(edKey);
+    }
     for (const m of members) {
       if (m.id === this.getLocalPeerId()) continue;
       this.sendControl(m.id, {
@@ -798,6 +808,7 @@ export class MeshWhisper {
           invitedBy: this.getLocalPeerId(),
           members: members.map((mem) => mem.id),
           senderKeys: senderKeysRecord,
+          memberEdKeys: memberEdKeysRecord,
         },
       });
     }
@@ -910,6 +921,26 @@ export class MeshWhisper {
     const invite = this.pendingGroupInvites.get(groupId);
     if (!invite) throw new Error(`No pending invite for group ${groupId}`);
     this.groupManager.joinGroup(groupId, invite);
+
+    // Register each fellow member's Ed25519 key + peerCache entry so we
+    // can establish pairwise X3DH sessions with them when we go to send
+    // a group message. Without this, send-to-fellow-non-creator fails:
+    // we have only the X25519 routing key (= peerId) and no edKey, so
+    // the directory lookup that drives X3DH handshake init has nothing
+    // to query with.
+    const me = this.getLocalPeerId();
+    if (invite.memberEdKeys) {
+      for (const [memberId, edKey] of invite.memberEdKeys) {
+        if (memberId === me) continue;
+        this.sessionManager.rememberPeerEdKey(memberId, edKey);
+        // peerCache is keyed by peerId (which IS the X25519 hex public key).
+        if (!this.peerCache.getPeerPublicKey(memberId)) {
+          this.peerCache.addPeer(memberId, hexToUint8Array(memberId));
+        }
+        this.storage?.set(`peers/${memberId}`, memberId).catch(() => {});
+      }
+    }
+
     this.pendingGroupInvites.delete(groupId);
   }
 
@@ -1795,12 +1826,19 @@ export class MeshWhisper {
         for (const [id, arr] of Object.entries(inv.senderKeys)) {
           senderKeys.set(id, new Uint8Array(arr));
         }
+        const memberEdKeys = new Map<string, Uint8Array>();
+        if (inv.memberEdKeys) {
+          for (const [id, arr] of Object.entries(inv.memberEdKeys)) {
+            memberEdKeys.set(id, new Uint8Array(arr));
+          }
+        }
         const invite: import('../group/index.js').GroupInvite = {
           groupId: inv.groupId,
           groupName: inv.groupName,
           invitedBy: inv.invitedBy,
           senderKeys,
           members: inv.members,
+          memberEdKeys,
         };
         this.pendingGroupInvites.set(inv.groupId, invite);
         this.onGroupInviteHandler?.(inv.groupId, inv.groupName, inv.invitedBy, inv.members)

@@ -142,6 +142,8 @@ export interface ControlMessage {
     invitedBy: string;
     members: string[];
     senderKeys: Record<string, number[]>;
+    /** Per-member Ed25519 keys; needed for X3DH lookup between non-creator members. */
+    memberEdKeys?: Record<string, number[]>;
   };
 }
 
