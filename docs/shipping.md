@@ -177,6 +177,45 @@ The push service can be deployed as a sidecar container alongside the Node, or a
 
 ---
 
+### 1.5 Encrypted push payloads (rich notifications)
+
+**The problem**
+
+The current push pipeline is intentionally content-blind: when a blob arrives for an offline device, the relay fires a wake-only webhook and the receiver's service worker shows a generic "You have a new message" notification. Mobile users opening their phones see no sender name and no message preview, which is a noticeable UX deficit compared to WhatsApp / Signal / iMessage.
+
+The reason is structural — neither the relay, the push service, nor the SW has the ratchet keys to decrypt anything. So the foreground tier (Phase 1.5 partial — already shipped: in-app rich notifications when Prudence is open in any tab) covers the case where the app is loaded, but the closed-app case still falls back to the generic notification.
+
+**What to build**
+
+The standard pattern (this is how WhatsApp does it): the encrypted blob rides inside the Web Push payload, not stored at the relay for later fetch.
+
+1. **Relay** — the existing push webhook payload changes from `{ destHash, push }` to `{ destHash, push, blob }` where `blob` is the base64-encoded ratchet-encrypted packet. The relay already has it (`storeBlob` just stored it); now it forwards it.
+2. **Push service** — when dispatching the Web Push, include the blob in the payload. Web Push payloads are encrypted on the wire by the browser's push subscription keys and are limited to ~3-4 KB after that envelope, so most text messages fit. Media messages degrade gracefully to a generic notification.
+3. **Service worker** — receives the push with ciphertext, reads the relevant ratchet state from IDB, runs the decrypt, then calls `showNotification()` with the actual sender + message preview.
+
+The SW will need a stripped-down subset of the SDK in its bundle — at minimum the ratchet decrypt path, the storage helpers for reading sessions, and the seen-message dedup. Most of the SDK doesn't need to ship; we only need decrypt-and-display, not send/connect/handshake.
+
+**Privacy delta**
+
+The push service currently sees only the recipient's destHash. After this change it would also see ratchet-encrypted blob bytes. The push service still cannot read content (the blob is encrypted with the recipient's session key) but it gains visibility into message *sizes*. This is a small leak relative to the metadata the relay already handles. Web Push's wire encryption protects against passive observers between the push service and the device.
+
+APNs / FCM payloads have the same property — the encrypted blob is opaque to Apple / Google.
+
+**What it does not solve**
+
+- Group messages: the SW would need to also have the group sender keys and the inner-decrypt path. Doable but adds bundle weight. The first iteration can fall back to "Bob sent a message in #group" without the content.
+- Media: pointer messages decrypt fine, but the actual media file is fetched separately. Notification body becomes "Photo" or "File" — same as WhatsApp.
+- Push retention: APNs/FCM may drop background pushes if the device has been offline a long time. The 30-day blob queue covers the recipient eventually opening the app and draining via WebSocket.
+
+**Dependencies**
+
+- 1.4 (push pipeline exists) — done.
+- The decrypt-in-SW work needs the SDK's ratchet code to be bundleable into a worker context. Currently the SDK has imports that assume browser globals. Some modules pull in things like `Buffer` polyfills that need to either be available in the SW or replaced.
+
+**Complexity:** medium-high. The cryptographic plumbing is well-understood. The complexity is in keeping the SW bundle small and making the decrypt path robust across edge cases (out-of-order delivery, missed-but-then-arriving messages, ratchet step skips).
+
+---
+
 ## Phase 2 — Make it feel complete
 
 These are visible gaps that users notice within the first day. None of them break the app; all of them make it feel unfinished.

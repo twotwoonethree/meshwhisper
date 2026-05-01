@@ -9,6 +9,7 @@ import { saveContactName, getContactName, getAllContactNames, removeContactName 
 import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as getAllAccepted, restoreAll as restoreAccepted } from './accepted-contacts.ts';
 import { loadGroups, upsertGroup } from './group-storage.ts';
 import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
+import { showMessageNotification } from './notifications.ts';
 import type { AppState, AppMessage, AppMessageMedia, Conversation, Contact, GroupInfo } from './types.ts';
 import Onboarding from './components/Onboarding.tsx';
 import Login from './components/Login.tsx';
@@ -111,6 +112,23 @@ export default function App() {
     }, 5_000);
   }
 
+  // When a notification is clicked, navigate to that conversation.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ conversationId?: string }>).detail;
+      if (!detail?.conversationId) return;
+      setState((prev) => ({
+        ...prev,
+        activeConversationId: detail.conversationId!,
+        conversations: prev.conversations.map((c) =>
+          c.id === detail.conversationId ? { ...c, unread: 0 } : c,
+        ),
+      }));
+    };
+    document.addEventListener('prudence:openConversation', handler);
+    return () => document.removeEventListener('prudence:openConversation', handler);
+  }, []);
+
   useEffect(() => {
     const u = localStorage.getItem(USERNAME_KEY);
     if (!u) {
@@ -196,6 +214,17 @@ export default function App() {
           ? prev.conversations.map((c) => (c.id === conversationId ? updatedConv : c))
           : [updatedConv, ...prev.conversations];
         conversations.sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0));
+        const isActiveAndVisible = isActive && document.visibilityState === 'visible' && document.hasFocus();
+        const senderLabel = isGroup
+          ? (existingConv?.contact.displayName ?? '@group')
+          : (`@${contact.username ?? contact.peerId.slice(0, 8)}`);
+        showMessageNotification({
+          title: senderLabel,
+          body: mediaMsg.text,
+          conversationId,
+          timestamp: mediaMsg.timestamp,
+          suppressBecauseActive: isActiveAndVisible,
+        });
         return { ...prev, conversations, messages: { ...prev.messages, [conversationId]: [...(prev.messages[conversationId] ?? []), mediaMsg] } };
       });
       return;
@@ -230,6 +259,18 @@ export default function App() {
       conversations.sort((a, b) =>
         (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0),
       );
+
+      const isActiveAndVisible = isActive && document.visibilityState === 'visible' && document.hasFocus();
+      const senderLabel = isGroup && msg.groupSenderId
+        ? `${senderDisplayName(msg.groupSenderId)} · ${existingConv?.contact.displayName ?? 'group'}`
+        : `@${contact.username ?? contact.peerId.slice(0, 8)}`;
+      showMessageNotification({
+        title: senderLabel,
+        body: appMsg.text,
+        conversationId,
+        timestamp: appMsg.timestamp,
+        suppressBecauseActive: isActiveAndVisible,
+      });
 
       return {
         ...prev,
