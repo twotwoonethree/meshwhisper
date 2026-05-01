@@ -684,6 +684,11 @@ export default function App() {
         await handle.leave().catch((e) => console.error('[group leave] broadcast failed:', e));
       }
       await removeStoredGroup(peerId).catch(() => {});
+      // Wipe `messages/{groupId}` from SDK storage too. Without this, the
+      // next boot's getConversations() finds the orphan key, can't match
+      // it to a known group (we just removed it), and surfaces it as a
+      // DM-shaped conversation with a truncated peer-ID title.
+      await sdk.deleteConversationInstance(peerId).catch(console.error);
     } else if (sdk) {
       await sdk.deleteConversationInstance(peerId).catch(console.error);
       removeContactName(peerId);
