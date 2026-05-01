@@ -244,7 +244,15 @@ export default function Thread({ contact, group, messages, isTyping, onBack, onS
         {messages.map((msg, i) => {
           const isOut = msg.direction === 'outbound';
           const prev = messages[i - 1];
-          const grouped = prev?.direction === msg.direction && msg.timestamp - prev.timestamp < 60_000;
+          // "Grouped" means the message visually attaches to the previous one
+          // (no name label, tighter spacing). It must be the SAME sender —
+          // otherwise two different group members messaging back-to-back
+          // appear as a single user's burst.
+          const grouped =
+            prev?.direction === msg.direction &&
+            msg.timestamp - prev.timestamp < 60_000 &&
+            // For inbound: same group senderId. For DMs both have undefined senderId, which is fine — same conversation peer.
+            prev.senderId === msg.senderId;
           const hasMedia = !!msg.media;
           const isImage = hasMedia && isImageMime(msg.media!.mimeType);
 
