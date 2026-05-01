@@ -1818,8 +1818,19 @@ export class MeshWhisper {
    * Regenerates our relay reputation proof from the current ledger state
    * and sends it to all contacts we have sessions with.
    */
-  /** Resolves a peer's registered username from the relay directory, or undefined. */
-  private async resolveUsername(peerId: string): Promise<string | undefined> {
+  /**
+   * Looks up a peer's username from the relay directory by their peer ID.
+   * Returns undefined if the peer hasn't registered a username, or if the
+   * directory lookup fails. Useful for backfilling display names when the
+   * application-level handshake message that originally carried the
+   * username never arrived.
+   */
+  static async resolveUsername(peerId: string): Promise<string | undefined> {
+    return MeshWhisper.instance.resolveUsername(peerId);
+  }
+
+  async resolveUsername(peerId: string): Promise<string | undefined> {
+    this.assertRunning();
     const edKey = this.sessionManager.getPeerEdKey(peerId);
     if (!edKey) return undefined;
     const result = await this.sessionManager.lookupPreKeyBundle(uint8ArrayToHex(edKey));
@@ -1927,10 +1938,18 @@ export class MeshWhisper {
     const xPub = this.identity.getPublicKey();
     const nsId = this.namespaceManager.getNamespaceId();
     const hour = getCurrentEpochHour();
-    return [
-      uint8ArrayToHex(deriveDestHash(nsId, xPub, hour)),
-      uint8ArrayToHex(deriveDestHash(nsId, xPub, hour - 1)),
-    ];
+    // Listen on a 72-hour window (matching the relay's default blob TTL).
+    // Without this, hourly destHash rotation causes "push notification but
+    // no message" symptoms: a blob queued at hour H is stored under
+    // destHash(H), but a recipient reconnecting at H+2 only asks for
+    // destHash(H+1) and destHash(H+2). The blob is stranded in the relay
+    // until TTL expiry. Listening on the full TTL window means anything
+    // the relay still has stored, we will receive.
+    const hashes: string[] = [];
+    for (let i = 0; i < 72; i++) {
+      hashes.push(uint8ArrayToHex(deriveDestHash(nsId, xPub, hour - i)));
+    }
+    return hashes;
   }
 
   // ================================================================

@@ -371,6 +371,26 @@ export default function App() {
 
         const appConvs = [...dmConvs, ...groupConvs];
         setState((prev) => ({ ...prev, conversations: appConvs }));
+
+        // Backfill display names for any DM whose peer doesn't have a
+        // saved contactName. This heals conversations whose original
+        // prudence_contact_request follow-up was lost — the relay
+        // directory still knows the peer's @name.
+        for (const conv of dmConvs) {
+          if (conv.contact.username) continue;
+          void MeshWhisper.resolveUsername(conv.contact.peerId).then((username) => {
+            if (!username || cancelled) return;
+            saveContactName(conv.contact.peerId, username);
+            setState((prev) => ({
+              ...prev,
+              conversations: prev.conversations.map((c) =>
+                c.id === conv.contact.peerId
+                  ? { ...c, contact: { ...c.contact, username, displayName: username } }
+                  : c,
+              ),
+            }));
+          }).catch(() => {});
+        }
         convs.forEach(async (c: SDKConversation) => {
           const msgs = await sdk.getMessagesInstance(c.peerId);
           if (!msgs || cancelled) return;
@@ -544,6 +564,25 @@ export default function App() {
       ],
     }));
     scheduleArchiveSync(getSDK());
+
+    // If we still don't have a username, the prudence_contact_request
+    // follow-up never arrived. Look up the relay directory by peer ID
+    // as a fallback so the conversation isn't stuck displaying the
+    // truncated peer ID instead of their @name.
+    if (!resolvedUsername) {
+      void MeshWhisper.resolveUsername(peerId).then((username) => {
+        if (!username) return;
+        saveContactName(peerId, username);
+        setState((prev) => ({
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === peerId
+              ? { ...c, contact: { ...c.contact, username, displayName: username } }
+              : c,
+          ),
+        }));
+      }).catch(() => {});
+    }
   }
 
   async function handleRemoveContact(peerId: string) {
