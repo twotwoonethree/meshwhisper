@@ -26,7 +26,12 @@ export interface ArchivePayload {
 }
 
 // Storage key prefixes / names to include in the archive.
-const ARCHIVE_PREFIXES = ['peers/', 'messages/'];
+//   peers/    — X25519 routing keys
+//   edkeys/   — Ed25519 identity keys, needed so a fresh device can fetch a
+//               contact's prekey bundle from the relay directory and re-
+//               handshake without the user re-adding contacts manually
+//   messages/ — full per-conversation message history
+const ARCHIVE_PREFIXES = ['peers/', 'edkeys/', 'messages/'];
 const ARCHIVE_SINGLE_KEYS = ['contacts', 'seen_ids', 'blocked'];
 
 // Maximum archive size we'll attempt to upload (10 MB plaintext).

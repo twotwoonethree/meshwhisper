@@ -322,17 +322,37 @@ export class SessionManager {
 
 
   /**
-   * Re-initiates X3DH sessions with all contacts whose prekey bundles are saved.
-   * Called on startup when session state is missing — handles storage wipe /
-   * new-device-with-same-identity-key scenarios.
+   * Re-initiates X3DH sessions with all contacts whose prekey bundles or
+   * Ed25519 identity keys are known. Called on startup when session state
+   * is missing — handles storage wipe / new-device-with-same-identity-key
+   * scenarios. After a fresh-device archive restore, contacts and edKeys
+   * are present but bundles aren't (bundles are short-lived, not archived);
+   * we fetch the bundle from the relay directory using the cached edKey,
+   * then handshake.
    */
   async reinitiateSessionsOnStartup(contacts: string[]): Promise<void> {
     for (const contactId of contacts) {
       // Skip if we already have an active session — avoids both sides
       // simultaneously re-handshaking on restart (double-handshake race).
       if (this.sessions.has(contactId)) continue;
-      const bundle = this.peerPreKeyBundles.get(contactId);
-      if (!bundle) continue;
+
+      let bundle = this.peerPreKeyBundles.get(contactId);
+      if (!bundle) {
+        // No cached bundle — try the relay directory by Ed25519 key.
+        // This is the post-archive-restore path: edkeys/* are in the
+        // archive, bundles are not, so we must refetch.
+        const edKey = this.peerEdKeys.get(contactId);
+        if (!edKey) continue;
+        try {
+          const fresh = await this.lookupPreKeyBundle(uint8ArrayToHex(edKey));
+          if (!fresh) continue;
+          this.setBundle(contactId, fresh.bundle);
+          bundle = fresh.bundle;
+        } catch {
+          continue;
+        }
+      }
+
       try {
         await this.initiateHandshake(contactId, bundle);
       } catch {

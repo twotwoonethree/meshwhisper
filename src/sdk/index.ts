@@ -1445,6 +1445,17 @@ export class MeshWhisper {
       this.messageHandler.storageMutex.run(key, fn),
     );
     await this.loadPersistedState();
+
+    // Fresh-device-after-archive-restore scenario: we now have contacts and
+    // their edKeys but no Double Ratchet sessions (sessions are excluded from
+    // archive for forward secrecy). Trigger a re-handshake on every contact
+    // so that incoming messages from those peers can actually be decrypted.
+    // Without this step, the new device silently drops every inbound
+    // ratchet message until the user manually re-adds each contact.
+    const contacts = this.permissionManager.getContacts();
+    if (contacts.length > 0) {
+      this.sessionManager.reinitiateSessionsOnStartup(contacts).catch(() => {});
+    }
     return { extra: payload.extra };
   }
 
