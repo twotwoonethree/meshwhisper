@@ -37,10 +37,9 @@ export async function newUser(label: string): Promise<TestUser> {
 function attachLogging(page: Page, label: string) {
   page.on('console', (msg) => {
     const text = msg.text();
-    // Surface only relevant signal: errors/warnings, Prudence's [prudence]
-    // logs, and explicit [addContact]/[accept] traces. Filter the spammy
-    // 404 (icon misses) so they don't drown out the real signal.
     if (text.includes('404') || text.includes('Failed to load resource')) return;
+    // Surface errors/warnings, Prudence's [prudence] / [addContact] / [accept] /
+    // [group ...] traces, and any console message tagged with our prefix.
     if (msg.type() === 'error' || msg.type() === 'warning' || /^\[/.test(text)) {
       console.log(`[${label}] ${msg.type()}: ${text}`);
     }
@@ -126,6 +125,49 @@ export async function waitForReady(user: TestUser, timeout = 30_000): Promise<vo
   await user.page.waitForSelector('text=/No conversations yet|@/i', { timeout });
   // Give the SDK a beat to flush any queued state.
   await user.page.waitForTimeout(1500);
+}
+
+/**
+ * Simulate the user pressing "Switch account" — clears the username
+ * key from localStorage and reloads. The next render shows Onboarding.
+ * IDB is preserved (per-user database), so the same user signing back
+ * in keeps their local data; a different user goes to a fresh IDB.
+ */
+export async function signOut(user: TestUser): Promise<void> {
+  await user.page.evaluate(() => {
+    localStorage.removeItem('prudence:username');
+    sessionStorage.clear();
+  });
+  await user.page.reload({ waitUntil: 'domcontentloaded' });
+  await user.page.waitForTimeout(2500);
+}
+
+/**
+ * Sign in on the current page (same browser context, same persistent
+ * profile). Use after `signOut`. Goes through the Onboarding "Sign in"
+ * tab. If the same identity was used before, IDB is reopened; if not,
+ * a new per-username IDB is created.
+ */
+export async function signInOnSamePage(user: TestUser, username: string, password: string): Promise<void> {
+  user.username = username;
+  user.password = password;
+  // Switch to "Sign in" tab. The tabs are <button type="button">.
+  await user.page.locator('button[type="button"]:has-text("Sign in")').first().click();
+  await user.page.locator('input[autocomplete="username"]').fill(username);
+  await user.page.locator('input[autocomplete="current-password"]').fill(password);
+  await user.page.locator('button[type="submit"]:has-text("Sign in")').click();
+  await user.page.waitForTimeout(4000); // SDK init + archive pull
+}
+
+/**
+ * Open a fresh browser profile (different "device") and sign in with
+ * an existing account's credentials. Archive restore should hydrate
+ * conversations, contacts, and message history.
+ */
+export async function newDeviceSignedIn(label: string, profileDir: string, username: string, password: string): Promise<TestUser> {
+  const user = await newPersistentUser(label, profileDir);
+  await signInOnSamePage(user, username, password);
+  return user;
 }
 
 export async function snap(user: TestUser, name: string): Promise<void> {
