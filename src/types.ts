@@ -381,6 +381,20 @@ export interface MeshWhisperConfig {
    * `changedBy` is the leaver and `newAdminId` is `''`.
    */
   onGroupAdminChanged?: (groupId: string, newAdminId: string, changedBy: string) => void;
+
+  /**
+   * Fires on remaining members when the admin kicks someone. The peer
+   * has already been removed from the local roster by the time this
+   * fires.
+   */
+  onGroupMemberKicked?: (groupId: string, peerId: string, kickedBy: string) => void;
+
+  /**
+   * Fires on the local user when *they* are kicked from a group.
+   * Local group state has already been wiped — the application should
+   * remove the conversation from its UI and surface a notification.
+   */
+  onKickedFromGroup?: (groupId: string, kickedBy: string) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

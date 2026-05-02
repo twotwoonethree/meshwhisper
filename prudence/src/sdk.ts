@@ -22,6 +22,8 @@ export async function initSDK(
     onGroupMemberLeft?: (groupId: string, peerId: string) => void;
     onGroupMemberAdded?: (groupId: string, peerId: string, addedBy: string) => void;
     onGroupAdminChanged?: (groupId: string, newAdminId: string, changedBy: string) => void;
+    onGroupMemberKicked?: (groupId: string, peerId: string, kickedBy: string) => void;
+    onKickedFromGroup?: (groupId: string, kickedBy: string) => void;
   },
   pushSubscription?: WebPushSubscription | null,
 ) {
@@ -40,6 +42,8 @@ export async function initSDK(
     ...(handlers.onGroupMemberLeft ? { onGroupMemberLeft: handlers.onGroupMemberLeft } : {}),
     ...(handlers.onGroupMemberAdded ? { onGroupMemberAdded: handlers.onGroupMemberAdded } : {}),
     ...(handlers.onGroupAdminChanged ? { onGroupAdminChanged: handlers.onGroupAdminChanged } : {}),
+    ...(handlers.onGroupMemberKicked ? { onGroupMemberKicked: handlers.onGroupMemberKicked } : {}),
+    ...(handlers.onKickedFromGroup ? { onKickedFromGroup: handlers.onKickedFromGroup } : {}),
   });
   return instance;
 }

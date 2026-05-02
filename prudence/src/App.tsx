@@ -469,6 +469,8 @@ export default function App() {
         onGroupMemberLeft: handleGroupMemberLeft,
         onGroupMemberAdded: handleGroupMemberAdded,
         onGroupAdminChanged: handleGroupAdminChanged,
+        onGroupMemberKicked: handleGroupMemberKicked,
+        onKickedFromGroup: handleKickedFromGroup,
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
@@ -866,6 +868,133 @@ export default function App() {
     });
   }
 
+  async function handleKickGroupMember(groupId: string, peerId: string) {
+    const handle = MeshWhisper.getGroup(groupId);
+    if (!handle) return;
+    try {
+      await handle.kickMember(peerId);
+    } catch (err) {
+      console.error('[group kick] failed:', err);
+      return;
+    }
+    const kickedName = getContactName(peerId)
+      ?? (await MeshWhisper.resolveUsername(peerId).catch(() => undefined))
+      ?? (peerId.slice(0, 8) + '…');
+    const systemMsg: AppMessage = {
+      id: crypto.randomUUID(),
+      conversationId: groupId,
+      text: `You removed @${kickedName}`,
+      timestamp: Date.now(),
+      direction: 'outbound',
+      status: 'delivered',
+    };
+    const groups = await loadGroups();
+    const stored = groups.find((g) => g.id === groupId);
+    if (stored) {
+      await upsertGroup({ ...stored, members: stored.members.filter((m) => m.peerId !== peerId) }).catch(() => {});
+    }
+    setState((prev) => {
+      const conv = prev.conversations.find((c) => c.id === groupId);
+      if (!conv?.group) return prev;
+      const newGroup: GroupInfo = {
+        ...conv.group,
+        members: conv.group.members.filter((m) => m.peerId !== peerId),
+      };
+      return {
+        ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
+        ),
+        messages: {
+          ...prev.messages,
+          [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+        },
+      };
+    });
+  }
+
+  // Fires on remaining members when the admin kicks someone.
+  const handleGroupMemberKicked = useCallback((groupId: string, peerId: string, kickedBy: string) => {
+    void (async () => {
+      let kickedName = getContactName(peerId);
+      if (!kickedName) {
+        kickedName = (await MeshWhisper.resolveUsername(peerId).catch(() => undefined))
+          ?? (peerId.slice(0, 8) + '…');
+      }
+      let kickerName = getContactName(kickedBy);
+      if (!kickerName) {
+        kickerName = (await MeshWhisper.resolveUsername(kickedBy).catch(() => undefined))
+          ?? (kickedBy.slice(0, 8) + '…');
+      }
+      const groups = await loadGroups();
+      const stored = groups.find((g) => g.id === groupId);
+      if (stored) {
+        await upsertGroup({ ...stored, members: stored.members.filter((m) => m.peerId !== peerId) }).catch(() => {});
+      }
+      const systemMsg: AppMessage = {
+        id: crypto.randomUUID(),
+        conversationId: groupId,
+        text: `@${kickerName} removed @${kickedName}`,
+        timestamp: Date.now(),
+        direction: 'inbound',
+        status: 'delivered',
+      };
+      setState((prev) => {
+        const conv = prev.conversations.find((c) => c.id === groupId);
+        if (!conv?.group) return prev;
+        const newGroup: GroupInfo = {
+          ...conv.group,
+          members: conv.group.members.filter((m) => m.peerId !== peerId),
+        };
+        return {
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === groupId ? { ...c, group: newGroup, lastMessage: systemMsg } : c,
+          ),
+          messages: {
+            ...prev.messages,
+            [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
+          },
+        };
+      });
+    })();
+  }, []);
+
+  // Fires on the local user when they're the one kicked. SDK has wiped
+  // its in-memory group state already; we mirror by removing the
+  // conversation from the UI and from IDB.
+  const handleKickedFromGroup = useCallback((groupId: string, kickedBy: string) => {
+    void (async () => {
+      await removeStoredGroup(groupId).catch(() => {});
+      const sdk = getSDK();
+      if (sdk) await sdk.deleteConversationInstance(groupId).catch(() => {});
+
+      let kickerName = getContactName(kickedBy);
+      if (!kickerName) {
+        kickerName = (await MeshWhisper.resolveUsername(kickedBy).catch(() => undefined))
+          ?? (kickedBy.slice(0, 8) + '…');
+      }
+      // Surface a one-time browser notification so the user knows
+      // why the conversation just disappeared.
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try {
+          new Notification('Removed from group', {
+            body: `@${kickerName} removed you from the group.`,
+            icon: '/icon-192.png',
+            tag: `prudence-kick-${groupId}`,
+          });
+        } catch { /* ignored */ }
+      }
+
+      setState((prev) => ({
+        ...prev,
+        activeConversationId: prev.activeConversationId === groupId ? null : prev.activeConversationId,
+        conversations: prev.conversations.filter((c) => c.id !== groupId),
+        messages: Object.fromEntries(Object.entries(prev.messages).filter(([id]) => id !== groupId)),
+      }));
+    })();
+  }, []);
+
   async function handleTransferGroupAdmin(groupId: string, newAdminId: string) {
     const handle = MeshWhisper.getGroup(groupId);
     if (!handle) return;
@@ -1200,6 +1329,7 @@ export default function App() {
             onRemove={() => handleRemoveContact(activeConv.id)}
             onAddMember={activeConv.group ? (peerId) => handleAddGroupMember(activeConv.id, peerId) : undefined}
             onTransferAdmin={activeConv.group ? (newAdminId) => handleTransferGroupAdmin(activeConv.id, newAdminId) : undefined}
+            onKickMember={activeConv.group ? (peerId) => { void handleKickGroupMember(activeConv.id, peerId); } : undefined}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
           />

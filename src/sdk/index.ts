@@ -191,6 +191,17 @@ export class GroupHandle {
   }
 
   /**
+   * Kick a member from the group. Only the current admin can call this.
+   * Broadcasts a group_member_kicked control message to every other
+   * current member (including the kicked one). The kicked peer wipes
+   * their local group state on receipt; remaining members remove them
+   * from their roster.
+   */
+  async kickMember(peerId: string): Promise<void> {
+    await this.sdk['kickGroupMemberBroadcast'](this.group.id, peerId);
+  }
+
+  /**
    * Leave the group: send a group_leave control message to every other
    * current member so they remove us from their roster, then wipe local
    * state. Returns once the broadcast is enqueued; relay store-and-
@@ -260,6 +271,8 @@ export class MeshWhisper {
   private onGroupMemberLeftHandler: ((groupId: string, peerId: string) => void) | null = null;
   private onGroupMemberAddedHandler: ((groupId: string, peerId: string, addedBy: string) => void) | null = null;
   private onGroupAdminChangedHandler: ((groupId: string, newAdminId: string, changedBy: string) => void) | null = null;
+  private onGroupMemberKickedHandler: ((groupId: string, peerId: string, kickedBy: string) => void) | null = null;
+  private onKickedFromGroupHandler: ((groupId: string, kickedBy: string) => void) | null = null;
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -392,6 +405,8 @@ export class MeshWhisper {
     this.onGroupMemberLeftHandler = config.onGroupMemberLeft ?? null;
     this.onGroupMemberAddedHandler = config.onGroupMemberAdded ?? null;
     this.onGroupAdminChangedHandler = config.onGroupAdminChanged ?? null;
+    this.onGroupMemberKickedHandler = config.onGroupMemberKicked ?? null;
+    this.onKickedFromGroupHandler = config.onKickedFromGroup ?? null;
   }
 
   // ================================================================
@@ -1943,6 +1958,29 @@ export class MeshWhisper {
         this.onGroupAdminChangedHandler?.(ctrl.groupId, ctrl.newAdminId, fromPeerId);
         break;
       }
+
+      case 'group_member_kicked': {
+        if (!ctrl.groupId || !ctrl.kickedPeerId) break;
+        const group = this.groupManager.getGroup(ctrl.groupId);
+        if (!group) break;
+        // Authorization: only the current admin can kick. Adminless groups
+        // intentionally have no kick capability — members can only self-leave.
+        if (group.treeRoot !== fromPeerId) break;
+        if (!group.members.has(ctrl.kickedPeerId)) break;
+
+        const me = this.getLocalPeerId();
+        if (ctrl.kickedPeerId === me) {
+          // We were kicked. Wipe local state for the group entirely;
+          // we are no longer in it.
+          this.groupManager.leaveGroup(ctrl.groupId);
+          this.onKickedFromGroupHandler?.(ctrl.groupId, fromPeerId);
+        } else {
+          // Someone else was kicked. Drop them from our roster.
+          this.groupManager.removeMember(ctrl.groupId, ctrl.kickedPeerId);
+          this.onGroupMemberKickedHandler?.(ctrl.groupId, ctrl.kickedPeerId, fromPeerId);
+        }
+        break;
+      }
     }
   }
 
@@ -2027,6 +2065,41 @@ export class MeshWhisper {
         addedPeerId: newPeerId,
         addedEdKey: Array.from(newMemberEdKey),
         addedSenderKey: Array.from(newSenderKey),
+      });
+    }
+  }
+
+  /**
+   * Internal: kick a member from a group and tell everyone (including
+   * the kicked member) about it. Used by GroupHandle.kickMember. Only
+   * the current admin can call this. Updates local state immediately
+   * and the kicked member self-cleans on receipt of the broadcast.
+   */
+  private async kickGroupMemberBroadcast(groupId: string, kickedPeerId: string): Promise<void> {
+    const group = this.groupManager.getGroup(groupId);
+    if (!group) throw new Error(`Unknown group ${groupId}`);
+    const me = this.getLocalPeerId();
+    if (group.treeRoot !== me) {
+      throw new Error('Only the group admin can kick members');
+    }
+    if (kickedPeerId === me) {
+      throw new Error('Use leave() to remove yourself from a group, not kickMember()');
+    }
+    if (!group.members.has(kickedPeerId)) {
+      throw new Error(`${kickedPeerId} is not a member of this group`);
+    }
+
+    // Capture the current member list BEFORE removing — we want to
+    // notify the kicked member too, and removeMember would drop them
+    // from the iterator.
+    const recipients = [...group.members.keys()].filter((id) => id !== me);
+    this.groupManager.removeMember(groupId, kickedPeerId);
+
+    for (const memberId of recipients) {
+      this.sendControl(memberId, {
+        __mw_ctrl: 'group_member_kicked',
+        groupId,
+        kickedPeerId,
       });
     }
   }

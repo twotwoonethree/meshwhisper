@@ -21,6 +21,8 @@ interface Props {
   onAddMember?: (peerId: string) => void;
   /** Transfer admin role to another member, or pass '' to make adminless. */
   onTransferAdmin?: (newAdminId: string) => Promise<void>;
+  /** Admin-only: kick a member out of the group. */
+  onKickMember?: (peerId: string) => void;
   onAttach?: (file: File) => void;
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
 }
@@ -128,12 +130,13 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onAttach, onDownloadMedia }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onAttach, onDownloadMedia }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
   const [adminChoice, setAdminChoice] = useState<'idle' | 'choose'>('idle');
 
   // When the local user is the admin AND there are other members, the
@@ -231,6 +234,17 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             <p className="text-slate-500 text-xs">@{contact.username}</p>
           ) : null}
         </div>
+        {group && (
+          <button
+            onClick={() => setShowMembers(true)}
+            className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors"
+            title="Members"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+            </svg>
+          </button>
+        )}
         {group && (isGroupAdmin || isAdminless) && onAddMember && (
           <button
             onClick={() => setShowAddMember(true)}
@@ -252,6 +266,58 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           </svg>
         </button>
       </div>
+
+      {/* Members panel — visible to anyone in the group; admins can kick. */}
+      {showMembers && group && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setShowMembers(false)} />
+          <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm flex flex-col max-h-[80vh]">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+              <div>
+                <h2 className="text-white font-semibold text-sm">{group.name}</h2>
+                <p className="text-slate-500 text-xs">
+                  {group.members.length} members · {isAdminless ? 'admin-less' : (isGroupAdmin ? 'you are admin' : 'you are a member')}
+                </p>
+              </div>
+              <button onClick={() => setShowMembers(false)} className="text-slate-500 hover:text-white transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2">
+              {group.members.map((m) => {
+                const isSelf = m.peerId === localPeerId;
+                const label = m.username ? `@${m.username}` : m.peerId.slice(0, 12) + '…';
+                return (
+                  <div
+                    key={m.peerId}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+                      {(m.username ?? m.peerId)[0]?.toUpperCase() ?? '?'}
+                    </div>
+                    <span className="text-white text-sm flex-1">
+                      {label}
+                      {isSelf && <span className="text-slate-500 text-xs ml-1">(you)</span>}
+                      {m.role === 'admin' && !isAdminless && <span className="text-brand-400 text-xs ml-2">admin</span>}
+                    </span>
+                    {isGroupAdmin && !isSelf && onKickMember && (
+                      <button
+                        onClick={() => { onKickMember(m.peerId); }}
+                        title="Remove from group"
+                        className="text-xs px-2 py-1 rounded-md bg-slate-800 hover:bg-red-700 text-slate-400 hover:text-white transition-colors"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add-member picker (group admin only) */}
       {showAddMember && group && onAddMember && (
@@ -313,6 +379,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
                   <button
                     key={m.peerId}
                     onClick={() => { void chooseSuccessor(m.peerId); }}
+                    data-testid="admin-handoff-successor"
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 transition-colors text-left"
                   >
                     <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
@@ -326,6 +393,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             <div className="px-5 py-4 border-t border-slate-800">
               <button
                 onClick={() => { void chooseAdminless(); }}
+                data-testid="admin-handoff-adminless"
                 className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium transition-colors"
               >
                 Make admin-less and leave

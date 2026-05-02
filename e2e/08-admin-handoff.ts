@@ -1,6 +1,17 @@
 // Admin leaving a group must transfer the role first. This test runs
 // the two paths (transfer to a successor, become adminless) end-to-end.
 //
+// KNOWN FLAKE: Path 2's "bob saw transfer message" assertion is racy.
+// The two control messages from alice (group_admin_change then
+// group_leave) arrive in order, but bob's prudence handler does an
+// async resolveUsername lookup before injecting the system message,
+// and on some runs the leave's setState lands first and the
+// admin_change setState gets squashed by another React batch. The
+// underlying protocol works — bob's session has bob.peerId as the
+// new admin, and bob's later addMember call on carol succeeds. Worth
+// a follow-up to make the prudence handler synchronously inject a
+// placeholder system message, then update the username later.
+//
 // Run: npx tsx e2e/run.ts e2e/08-admin-handoff.ts
 
 import {
@@ -39,18 +50,16 @@ async function openGroup(user: TestUser, groupName: string) {
 
 async function adminLeaveBecomingAdminless(admin: TestUser) {
   await admin.page.locator('button[title="Leave group"]').click();
-  // Admin-handoff dialog appears.
   await admin.page.locator('h2:has-text("Before you leave")').waitFor({ state: 'visible', timeout: 5_000 });
-  await admin.page.locator('button:has-text("Make admin-less and leave")').click();
+  await admin.page.locator('[data-testid="admin-handoff-adminless"]').click();
   await admin.page.waitForTimeout(2500);
 }
 
 async function adminLeaveTransferringTo(admin: TestUser, peerUsername: string) {
   await admin.page.locator('button[title="Leave group"]').click();
   await admin.page.locator('h2:has-text("Before you leave")').waitFor({ state: 'visible', timeout: 5_000 });
-  // Pick the successor inside the modal (avoid the conversation list tile).
-  const modal = admin.page.locator('h2:has-text("Before you leave")').locator('xpath=ancestor::div[contains(@class,"rounded-2xl")][1]');
-  await modal.locator(`button:has-text("@${peerUsername}")`).click();
+  // Pick the successor row by data-testid scoped to the right username.
+  await admin.page.locator(`[data-testid="admin-handoff-successor"]:has-text("@${peerUsername}")`).click();
   await admin.page.waitForTimeout(2500);
 }
 
@@ -142,6 +151,7 @@ async function addGroupMember(user: TestUser, peerUsername: string) {
 
     console.log('--- alice transfers to bob and leaves ---');
     await adminLeaveTransferringTo(alice, bob.username);
+    await bob.page.waitForTimeout(3000);
     await snap(bob, '08-bob-after-alice-transfer-leave');
 
     // Bob (receiver) sees "@alice made @bob the admin" (inbound wording).

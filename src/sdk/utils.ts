@@ -112,10 +112,11 @@ export interface ControlMessage {
     | 'group_invite'
     | 'group_leave'
     | 'group_member_added'
+    | 'group_member_kicked'
     | 'group_admin_change'
     | 'delete'
     | 'handshake_activate';
-  /** group_leave / group_invite / group_member_added / group_admin_change reference */
+  /** group_leave / group_invite / group_member_added / group_admin_change / group_member_kicked reference */
   groupId?: string;
   /** group_member_added: peerId of the newly added member */
   addedPeerId?: string;
@@ -128,6 +129,8 @@ export interface ControlMessage {
    * The current admin is the only sender allowed to issue this.
    */
   newAdminId?: string;
+  /** group_member_kicked: peerId of the kicked member. Only the current admin may issue this. */
+  kickedPeerId?: string;
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];
