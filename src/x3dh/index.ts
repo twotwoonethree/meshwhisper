@@ -34,9 +34,6 @@ const SIGNATURE_LENGTH = 64;
 /** ML-KEM-768 public key length in bytes. */
 const PQ_PUBLIC_KEY_LENGTH = 1184;
 
-/** ML-KEM-768 secret key length in bytes. */
-const PQ_SECRET_KEY_LENGTH = 2400;
-
 /** ML-KEM-768 ciphertext length in bytes. */
 export const PQ_CIPHERTEXT_LENGTH = 1088;
 

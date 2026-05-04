@@ -11,7 +11,6 @@
 // ============================================================
 
 import { edwardsToMontgomeryPub } from '@noble/curves/ed25519';
-import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 import type { KeyPair, Packet, PreKeyBundle, StorageBackend } from '../types.js';
 import {
   deriveDestHash,
