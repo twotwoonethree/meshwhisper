@@ -221,6 +221,7 @@ export async function uploadArchive(
   peerId: string,
   authToken: string,
   blob: Uint8Array,
+  keepalive = false,
 ): Promise<void> {
   const resp = await fetch(archiveUrl(relayUrl, peerId), {
     method: 'PUT',
@@ -230,6 +231,11 @@ export async function uploadArchive(
       'Content-Length': String(blob.byteLength),
     },
     body: blob.buffer as ArrayBuffer,
+    // keepalive lets the request complete even if the tab is unloading.
+    // Browsers cap keepalive payloads at ~64 KB, so the SDK only sets
+    // it for short blobs; larger archives skip the unload-flush path
+    // and rely on the next session's restore catching up.
+    keepalive,
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');

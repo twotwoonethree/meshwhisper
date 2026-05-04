@@ -97,20 +97,61 @@ export default function App() {
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showGroupInvites, setShowGroupInvites] = useState(false);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Two timers: a 5s "no-activity" debounce and a 30s "max wait" cap so
+  // the debounce can't be reset forever during a busy conversation.
+  // Whichever fires first triggers the push; both are cancelled on fire.
   const archiveSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const archiveSyncMaxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const archivePending = useRef(false);
 
-  function scheduleArchiveSync(sdk: ReturnType<typeof getSDK>) {
+  function flushArchiveSync(sdk: ReturnType<typeof getSDK>, keepalive = false): void {
     if (!sdk) return;
-    if (archiveSyncTimer.current) clearTimeout(archiveSyncTimer.current);
-    archiveSyncTimer.current = setTimeout(() => {
+    if (archiveSyncTimer.current) {
+      clearTimeout(archiveSyncTimer.current);
       archiveSyncTimer.current = null;
-      sdk.pushArchive({
+    }
+    if (archiveSyncMaxTimer.current) {
+      clearTimeout(archiveSyncMaxTimer.current);
+      archiveSyncMaxTimer.current = null;
+    }
+    if (!archivePending.current) return;
+    archivePending.current = false;
+    sdk.pushArchive(
+      {
         contactNames: getAllContactNames(),
         acceptedContacts: getAllAccepted(),
         groups: JSON.parse(localStorage.getItem('prudence:groups') ?? '[]'),
-      }).catch((e: unknown) => console.warn('[archive] push failed:', e));
-    }, 5_000);
+      },
+      keepalive ? { keepalive: true } : undefined,
+    ).catch((e: unknown) => console.warn('[archive] push failed:', e));
   }
+
+  function scheduleArchiveSync(sdk: ReturnType<typeof getSDK>) {
+    if (!sdk) return;
+    archivePending.current = true;
+    if (archiveSyncTimer.current) clearTimeout(archiveSyncTimer.current);
+    archiveSyncTimer.current = setTimeout(() => flushArchiveSync(sdk), 5_000);
+    if (!archiveSyncMaxTimer.current) {
+      archiveSyncMaxTimer.current = setTimeout(() => flushArchiveSync(sdk), 30_000);
+    }
+  }
+
+  // Flush any pending archive push when the tab is hidden or unloaded —
+  // a 5s debounce is meaningless if the user closes the tab in the
+  // middle of activity. visibilitychange covers the common PWA case
+  // (switching tabs / putting phone to sleep); pagehide is the most
+  // reliable mobile-Safari/iOS unload signal.
+  useEffect(() => {
+    const flush = () => flushArchiveSync(getSDK(), true);
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', flush);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // When a notification is clicked, navigate to that conversation.
   useEffect(() => {

@@ -1485,7 +1485,10 @@ export class MeshWhisper {
    * Export and upload the archive to the home relay. Safe to call after
    * every significant state change — throttle on the caller side.
    */
-  async pushArchive(extra?: Record<string, unknown>): Promise<void> {
+  async pushArchive(
+    extra?: Record<string, unknown>,
+    options?: { keepalive?: boolean },
+  ): Promise<void> {
     this.assertRunning();
     if (!this.storage) return;
     const identityKey = this.identity.getEdPrivateKey();
@@ -1506,7 +1509,11 @@ export class MeshWhisper {
       return;
     }
     const blob = await encryptArchive(payload, backupKey);
-    await uploadArchive(this.archiveRelayUrl(), this.getLocalPeerId(), authToken, blob);
+    // keepalive caps at ~64 KB across the browser per spec; for larger
+    // archives we drop the keepalive flag and accept that an unload-time
+    // flush may not deliver — the next session will push again on boot.
+    const useKeepalive = !!options?.keepalive && blob.byteLength <= 60_000;
+    await uploadArchive(this.archiveRelayUrl(), this.getLocalPeerId(), authToken, blob, useKeepalive);
   }
 
   /**
