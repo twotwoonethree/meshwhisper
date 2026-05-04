@@ -44,6 +44,7 @@ import {
 import {
   ratchetEncrypt,
 } from '../ratchet/index.js';
+import type { RatchetState } from '../ratchet/index.js';
 import {
   createDataPacket,
   compressPayload,
@@ -643,18 +644,18 @@ export class MeshWhisper {
 
     await this.sessionManager.ensureSession(recipientId);
 
-    const session = this.sessionManager.getSession(recipientId);
+    let session = this.sessionManager.getSession(recipientId);
     if (!session) {
       const err = new Error(`Failed to establish session with ${recipientId}`);
       this.fireError(err);
       throw err;
     }
-    // If the session is still receive-only at this point, ratchetEncrypt
-    // will throw "Sending chain not initialized" and the caller's catch
-    // will record the message as failed. This is intentional — auto
-    // re-initiating from inside sendMessage caused a session ping-pong
-    // (see ensureSession's note). Recovery is via addContactByKey, which
-    // is user-triggered and explicit.
+    // Receiver-only session = peer just sent us an x3dh_init that replaced
+    // our previous session, and the matching handshake_activate ratchet
+    // message hasn't arrived yet. The sending chain bootstraps when we
+    // process that activation, so wait briefly rather than failing the
+    // user's send. If it never arrives the existing throw still fires.
+    session = await this.waitForSendableSession(recipientId, session);
 
     const messageId = generateMessageId();
     const envelope = {
@@ -708,8 +709,9 @@ export class MeshWhisper {
    *  which manages its own storage under the group conversation ID. */
   private async sendMessageRaw(recipientId: string, payload: Uint8Array): Promise<void> {
     await this.sessionManager.ensureSession(recipientId);
-    const session = this.sessionManager.getSession(recipientId);
+    let session = this.sessionManager.getSession(recipientId);
     if (!session) throw new Error(`No session for ${recipientId}`);
+    session = await this.waitForSendableSession(recipientId, session);
 
     const envelope = {
       id: generateMessageId(),
@@ -739,6 +741,26 @@ export class MeshWhisper {
     for (const p of burst) {
       await this.routeAndSend(p, recipientId);
     }
+  }
+
+  // If `session` has no sending chain, wait briefly for the peer's
+  // handshake_activate (or any inbound ratchet message) to bootstrap
+  // it. Returns the latest session state. Times out after ~6 seconds,
+  // in which case the original receiver-only session is returned and
+  // the caller's ratchetEncrypt will throw as before.
+  private async waitForSendableSession(
+    recipientId: string,
+    session: RatchetState,
+  ): Promise<RatchetState> {
+    if (session.sendingChainKey !== null) return session;
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      const next = this.sessionManager.getSession(recipientId);
+      if (next && next.sendingChainKey !== null) return next;
+      if (next) session = next;
+    }
+    return session;
   }
 
   // ================================================================
