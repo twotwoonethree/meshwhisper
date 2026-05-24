@@ -198,6 +198,7 @@ In the future, node operators can choose to **peer** with other nodes for redund
 - **[docs/getting-started.md](docs/getting-started.md)** — complete walkthrough from zero to working PWA
 - **[docs/api.md](docs/api.md)** — full SDK API reference
 - **[prudence/REFERENCE.md](prudence/REFERENCE.md)** — Prudence as a living example: which SDK feature lives where in the demo app, and the non-obvious patterns to copy
+- **[docs/identity-patterns.md](docs/identity-patterns.md)** — Six identity-derivation patterns (username+password, email, phone, OS keychain, Secure Enclave, passkey) — pick what matches your threat model; the SDK is neutral
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers
 - **[docs/multi-device.md](docs/multi-device.md)** — strategy for multi-device support (hand-off, hard boot, linked devices)

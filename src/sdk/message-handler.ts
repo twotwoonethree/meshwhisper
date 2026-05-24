@@ -76,6 +76,12 @@ export class MessageHandler {
       ciphertext: Uint8Array,
       fromPeerId: string,
     ) => { plaintext: Uint8Array } | null) | null = null,
+    /**
+     * Per-conversation retention policy. Default 'unbounded' — keep
+     * everything. Apps can pass `{ kind: 'count', max }` or
+     * `{ kind: 'ageMs', max }` to bound local storage.
+     */
+    private readonly retention: import('../types.js').MessageRetention = 'unbounded',
   ) {}
 
   // ----------------------------------------------------------------
@@ -102,8 +108,12 @@ export class MessageHandler {
       const raw = await this.storage.get(key);
       if (!raw) continue;
       const messages: StoredMessage[] = JSON.parse(raw);
+      const beforeLen = messages.length;
+      // Drop per-message expirations first…
       const live = messages.filter((m) => !m.expiresAt || m.expiresAt > now);
-      if (live.length !== messages.length) {
+      // …then apply the global retention policy.
+      this.applyRetention(live);
+      if (live.length !== beforeLen) {
         await this.storage.set(key, JSON.stringify(live));
       }
     }
@@ -324,7 +334,29 @@ export class MessageHandler {
   // Message persistence
   // ----------------------------------------------------------------
 
-  private static readonly MAX_STORED_MESSAGES = 500;
+  /**
+   * Apply the configured retention policy to a sorted-oldest-first message
+   * list. Mutates and returns. 'unbounded' = no-op.
+   */
+  private applyRetention(messages: StoredMessage[]): StoredMessage[] {
+    if (this.retention === 'unbounded') return messages;
+    if (this.retention.kind === 'count') {
+      if (messages.length > this.retention.max) {
+        messages.splice(0, messages.length - this.retention.max);
+      }
+      return messages;
+    }
+    if (this.retention.kind === 'ageMs') {
+      const cutoff = Date.now() - this.retention.max;
+      let firstKept = 0;
+      while (firstKept < messages.length && messages[firstKept]!.timestamp < cutoff) {
+        firstKept++;
+      }
+      if (firstKept > 0) messages.splice(0, firstKept);
+      return messages;
+    }
+    return messages;
+  }
 
   async saveMessage(message: StoredMessage): Promise<void> {
     if (!this.storage) return;
@@ -338,9 +370,7 @@ export class MessageHandler {
         messages[existing] = message;
       } else {
         messages.push(message);
-        if (messages.length > MessageHandler.MAX_STORED_MESSAGES) {
-          messages.splice(0, messages.length - MessageHandler.MAX_STORED_MESSAGES);
-        }
+        this.applyRetention(messages);
       }
       await storage.set(key, JSON.stringify(messages));
     });

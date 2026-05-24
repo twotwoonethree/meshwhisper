@@ -137,6 +137,55 @@ export interface TransportChangedEvent {
   available: boolean;
 }
 
+export interface ExportConversationOptions {
+  /** Output format. Default `'json'` (pretty-printed). */
+  format?: 'json' | 'text';
+  /** Optional per-message filter. Returning false drops the message. */
+  filter?: (m: import('../persistence/types.js').StoredMessage) => boolean;
+  /** Optional peerId → display-name map for the `'text'` format. */
+  displayName?: Record<string, string>;
+  /** Optional custom renderer for the `'text'` format. Overrides the default
+   *  line shape `[YYYY-MM-DD HH:mm] @sender: payload`. */
+  textFormatter?: (
+    m: import('../persistence/types.js').StoredMessage,
+    nameFor: (peerId: string) => string,
+  ) => string;
+}
+
+function formatExportedMessages(
+  messages: import('../persistence/types.js').StoredMessage[],
+  options: ExportConversationOptions,
+): string {
+  const format = options.format ?? 'json';
+  if (format === 'json') {
+    return JSON.stringify(messages, null, 2);
+  }
+  const names = options.displayName ?? {};
+  const nameFor = (peerId: string): string => names[peerId] ?? peerId.slice(0, 8);
+  const lineFor = options.textFormatter ?? defaultTextLine(nameFor);
+  return messages.map((m) => lineFor(m, nameFor)).join('\n');
+}
+
+function defaultTextLine(
+  nameFor: (peerId: string) => string,
+): (m: import('../persistence/types.js').StoredMessage, name: (peerId: string) => string) => string {
+  return (m) => {
+    const ts = new Date(m.timestamp);
+    const pad = (n: number): string => n.toString().padStart(2, '0');
+    const stamp =
+      `${ts.getFullYear()}-${pad(ts.getMonth() + 1)}-${pad(ts.getDate())} ` +
+      `${pad(ts.getHours())}:${pad(ts.getMinutes())}`;
+    let text: string;
+    try {
+      text = new TextDecoder().decode(new Uint8Array(m.payload));
+    } catch {
+      text = `[${m.payload.length} bytes binary]`;
+    }
+    const sender = m.groupSenderId ?? m.senderId;
+    return `[${stamp}] @${nameFor(sender)}: ${text}`;
+  };
+}
+
 // ============================================================
 // GroupHandle
 // ============================================================
@@ -407,6 +456,7 @@ export class MeshWhisper {
           return null;
         }
       },
+      config.messageRetention ?? 'unbounded',
     );
 
     this.onPresenceHandler = config.onPresence ?? null;
@@ -1401,6 +1451,63 @@ export class MeshWhisper {
 
   async getConversationsInstance(): Promise<Conversation[]> {
     return this.messageHandler.getConversations();
+  }
+
+  // ================================================================
+  // Public API — Conversation export
+  // ================================================================
+
+  /**
+   * Export one conversation's messages as a string. Default format is
+   * pretty-printed JSON; pass `format: 'text'` for a WhatsApp-style
+   * line-by-line transcript.
+   *
+   * Apps can override the per-message text rendering via `textFormatter`
+   * and supply display names via `displayName` so the transcript shows
+   * "@alice" instead of raw peer hex. Pass a `filter` to skip messages
+   * (e.g. to exclude app-level control envelopes like `__prudence_ctrl`).
+   *
+   * Use this for "Export chat" UI features, compliance archives, or to
+   * migrate history out of MeshWhisper into another system.
+   */
+  static async exportConversation(
+    peerId: string,
+    options?: ExportConversationOptions,
+  ): Promise<string> {
+    return MeshWhisper.instance.exportConversationInstance(peerId, options);
+  }
+
+  async exportConversationInstance(
+    peerId: string,
+    options?: ExportConversationOptions,
+  ): Promise<string> {
+    this.assertRunning();
+    const messages = await this.messageHandler.getMessages(peerId);
+    const filtered = options?.filter ? messages.filter(options.filter) : messages;
+    return formatExportedMessages(filtered, options ?? {});
+  }
+
+  /**
+   * Export every conversation. Returns a `Record<peerId, exportedString>`
+   * with each value formatted per the supplied options (same defaults as
+   * `exportConversation`).
+   */
+  static async exportAllConversations(
+    options?: ExportConversationOptions,
+  ): Promise<Record<string, string>> {
+    return MeshWhisper.instance.exportAllConversationsInstance(options);
+  }
+
+  async exportAllConversationsInstance(
+    options?: ExportConversationOptions,
+  ): Promise<Record<string, string>> {
+    this.assertRunning();
+    const convs = await this.messageHandler.getConversations();
+    const out: Record<string, string> = {};
+    for (const c of convs) {
+      out[c.peerId] = await this.exportConversationInstance(c.peerId, options);
+    }
+    return out;
   }
 
   static async markRead(messageId: string, peerId: string): Promise<void> {

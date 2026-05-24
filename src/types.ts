@@ -246,6 +246,11 @@ export type PushConfig =
   | { platform: 'fcm'; token: string }
   | { platform: 'webpush'; subscription: WebPushSubscription };
 
+export type MessageRetention =
+  | 'unbounded'
+  | { kind: 'count'; max: number }
+  | { kind: 'ageMs'; max: number };
+
 export interface MeshWhisperConfig {
   namespace: string;
   /** MeshWhisper Node endpoint(s). Use "mesh" for Foundation-hosted nodes,
@@ -275,6 +280,21 @@ export interface MeshWhisperConfig {
    * For React Native: wrap AsyncStorage or SQLCipher.
    */
   storage?: import('./persistence/types.js').StorageBackend;
+  /**
+   * Per-conversation message retention policy. Controls how much history is
+   * kept in local storage. Default: `'unbounded'` — every message persists
+   * forever, suitable for business / customer-service / compliance use cases.
+   * Set a count or age cap when you want bounded local storage:
+   *
+   * - `'unbounded'` — keep everything (default)
+   * - `{ kind: 'count', max: 500 }` — keep the most recent N messages
+   * - `{ kind: 'ageMs', max: 30 * 24 * 3600 * 1000 }` — keep last 30 days
+   *
+   * Eviction happens on write (and at boot via `purgeExpiredMessages`).
+   * Truncated messages are deleted from local storage but may still exist
+   * in the relay archive until the next push overwrites it.
+   */
+  messageRetention?: MessageRetention;
   onMessage?: (message: Message) => void;
   onPresence?: (peerId: string, status: PresenceStatus) => void;
   /** Called when the delivery status of an outbound message changes. */
