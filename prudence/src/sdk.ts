@@ -11,6 +11,8 @@ export const NODE = (import.meta.env.VITE_RELAY_URL as string | undefined) ?? 'w
 
 let instance: MeshWhisper | null = null;
 
+// SDK reference: canonical MeshWhisper.init() pattern with every callback
+// wired. See ../REFERENCE.md "Init and storage backend" for the full map.
 export async function initSDK(
   username: string,
   handlers: {

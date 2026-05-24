@@ -104,6 +104,10 @@ export default function App() {
   const archiveSyncMaxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const archivePending = useRef(false);
 
+  // SDK reference: archive sync. See ../REFERENCE.md "Archive sync".
+  // scheduleArchiveSync = debounced (5s) for routine state changes;
+  // forceArchiveSync = immediate (no debounce) for tombstone/revival;
+  // flushArchiveSync = the actual push, called by both and by pagehide.
   function flushArchiveSync(sdk: ReturnType<typeof getSDK>, keepalive = false): void {
     if (!sdk) return;
     if (archiveSyncTimer.current) {
@@ -163,6 +167,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // SDK reference: read-status persistence. See ../REFERENCE.md
+  // "Delivery / read receipts". markRead (DM) sends a receipt to the peer;
+  // markReadLocal (group) only updates IDB without a receipt.
   // Mark all inbound unread messages in a conversation as read.
   // Persists status to SDK storage so getConversations() doesn't
   // resurface them as unread on the next reload. Sends a read
@@ -232,6 +239,10 @@ export default function App() {
     });
   }, []);
 
+  // SDK reference: onMessage receive path. See ../REFERENCE.md "Sending
+  // and receiving messages". Note the early-return branches for app-level
+  // __prudence_ctrl messages and media-pointer messages before the
+  // "normal chat message" fall-through.
   const handleMessage = useCallback((msg: Message) => {
     console.log('[prudence] onMessage', { senderId: msg.senderId, payloadLen: msg.payload.length });
     const text = decoder(Array.from(msg.payload));
@@ -548,6 +559,8 @@ export default function App() {
     setState((prev) => ({ ...prev, connected: status === 'connected' }));
   }, []);
 
+  // SDK reference: history recovery — recipient consent gate.
+  // See ../REFERENCE.md "Conversation history recovery".
   // Peer is asking us to share our copy of their conversation history (they
   // probably deleted it locally and want to recover). Prompt once per peer
   // and remember the decision in localStorage so the recipient isn't asked
@@ -640,6 +653,7 @@ export default function App() {
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
+      // SDK reference: boot sequence. See ../REFERENCE.md "Archive sync".
       // Archive sync: always pull from relay (merge with local data) so that
       // conversations started on another device appear here too. Then push the
       // merged state back so the relay stays up to date.
@@ -812,6 +826,8 @@ export default function App() {
     location.reload();
   }
 
+  // SDK reference: send path. See ../REFERENCE.md "Sending and receiving
+  // messages". DMs route through sdk.sendMessage; groups through sdk.sendToGroup.
   function handleSend(conversationId: string, text: string) {
     const sdk = getSDK();
     if (!sdk) return;
@@ -908,6 +924,9 @@ export default function App() {
     }
   }
 
+  // SDK reference: deletion. See ../REFERENCE.md "Contacts (X3DH)" — the
+  // SDK writes a tombstone + fires onArchiveDirty itself; this handler
+  // doesn't need to call scheduleArchiveSync.
   async function handleRemoveContact(peerId: string) {
     const sdk = getSDK();
     // If this is a group, the leave path differs: broadcast a group_leave
@@ -944,6 +963,9 @@ export default function App() {
     scheduleArchiveSync(getSDK());
   }
 
+  // SDK reference: history recovery — manual button path.
+  // See ../REFERENCE.md "Conversation history recovery". The auto-fire on
+  // revival-after-delete path lives in the SDK, no Prudence code needed.
   async function handleRestoreHistory(peerId: string) {
     const sdk = getSDK();
     if (!sdk) return;

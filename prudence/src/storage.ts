@@ -40,6 +40,9 @@ function wrap<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+// SDK reference: reference implementation of the StorageBackend interface.
+// Any KV store (IDB, SQLite, MMKV, custom) can back the SDK by implementing
+// these four methods. See ../REFERENCE.md "Init and storage backend".
 export const idbStorage: StorageBackend = {
   async get(key: string) {
     const db = await getDb();

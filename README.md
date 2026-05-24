@@ -10,6 +10,7 @@ Self-hosted, post-quantum end-to-end encrypted messaging for any app — PWA, Re
 <a href="https://meshwhisper.org">meshwhisper.org</a> ·
 <a href="docs/getting-started.md">Getting started</a> ·
 <a href="docs/api.md">API reference</a> ·
+<a href="prudence/REFERENCE.md">Reference app</a> ·
 <a href="docs/self-hosting.md">Self-hosting</a> ·
 <a href="docs/whitepaper.md">Whitepaper</a> ·
 <a href="docs/presentation.pdf">Presentation</a>
@@ -188,6 +189,7 @@ In the future, node operators can choose to **peer** with other nodes for redund
 
 - **[docs/getting-started.md](docs/getting-started.md)** — complete walkthrough from zero to working PWA
 - **[docs/api.md](docs/api.md)** — full SDK API reference
+- **[prudence/REFERENCE.md](prudence/REFERENCE.md)** — Prudence as a living example: which SDK feature lives where in the demo app, and the non-obvious patterns to copy
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers
 - **[docs/multi-device.md](docs/multi-device.md)** — strategy for multi-device support (hand-off, hard boot, linked devices)
