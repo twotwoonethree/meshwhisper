@@ -1400,6 +1400,22 @@ export class MeshWhisper {
   }
 
   /**
+   * Persist a message's status as 'read' locally without sending a read
+   * receipt to anyone. Use this for group messages (where there's no single
+   * peer to receipt to — sending would either fail or require fan-out) and
+   * for any case where the app wants the unread badge to clear on reload
+   * without notifying the sender.
+   */
+  static async markReadLocal(messageId: string, conversationId: string): Promise<void> {
+    return MeshWhisper.instance.markReadLocalInstance(messageId, conversationId);
+  }
+
+  async markReadLocalInstance(messageId: string, conversationId: string): Promise<void> {
+    this.assertRunning();
+    await this.messageHandler.updateMessageStatus(messageId, conversationId, 'read');
+  }
+
+  /**
    * Deletes a message locally and sends a delete request to the other party.
    * `conversationId` is the peer ID for DMs or the group ID for group messages.
    */

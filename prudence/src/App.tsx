@@ -153,18 +153,50 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Mark all inbound unread messages in a conversation as read.
+  // Persists status to SDK storage so getConversations() doesn't
+  // resurface them as unread on the next reload. Sends a read
+  // receipt to the peer for DMs; for groups we just update locally
+  // (read-receipt fan-out across group members is a TODO).
+  // Side effects fire inside the updater, so in React strict mode
+  // they may run twice per render — both SDK calls are idempotent.
+  function markConversationRead(conversationId: string) {
+    setState((prev) => {
+      const conv = prev.conversations.find((c) => c.id === conversationId);
+      if (!conv) return prev;
+      const isGroup = !!conv.group;
+      const msgs = prev.messages[conversationId] ?? [];
+      let changed = false;
+      const updatedMsgs = msgs.map((m) => {
+        if (m.direction === 'inbound' && m.status !== 'read') {
+          changed = true;
+          (isGroup
+            ? MeshWhisper.markReadLocal(m.id, conversationId)
+            : MeshWhisper.markRead(m.id, conversationId)
+          ).catch(() => {});
+          return { ...m, status: 'read' as const };
+        }
+        return m;
+      });
+      if (!changed && conv.unread === 0) return prev;
+      return {
+        ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === conversationId ? { ...c, unread: 0 } : c,
+        ),
+        messages: changed ? { ...prev.messages, [conversationId]: updatedMsgs } : prev.messages,
+      };
+    });
+  }
+
   // When a notification is clicked, navigate to that conversation.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ conversationId?: string }>).detail;
       if (!detail?.conversationId) return;
-      setState((prev) => ({
-        ...prev,
-        activeConversationId: detail.conversationId!,
-        conversations: prev.conversations.map((c) =>
-          c.id === detail.conversationId ? { ...c, unread: 0 } : c,
-        ),
-      }));
+      const id = detail.conversationId;
+      setState((prev) => ({ ...prev, activeConversationId: id }));
+      markConversationRead(id);
     };
     document.addEventListener('prudence:openConversation', handler);
     return () => document.removeEventListener('prudence:openConversation', handler);
@@ -248,6 +280,15 @@ export default function App() {
         const existingConv = prev.conversations.find((c) => c.id === conversationId);
         const contact = existingConv?.contact ?? makeContact(conversationId);
         const isActive = prev.activeConversationId === conversationId;
+        if (isActive && mediaMsg.id) {
+          // Conversation is open — mark as read immediately so the unread
+          // badge doesn't resurface on the next reload.
+          (isGroup
+            ? MeshWhisper.markReadLocal(mediaMsg.id, conversationId)
+            : MeshWhisper.markRead(mediaMsg.id, conversationId)
+          ).catch(() => {});
+          mediaMsg.status = 'read';
+        }
         const updatedConv: Conversation = existingConv
           ? { ...existingConv, lastMessage: mediaMsg, unread: isActive ? 0 : existingConv.unread + 1 }
           : { id: conversationId, contact, lastMessage: mediaMsg, unread: 1, isTyping: false };
@@ -288,6 +329,16 @@ export default function App() {
       const existingConv = prev.conversations.find((c) => c.id === conversationId);
       const contact = existingConv?.contact ?? makeContact(conversationId);
       const isActive = prev.activeConversationId === conversationId;
+
+      if (isActive) {
+        // Conversation is open — mark as read immediately so the unread
+        // badge doesn't resurface on the next reload.
+        (isGroup
+          ? MeshWhisper.markReadLocal(appMsg.id, conversationId)
+          : MeshWhisper.markRead(appMsg.id, conversationId)
+        ).catch(() => {});
+        appMsg.status = 'read';
+      }
 
       const updatedConv: Conversation = existingConv
         ? { ...existingConv, lastMessage: appMsg, unread: isActive ? 0 : existingConv.unread + 1 }
@@ -1303,15 +1354,10 @@ export default function App() {
           pendingGroupInviteCount={state.pendingGroupInvites.length}
           connected={state.connected}
           onLock={() => { sessionStorage.setItem('prudence:locked', '1'); setAuthenticated(false); }}
-          onSelect={(id) =>
-            setState((prev) => ({
-              ...prev,
-              activeConversationId: id,
-              conversations: prev.conversations.map((c) =>
-                c.id === id ? { ...c, unread: 0 } : c,
-              ),
-            }))
-          }
+          onSelect={(id) => {
+            setState((prev) => ({ ...prev, activeConversationId: id }));
+            markConversationRead(id);
+          }}
           onPendingClick={() => setShowPending(true)}
           onGroupInviteClick={() => setShowGroupInvites(true)}
           onNewGroup={() => setShowCreateGroup(true)}
