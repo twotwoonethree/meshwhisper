@@ -1,0 +1,22 @@
+{
+  "name": "@meshwhisper/example-supervised-chat",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: supervisor-readable customer-support chat via group membership",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "agent": "tsx src/agent.ts",
+    "supervisor": "tsx src/supervisor.ts",
+    "agent:built": "node --enable-source-maps dist/agent.js",
+    "supervisor:built": "node --enable-source-maps dist/supervisor.js"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../..",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
