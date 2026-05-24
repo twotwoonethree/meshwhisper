@@ -1,0 +1,22 @@
+{
+  "name": "@meshwhisper/example-ticket-lifecycle",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: LLM triage → escalation to supervised human handoff",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "triage": "tsx src/triage-bot.ts",
+    "agent": "tsx src/human-agent.ts",
+    "supervisor": "tsx src/supervisor.ts"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../..",
+    "@anthropic-ai/sdk": "^0.40.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
