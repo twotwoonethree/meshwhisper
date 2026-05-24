@@ -813,6 +813,10 @@ export default function App() {
         Object.entries(prev.messages).filter(([id]) => id !== peerId),
       ),
     }));
+    // The SDK wrote a deletion tombstone. Push it now (debounced via
+    // scheduleArchiveSync, flushed on pagehide) so the relay archive
+    // carries the deletion and the next pull doesn't resurrect this peer.
+    scheduleArchiveSync(getSDK());
   }
 
   function handleDeclineRequest(peerId: string) {

@@ -22,6 +22,16 @@ export interface ArchivePayload {
   peerId: string;
   relayUrl: string;
   kv: Record<string, string>;
+  /**
+   * Deletion tombstones — peerId/groupId → ms epoch of the delete event.
+   * Suppresses the peer's archived keys and contacts-array entry on merge.
+   * A re-add (acceptContact / addContactByKey) clears the local tombstone,
+   * and the absence of a remote tombstone with a newer timestamp lets the
+   * peer re-appear. Older devices that don't know about this field still
+   * read version=1 archives without crashing — they just lose
+   * tombstone semantics and may resurrect deleted peers until they update.
+   */
+  tombstones?: Record<string, number>;
   extra?: Record<string, unknown>;
 }
 
@@ -161,12 +171,37 @@ export async function restoreKv(
  * messages arriving via the SDK while the boot-time merge is running).
  * Without a lock, a live message arriving during merge can be silently
  * overwritten when the merge writes the pre-arrival snapshot back.
+ *
+ * Tombstone filtering: any peer present in `remoteTombstones` is treated
+ * as deleted and its archived keys (`messages/{P}`, `peers/{P}`,
+ * `edkeys/{P}`) plus its `contacts`-array entry are dropped from the
+ * remote side before merging. The merged tombstone set (local ∪ remote
+ * with max-timestamp-wins) is written back to `tombstones` so the next
+ * push carries deletions to other devices.
  */
 export async function mergeKv(
   kv: Record<string, string>,
   storage: StorageBackend,
   lock?: <T>(key: string, fn: () => Promise<T>) => Promise<T>,
+  remoteTombstones: Record<string, number> = {},
 ): Promise<void> {
+  const localTombstones = await readTombstones(storage);
+  const mergedTombstones: Record<string, number> = { ...localTombstones };
+  for (const [peer, t] of Object.entries(remoteTombstones)) {
+    mergedTombstones[peer] = Math.max(mergedTombstones[peer] ?? 0, t);
+  }
+  await writeTombstones(storage, mergedTombstones);
+
+  const isPeerTombstoned = (key: string): boolean => {
+    for (const prefix of ARCHIVE_PREFIXES) {
+      if (key.startsWith(prefix)) {
+        const peerId = key.slice(prefix.length);
+        return peerId in mergedTombstones;
+      }
+    }
+    return false;
+  };
+
   const merge = async (k: string, v: string): Promise<void> => {
     const existing = await storage.get(k);
     if (!existing) {
@@ -186,6 +221,10 @@ export async function mergeKv(
             (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
           );
           await storage.set(k, JSON.stringify(merged));
+        } else if (k === 'contacts') {
+          const union = new Set([...(local as string[]), ...(remote as string[])]);
+          for (const peerId of Object.keys(mergedTombstones)) union.delete(peerId);
+          await storage.set(k, JSON.stringify([...union]));
         } else {
           await storage.set(k, JSON.stringify([...new Set([...(local as string[]), ...(remote as string[])])]));
         }
@@ -196,12 +235,64 @@ export async function mergeKv(
   };
 
   for (const [k, v] of Object.entries(kv)) {
+    if (isPeerTombstoned(k)) continue;
     if (lock && k.startsWith('messages/')) {
       await lock(k, () => merge(k, v));
     } else {
       await merge(k, v);
     }
   }
+
+  // The remote may have included `contacts` only when the local side already
+  // had it — meaning the merge() branch above handled the filter. Cover the
+  // case where local had nothing and remote dropped its tombstoned peers
+  // straight into storage: re-filter local contacts against tombstones.
+  const localContactsRaw = await storage.get('contacts');
+  if (localContactsRaw) {
+    try {
+      const arr = JSON.parse(localContactsRaw) as string[];
+      const filtered = arr.filter((p) => !(p in mergedTombstones));
+      if (filtered.length !== arr.length) {
+        await storage.set('contacts', JSON.stringify(filtered));
+      }
+    } catch { /* leave it */ }
+  }
+}
+
+// ============================================================
+// Tombstones — local storage helpers
+// ============================================================
+
+const TOMBSTONE_KEY = 'tombstones';
+
+export async function readTombstones(storage: StorageBackend): Promise<Record<string, number>> {
+  const raw = await storage.get(TOMBSTONE_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+export async function writeTombstones(
+  storage: StorageBackend,
+  tombstones: Record<string, number>,
+): Promise<void> {
+  await storage.set(TOMBSTONE_KEY, JSON.stringify(tombstones));
+}
+
+export async function addTombstone(storage: StorageBackend, peerId: string): Promise<void> {
+  const cur = await readTombstones(storage);
+  cur[peerId] = Date.now();
+  await writeTombstones(storage, cur);
+}
+
+export async function clearTombstone(storage: StorageBackend, peerId: string): Promise<void> {
+  const cur = await readTombstones(storage);
+  if (!(peerId in cur)) return;
+  delete cur[peerId];
+  await writeTombstones(storage, cur);
 }
 
 // ============================================================
