@@ -27,6 +27,8 @@ interface Props {
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
   /** DM only: ask the peer to replay their view of the conversation back to us. */
   onRestoreHistory?: () => void;
+  /** Export the conversation as a downloadable text transcript. */
+  onExport?: () => void;
 }
 
 function formatTimestamp(ts: number) {
@@ -132,7 +134,7 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onAttach, onDownloadMedia, onRestoreHistory }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -266,6 +268,17 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
+            </svg>
+          </button>
+        )}
+        {onExport && (
+          <button
+            onClick={onExport}
+            className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors"
+            title="Export conversation as text"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
             </svg>
           </button>
         )}

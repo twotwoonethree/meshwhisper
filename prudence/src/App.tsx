@@ -963,6 +963,54 @@ export default function App() {
     scheduleArchiveSync(getSDK());
   }
 
+  // SDK reference: conversation export. See ../REFERENCE.md (TODO add
+  // a section). Builds a peerId → display-name map from contactNames so
+  // the transcript shows "@alice" instead of raw hex, filters out the
+  // app-level __prudence_ctrl envelopes, then triggers a browser download.
+  async function handleExportConversation(conversationId: string) {
+    const sdk = getSDK();
+    if (!sdk) return;
+    const conv = state.conversations.find((c) => c.id === conversationId);
+    if (!conv) return;
+    const myPeerId = MeshWhisper.getLocalPeerId();
+    const displayName: Record<string, string> = {};
+    if (state.myUsername) displayName[myPeerId] = `${state.myUsername} (you)`;
+    if (conv.group) {
+      for (const m of conv.group.members) {
+        const name = m.username ?? getContactName(m.peerId);
+        if (name) displayName[m.peerId] = name;
+      }
+    } else if (conv.contact.username) {
+      displayName[conversationId] = conv.contact.username;
+    }
+    try {
+      const transcript = await sdk.exportConversationInstance(conversationId, {
+        format: 'text',
+        displayName,
+        filter: (m) => {
+          try {
+            const text = new TextDecoder().decode(new Uint8Array(m.payload));
+            return !isControlMessage(text);
+          } catch {
+            return true;
+          }
+        },
+      });
+      const label = conv.group?.name ?? conv.contact.username ?? conversationId.slice(0, 8);
+      const safeLabel = label.replace(/[^a-z0-9_-]/gi, '_').toLowerCase();
+      const filename = `prudence-${safeLabel}-${new Date().toISOString().slice(0, 10)}.txt`;
+      const blob = new Blob([transcript], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      console.warn('[export] failed:', e);
+    }
+  }
+
   // SDK reference: history recovery — manual button path.
   // See ../REFERENCE.md "Conversation history recovery". The auto-fire on
   // revival-after-delete path lives in the SDK, no Prudence code needed.
@@ -1538,6 +1586,7 @@ export default function App() {
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
             onRestoreHistory={activeConv.group ? undefined : () => handleRestoreHistory(activeConv.id)}
+            onExport={() => handleExportConversation(activeConv.id)}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center bg-slate-950">

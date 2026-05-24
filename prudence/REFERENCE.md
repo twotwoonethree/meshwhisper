@@ -59,6 +59,11 @@ If you're building on MeshWhisper, the recommended workflow is: skim the SDK REA
 - `onArchiveDirty` wiring — `App.tsx`, in the `initSDK` config. The SDK fires this callback whenever it writes a tombstone or revival event; Prudence force-flushes immediately. This is the "right" pattern — apps shouldn't try to call `scheduleArchiveSync` themselves on contact mutations, because the SDK already does the right thing.
 - Flush on close — `App.tsx`, the `useEffect` listening to `visibilitychange` and `pagehide`. Calls `flushArchiveSync(sdk, keepalive=true)` so the post-action archive lands even if the user closes the tab.
 
+### Conversation export
+- Per-conversation transcript download — `App.tsx:handleExportConversation` calls `sdk.exportConversationInstance(peerId, options)` with `format: 'text'`, a peerId → display-name map built from `contactNames` + group roster, and a filter that drops `__prudence_ctrl` envelopes. The returned string is wrapped in a Blob and triggered as a browser download.
+- UI: the down-arrow icon in `Thread.tsx`'s header. Available for DMs and groups.
+- Format alternatives — pass `format: 'json'` for structured output; pass a `textFormatter` to override the default `[YYYY-MM-DD HH:mm] @sender: payload` line shape.
+
 ### Conversation history recovery
 - Manual fetch — `App.tsx:handleRestoreHistory` calls `sdk.requestHistoryInstance(peerId)`. Wired into the swirl button in `Thread.tsx`.
 - Automatic on revival-after-delete — no Prudence code; the SDK auto-fires `request_history` whenever a tombstone preceded a revival.
