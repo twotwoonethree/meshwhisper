@@ -24,6 +24,7 @@ export async function initSDK(
     onGroupAdminChanged?: (groupId: string, newAdminId: string, changedBy: string) => void;
     onGroupMemberKicked?: (groupId: string, peerId: string, kickedBy: string) => void;
     onKickedFromGroup?: (groupId: string, kickedBy: string) => void;
+    onArchiveDirty?: (reason: 'tombstone' | 'revival') => void;
   },
   pushSubscription?: WebPushSubscription | null,
 ) {
@@ -44,6 +45,7 @@ export async function initSDK(
     ...(handlers.onGroupAdminChanged ? { onGroupAdminChanged: handlers.onGroupAdminChanged } : {}),
     ...(handlers.onGroupMemberKicked ? { onGroupMemberKicked: handlers.onGroupMemberKicked } : {}),
     ...(handlers.onKickedFromGroup ? { onKickedFromGroup: handlers.onKickedFromGroup } : {}),
+    ...(handlers.onArchiveDirty ? { onArchiveDirty: handlers.onArchiveDirty } : {}),
   });
   return instance;
 }

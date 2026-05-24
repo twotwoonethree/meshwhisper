@@ -290,6 +290,18 @@ export interface MeshWhisperConfig {
    *  Messages sent while disconnected are queued and flushed automatically on reconnect. */
   onConnectionStatus?: (status: 'connected' | 'disconnected') => void;
   /**
+   * Called whenever the SDK writes a tombstone or revival event that *must*
+   * reach the relay archive before the next reload — otherwise stale remote
+   * state can resurrect a deleted peer or re-suppress a revived one. The app
+   * should respond by pushing the archive immediately (no debounce).
+   *
+   * Fires from: deleteConversation, acceptContact, addContactByKey,
+   * inbound x3dh_init (onContactEstablished), and acceptGroupInvite.
+   *
+   * `reason` describes which event triggered the dirtying, useful for logging.
+   */
+  onArchiveDirty?: (reason: 'tombstone' | 'revival') => void;
+  /**
    * Called when a connected peer issues an entropy (proof-of-physical-device) challenge.
    * Collect `durationMs` milliseconds of readings from the requested sensor and return them.
    * If not provided, the challenge is silently ignored and the peer marks us as "unverified"

@@ -136,6 +136,16 @@ export default function App() {
     }
   }
 
+  // Force an immediate archive push (no debounce). Used for tombstone /
+  // revival events fired by the SDK via onArchiveDirty — those *must* reach
+  // the relay before the next reload, otherwise stale remote state can
+  // resurrect deleted peers or re-suppress revived ones.
+  function forceArchiveSync(sdk: ReturnType<typeof getSDK>): void {
+    if (!sdk) return;
+    archivePending.current = true;
+    flushArchiveSync(sdk, /* keepalive */ false);
+  }
+
   // Flush any pending archive push when the tab is hidden or unloaded —
   // a 5s debounce is meaningless if the user closes the tab in the
   // middle of activity. visibilitychange covers the common PWA case
@@ -563,6 +573,10 @@ export default function App() {
         onGroupAdminChanged: handleGroupAdminChanged,
         onGroupMemberKicked: handleGroupMemberKicked,
         onKickedFromGroup: handleKickedFromGroup,
+        // Force-push the archive whenever the SDK writes a tombstone or
+        // revival. Bypasses the 5s debounce so a delete or re-add can't be
+        // lost if the user closes the app before the timer fires.
+        onArchiveDirty: () => forceArchiveSync(getSDK()),
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 

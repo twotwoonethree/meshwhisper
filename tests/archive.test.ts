@@ -284,6 +284,23 @@ describe('mergeKv with tombstones', () => {
     expect(contacts).toEqual(['alice']);
   });
 
+  it('a same-millisecond tombstone + revival favours the revival (no tie suppression)', async () => {
+    // mergeKv uses `tomb > rev` (strict), so equal timestamps fall to revival.
+    // Defence against clock-edge cases where the user's delete-then-re-add fires
+    // within the same ms — UX-wise the user's last action was re-add, so the
+    // peer should be alive.
+    await local.set('tombstones', JSON.stringify({ alice: 500 }));
+    await local.set('revivals', JSON.stringify({ alice: 500 }));
+    await mergeKv(
+      { 'messages/alice': JSON.stringify([{ id: 'm1', timestamp: 1 }]) },
+      local,
+      undefined,
+      { alice: 500 },
+      { alice: 500 },
+    );
+    expect(await local.get('messages/alice')).not.toBeNull();
+  });
+
   it('tombstone newer than revival still suppresses (re-delete after re-add)', async () => {
     // User re-added then re-deleted. The newer tombstone should win.
     await local.set('tombstones', JSON.stringify({ alice: 300 }));
