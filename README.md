@@ -129,6 +129,14 @@ The SDK auto-detects the environment. In a browser it uses IndexedDB for storage
 
 ---
 
+## Learn by reading a real app
+
+[Prudence](prudence/) is a complete PWA built on MeshWhisper — direct messages, groups, media, push, multi-device archive sync, conversation history recovery — and is maintained as a living reference for SDK integrators. Every major SDK feature is exercised in the codebase. The annotated map in **[prudence/REFERENCE.md](prudence/REFERENCE.md)** points each SDK feature to the file and function where it's wired, and calls out the non-obvious patterns (control-message prefixes, archive-sync semantics, identity persistence) that an integrator would only learn by reading the code.
+
+Try it live at [prudence.meshwhisper.org](https://prudence.meshwhisper.org) or run it locally from `prudence/`.
+
+---
+
 ## Scaffold in 60 seconds
 
 ```bash
