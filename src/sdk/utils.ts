@@ -115,7 +115,26 @@ export interface ControlMessage {
     | 'group_member_kicked'
     | 'group_admin_change'
     | 'delete'
-    | 'handshake_activate';
+    | 'handshake_activate'
+    | 'request_history'
+    | 'history_replay';
+  /** history_replay: a chunk of historical messages from the sender's view. */
+  historyMessages?: Array<{
+    id: string;
+    senderId: string;
+    recipientId: string;
+    payload: number[];
+    timestamp: number;
+    expiresAt?: number;
+    /** group messages: original group sender */
+    groupSenderId?: string;
+  }>;
+  /** history_replay: 0-indexed chunk number for ordering. */
+  historyChunkIndex?: number;
+  /** history_replay: total number of chunks in this restore. */
+  historyChunkTotal?: number;
+  /** request_history: only ask for messages after this ms epoch (optional). */
+  historySince?: number;
   /** group_leave / group_invite / group_member_added / group_admin_change / group_member_kicked reference */
   groupId?: string;
   /** group_member_added: peerId of the newly added member */

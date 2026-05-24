@@ -2139,6 +2139,155 @@ export class MeshWhisper {
         }
         break;
       }
+
+      case 'request_history':
+        this.handleHistoryRequest(fromPeerId, ctrl.historySince).catch(() => {});
+        break;
+
+      case 'history_replay':
+        this.handleHistoryReplay(fromPeerId, ctrl).catch(() => {});
+        break;
+    }
+  }
+
+  // ================================================================
+  // History recovery — peer-to-peer
+  // ================================================================
+
+  /**
+   * Ask `peerId` to replay their view of the conversation back to us. Used
+   * when local state was wiped (accidental delete, fresh device after the
+   * archive had already excluded this peer) but the peer still has the
+   * messages on their side.
+   *
+   * The peer's app decides whether to honour the request via its
+   * onHistoryRequest callback. If they accept, the messages stream back as
+   * `history_replay` control messages and land in local storage, after
+   * which onHistoryRestored fires.
+   */
+  static async requestHistory(peerId: string): Promise<void> {
+    return MeshWhisper.instance.requestHistoryInstance(peerId);
+  }
+
+  async requestHistoryInstance(peerId: string): Promise<void> {
+    this.assertRunning();
+    // Send a single control message; the peer (if they consent) will reply
+    // with one or more history_replay chunks.
+    this.sendControl(peerId, { __mw_ctrl: 'request_history' });
+  }
+
+  /** Cap per chunk so encrypted ratchet packets stay well under any single-
+   *  message limit. 50 messages * typical envelope size easily fits. */
+  private static readonly HISTORY_CHUNK_SIZE = 50;
+
+  private async handleHistoryRequest(requesterPeerId: string, since?: number): Promise<void> {
+    const handler = this.config.onHistoryRequest;
+    if (!handler) return; // Default: refuse silently — apps must opt in.
+
+    let approved: boolean;
+    try {
+      approved = await handler(requesterPeerId);
+    } catch {
+      approved = false;
+    }
+    if (!approved) return;
+
+    if (!this.storage) return;
+    const raw = await this.storage.get(`messages/${requesterPeerId}`);
+    if (!raw) return;
+    let stored: Array<{
+      id: string;
+      senderId: string;
+      recipientId: string;
+      payload: number[];
+      timestamp: number;
+      expiresAt?: number;
+      groupSenderId?: string;
+    }>;
+    try {
+      stored = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const filtered = since !== undefined
+      ? stored.filter((m) => m.timestamp > since)
+      : stored;
+    if (filtered.length === 0) return;
+
+    const chunkSize = MeshWhisper.HISTORY_CHUNK_SIZE;
+    const total = Math.ceil(filtered.length / chunkSize);
+    for (let i = 0; i < total; i++) {
+      const chunk = filtered.slice(i * chunkSize, (i + 1) * chunkSize);
+      this.sendControl(requesterPeerId, {
+        __mw_ctrl: 'history_replay',
+        historyMessages: chunk.map((m) => ({
+          id: m.id,
+          senderId: m.senderId,
+          recipientId: m.recipientId,
+          payload: m.payload,
+          timestamp: m.timestamp,
+          ...(m.expiresAt !== undefined ? { expiresAt: m.expiresAt } : {}),
+          ...(m.groupSenderId ? { groupSenderId: m.groupSenderId } : {}),
+        })),
+        historyChunkIndex: i,
+        historyChunkTotal: total,
+      });
+    }
+  }
+
+  private async handleHistoryReplay(
+    fromPeerId: string,
+    ctrl: import('./utils.js').ControlMessage,
+  ): Promise<void> {
+    if (!ctrl.historyMessages || ctrl.historyMessages.length === 0) return;
+    if (!this.storage) return;
+
+    const me = this.getLocalPeerId();
+    let inserted = 0;
+
+    await this.messageHandler.storageMutex.run(`messages/${fromPeerId}`, async () => {
+      const storage = this.storage!;
+      const key = `messages/${fromPeerId}`;
+      const raw = await storage.get(key);
+      const existing: import('../persistence/types.js').StoredMessage[] = raw ? JSON.parse(raw) : [];
+      const seenIds = new Set(existing.map((m) => m.id));
+      const additions: import('../persistence/types.js').StoredMessage[] = [];
+
+      for (const m of ctrl.historyMessages ?? []) {
+        if (!m.id || seenIds.has(m.id)) continue;
+        // Translate direction from the sender's view to ours. Sender's
+        // outbound (senderId = them) becomes our inbound; their inbound
+        // (senderId = us) becomes our outbound. recipientId is preserved
+        // as-is because it already encodes "intended for X."
+        const isOutboundOnRecover = m.senderId === me;
+        const restored: import('../persistence/types.js').StoredMessage = {
+          id: m.id,
+          conversationId: fromPeerId,
+          senderId: m.senderId,
+          recipientId: m.recipientId,
+          payload: m.payload,
+          timestamp: m.timestamp,
+          direction: isOutboundOnRecover ? 'outbound' : 'inbound',
+          // Recovered messages from the peer's archive — we can only know
+          // they were delivered to that peer at least once (they had them).
+          // Mark inbound as 'read' (we already saw these once) and outbound
+          // as 'delivered' (best assumption without the peer's read receipt).
+          status: isOutboundOnRecover ? 'delivered' : 'read',
+          ...(m.expiresAt !== undefined ? { expiresAt: m.expiresAt } : {}),
+          ...(m.groupSenderId ? { groupSenderId: m.groupSenderId } : {}),
+        };
+        additions.push(restored);
+        seenIds.add(m.id);
+      }
+
+      if (additions.length === 0) return;
+      const merged = [...existing, ...additions].sort((a, b) => a.timestamp - b.timestamp);
+      await storage.set(key, JSON.stringify(merged));
+      inserted = additions.length;
+    });
+
+    if (inserted > 0) {
+      try { this.config.onHistoryRestored?.(fromPeerId, inserted); } catch { /* swallow */ }
     }
   }
 

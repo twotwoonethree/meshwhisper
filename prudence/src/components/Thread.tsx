@@ -25,6 +25,8 @@ interface Props {
   onKickMember?: (peerId: string) => void;
   onAttach?: (file: File) => void;
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
+  /** DM only: ask the peer to replay their view of the conversation back to us. */
+  onRestoreHistory?: () => void;
 }
 
 function formatTimestamp(ts: number) {
@@ -130,7 +132,7 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onAttach, onDownloadMedia }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onAttach, onDownloadMedia, onRestoreHistory }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -253,6 +255,17 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+          </button>
+        )}
+        {!group && onRestoreHistory && (
+          <button
+            onClick={onRestoreHistory}
+            className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors"
+            title="Restore history from this contact"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
             </svg>
           </button>
         )}

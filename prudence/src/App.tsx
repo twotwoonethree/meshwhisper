@@ -548,6 +548,60 @@ export default function App() {
     setState((prev) => ({ ...prev, connected: status === 'connected' }));
   }, []);
 
+  // Peer is asking us to share our copy of their conversation history (they
+  // probably deleted it locally and want to recover). Prompt once per peer
+  // and remember the decision in localStorage so the recipient isn't asked
+  // again on every request.
+  const handleHistoryRequest = useCallback((peerId: string): boolean => {
+    const consentKey = `prudence:share-history-consent:${peerId}`;
+    const cached = localStorage.getItem(consentKey);
+    if (cached === 'yes') return true;
+    if (cached === 'no') return false;
+    const name = getContactName(peerId) ?? peerId.slice(0, 8);
+    const ok = window.confirm(
+      `@${name} is asking for a copy of your conversation history. They've lost their messages and need to recover.\n\nShare your message history with them?`,
+    );
+    localStorage.setItem(consentKey, ok ? 'yes' : 'no');
+    return ok;
+  }, []);
+
+  // Peer has just sent back our requested history. The SDK already wrote the
+  // recovered messages to IDB; reload them into React state so the UI shows
+  // them. count > 0 means actual new messages landed (after dedup).
+  const handleHistoryRestored = useCallback((peerId: string, count: number) => {
+    if (count === 0) return;
+    void (async () => {
+      const sdk = getSDK();
+      if (!sdk) return;
+      const msgs = await sdk.getMessagesInstance(peerId).catch(() => null);
+      if (!msgs) return;
+      const appMsgs: AppMessage[] = msgs.map((m: StoredMessage) => {
+        const text = decoder(m.payload);
+        const mediaPtr = text ? extractMediaPointer(text) : null;
+        return {
+          id: m.id,
+          conversationId: peerId,
+          text: mediaPtr
+            ? (isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'))
+            : (text ?? ''),
+          timestamp: m.timestamp,
+          direction: m.direction,
+          status: m.status,
+          ...(mediaPtr ? { media: { ...mediaPtr, status: 'ready' as const } } : {}),
+        };
+      });
+      setState((prev) => ({
+        ...prev,
+        messages: { ...prev.messages, [peerId]: appMsgs },
+        conversations: prev.conversations.map((c) =>
+          c.id === peerId && appMsgs.length > 0
+            ? { ...c, lastMessage: appMsgs[appMsgs.length - 1] }
+            : c,
+        ),
+      }));
+    })();
+  }, []);
+
   // Boot SDK once identity key is in IDB and username is confirmed
   useEffect(() => {
     if (!username || !authenticated) return;
@@ -577,6 +631,8 @@ export default function App() {
         // revival. Bypasses the 5s debounce so a delete or re-add can't be
         // lost if the user closes the app before the timer fires.
         onArchiveDirty: () => forceArchiveSync(getSDK()),
+        onHistoryRequest: handleHistoryRequest,
+        onHistoryRestored: handleHistoryRestored,
       }, pushSub).then(async (sdk) => {
       if (cancelled) return;
 
@@ -728,7 +784,7 @@ export default function App() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus, handleGroupInvite]);
+  }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus, handleGroupInvite, handleHistoryRequest, handleHistoryRestored]);
 
   async function handleRegister(chosenUsername: string, password: string) {
     initStorage(chosenUsername);
@@ -882,6 +938,20 @@ export default function App() {
     // scheduleArchiveSync, flushed on pagehide) so the relay archive
     // carries the deletion and the next pull doesn't resurrect this peer.
     scheduleArchiveSync(getSDK());
+  }
+
+  async function handleRestoreHistory(peerId: string) {
+    const sdk = getSDK();
+    if (!sdk) return;
+    const name = getContactName(peerId) ?? peerId.slice(0, 8);
+    if (!window.confirm(`Ask @${name} to share their copy of this conversation? They'll see a one-time prompt asking permission.`)) {
+      return;
+    }
+    try {
+      await sdk.requestHistoryInstance(peerId);
+    } catch (e) {
+      console.warn('[restore-history] request failed:', e);
+    }
   }
 
   function handleDeclineRequest(peerId: string) {
@@ -1441,6 +1511,7 @@ export default function App() {
             onKickMember={activeConv.group ? (peerId) => { void handleKickGroupMember(activeConv.id, peerId); } : undefined}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
+            onRestoreHistory={activeConv.group ? undefined : () => handleRestoreHistory(activeConv.id)}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center bg-slate-950">

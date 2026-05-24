@@ -25,6 +25,8 @@ export async function initSDK(
     onGroupMemberKicked?: (groupId: string, peerId: string, kickedBy: string) => void;
     onKickedFromGroup?: (groupId: string, kickedBy: string) => void;
     onArchiveDirty?: (reason: 'tombstone' | 'revival') => void;
+    onHistoryRequest?: (peerId: string) => boolean | Promise<boolean>;
+    onHistoryRestored?: (peerId: string, count: number) => void;
   },
   pushSubscription?: WebPushSubscription | null,
 ) {
@@ -46,6 +48,8 @@ export async function initSDK(
     ...(handlers.onGroupMemberKicked ? { onGroupMemberKicked: handlers.onGroupMemberKicked } : {}),
     ...(handlers.onKickedFromGroup ? { onKickedFromGroup: handlers.onKickedFromGroup } : {}),
     ...(handlers.onArchiveDirty ? { onArchiveDirty: handlers.onArchiveDirty } : {}),
+    ...(handlers.onHistoryRequest ? { onHistoryRequest: handlers.onHistoryRequest } : {}),
+    ...(handlers.onHistoryRestored ? { onHistoryRestored: handlers.onHistoryRestored } : {}),
   });
   return instance;
 }

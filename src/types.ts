@@ -302,6 +302,23 @@ export interface MeshWhisperConfig {
    */
   onArchiveDirty?: (reason: 'tombstone' | 'revival') => void;
   /**
+   * Called when a peer asks for their conversation history to be replayed
+   * (e.g. they accidentally deleted the conversation and want to recover).
+   * Return `true` to authorise the share, `false` to silently refuse.
+   * The app should typically prompt the user once per peer and remember the
+   * decision (per-contact opt-in). The SDK passes nothing sensitive — only
+   * the requester's peerId — so the prompt can show the contact's display name.
+   * Default behaviour (handler not provided): refuse.
+   */
+  onHistoryRequest?: (peerId: string) => boolean | Promise<boolean>;
+  /**
+   * Called after a peer's history has been replayed and merged into local
+   * storage. Apps should refresh the conversation view so the recovered
+   * messages appear immediately. `count` is the number of new messages
+   * actually persisted after dedup (0 if everything was already present).
+   */
+  onHistoryRestored?: (peerId: string, count: number) => void;
+  /**
    * Called when a connected peer issues an entropy (proof-of-physical-device) challenge.
    * Collect `durationMs` milliseconds of readings from the requested sensor and return them.
    * If not provided, the challenge is silently ignored and the peer marks us as "unverified"
