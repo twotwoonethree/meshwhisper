@@ -5,7 +5,7 @@ A customer-service agent running as a MeshWhisper peer. The same E2EE protocol t
 About 150 lines of code. Two modes:
 
 - **echo** — replies with `echo: <your text>`. No API key, no external dependency. Use this to verify the wiring before plugging in a real model.
-- **llm** — sends the conversation history to Claude (`claude-haiku-4-5` by default) and replies with the response. Uses `@anthropic-ai/sdk` with prompt caching on the system prompt so repeat turns are cheap.
+- **llm** — streams the conversation history to Claude (`claude-haiku-4-5` by default) and replies as the response arrives, chunk by chunk. Uses `@anthropic-ai/sdk` with prompt caching on the system prompt so repeat turns are cheap.
 
 ## Quick start
 
@@ -57,7 +57,8 @@ What the example demonstrates, by section of `src/index.ts`:
 | `onMessage` callback | The receive path. Decode the payload, call `generateReply`, send the answer. |
 | `MeshWhisper.getMessages(senderId, ...)` | For LLM mode: retrieves the conversation transcript so far so we can include the recent turns in the Claude prompt. The SDK already saved the incoming message before firing `onMessage`, so it appears in the result. |
 | `MeshWhisper.sendTyping` / `stopTyping` | Live typing indicator. Lets the user see "support-bot is typing…" while the LLM is generating — UX that's hard to fake in a SaaS messaging product. |
-| `MeshWhisper.send(senderId, payload)` | The reply. Same API the user used to message the bot. |
+| `streamReply` + `findFlushPoint` | LLM mode streams Claude's response and ships each natural-breakpoint chunk as its own MeshWhisper message. Buffer flushes at sentence boundaries when length ≥ 60, splits hard at 280 if no boundary exists, and flushes any tail at stream end. The user sees the answer build up over a few chat bubbles rather than waiting on one long pause. |
+| `MeshWhisper.send` called multiple times rapidly | Streaming means several back-to-back sends to the same peer. The SDK's per-recipient session mutex serialises ratchet RMW automatically, so msgN stays sequential and the receiver decrypts in order. **You don't need to add your own coordination** — this is a load-bearing example of why the SDK does that work for you. |
 | `inFlight` Set | Per-sender concurrency guard. Prevents the bot from making two parallel LLM calls for the same user if they send rapid follow-ups. |
 | Shutdown hooks | `mw.shutdown()` on SIGINT/SIGTERM persists the seen-id deduplication state and flushes any pending session writes. Skip this and you risk a duplicate-message replay on restart. |
 
@@ -67,7 +68,7 @@ Deliberately omitted to keep the reference small. If you want any of these, they
 
 - **Authentication / allow-list.** This bot accepts every contact. For a paid product you'd gate on tenant ID or a verification flow.
 - **Rate limiting.** No per-user message rate cap. If a user sends 100 messages in 10 seconds, the bot will queue 100 LLM calls.
-- **Long-reply streaming.** The example does non-streaming Anthropic calls and sends the full reply as one MeshWhisper message. For replies that should appear word-by-word in the user's UI, switch to `anthropic.messages.stream` and send each chunk via `MeshWhisper.send`. Cost: ~30 extra lines.
+- **Per-token streaming.** Streaming is on by default (see `streamReply` / `findFlushPoint`), but chunks at natural breakpoints (sentence boundaries or 280-char soft cap) rather than per-token. Per-token streaming would mean a new MeshWhisper message every few characters — feasible for the SDK but bad UX (the recipient's UI would show 50+ chat bubbles per reply). If you want token-level streaming, the right path is a new control-message type (`__mw_ctrl: 'message_chunk'`) that apps can use to update a single "in-progress" bubble before the final committed message arrives. That's a Prudence-side feature, not a bot-side change.
 - **Error recovery messaging.** A failed LLM call is logged and silently dropped. A polished bot would reply with `Sorry, something went wrong — try again?` in this case.
 - **Group support.** This bot only handles DMs. Adding group support means handling `onGroupInvite` (auto-accept or gate), routing group messages via `MeshWhisper.sendToGroup`, and deciding whether the bot speaks every turn or only when @mentioned.
 - **Media handling.** Inbound images / files arrive as media-pointer messages; the bot ignores them. To process attachments, call `MeshWhisper.downloadMediaMessage(msg)` to fetch and decrypt the bytes, then run them through a vision model or attachment store.

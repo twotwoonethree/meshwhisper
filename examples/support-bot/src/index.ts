@@ -50,17 +50,46 @@ if (MODE === 'llm') {
   anthropic = new Anthropic({ apiKey });
 }
 
-// Generate a reply for a single inbound user message. Returns the text to
-// send back, or null to stay silent (e.g. when the message is just a control
-// payload we don't care about).
-async function generateReply(senderId: string, text: string): Promise<string | null> {
-  if (!text.trim()) return null;
+// Find a flush point inside `buffer` — the index at which to split the
+// streamed output into a separate MeshWhisper message. Strategy:
+//   - below 60 chars: don't flush yet (avoid one-word bubbles)
+//   - between 60 and 280: flush at the last sentence-ending punctuation
+//   - 280+ with no sentence boundary: split at 280
+// Returns -1 when no flush should happen yet.
+function findFlushPoint(buffer: string, atStreamEnd: boolean): number {
+  if (atStreamEnd) return buffer.length;
+  if (buffer.length < 60) return -1;
+  const SOFT_CAP = 280;
+
+  // Last index where a sentence ends (punctuation + whitespace).
+  const re = /[.!?]\s+/g;
+  let lastEnd = -1;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(buffer)) !== null) {
+    lastEnd = m.index + m[0].length;
+  }
+  if (lastEnd >= 60) return lastEnd;
+
+  if (buffer.length >= SOFT_CAP) return SOFT_CAP;
+  return -1;
+}
+
+// Send the reply, chunked. For echo mode this is a single message; for LLM
+// mode the bot streams Claude's response and ships each natural-breakpoint
+// chunk as its own MeshWhisper message. The receiver sees the answer
+// appear in pieces, which (a) feels faster to a user waiting on a slow LLM
+// and (b) demonstrates that the ratchet handles back-to-back sends to the
+// same peer without the integrator having to think about it — the SDK's
+// per-recipient session mutex serialises ratchet RMW automatically.
+async function streamReply(senderId: string, text: string): Promise<void> {
+  if (!text.trim()) return;
 
   if (MODE === 'echo') {
-    return `echo: ${text}`;
+    await MeshWhisper.send(senderId, new TextEncoder().encode(`echo: ${text}`));
+    return;
   }
 
-  // LLM mode. The SDK already persisted this incoming message before firing
+  // LLM mode. The SDK already persisted the inbound message before firing
   // onMessage, so getMessages includes it as the most recent entry.
   const history = await MeshWhisper.getMessages(senderId, { limit: LLM_HISTORY_TURNS });
   const messages = history
@@ -70,9 +99,9 @@ async function generateReply(senderId: string, text: string): Promise<string | n
     }))
     .filter((m) => m.content.trim().length > 0);
 
-  // Cache the system prompt across calls — it's static, large-ish, and gets
-  // sent on every turn. Cache hits cut both latency and per-call cost.
-  const response = await anthropic!.messages.create({
+  // Cache the system prompt across calls — it's static, large-ish, and goes
+  // out on every turn. Cache hits cut both latency and per-call cost.
+  const stream = anthropic!.messages.stream({
     model: 'claude-haiku-4-5',
     max_tokens: 1024,
     system: [
@@ -85,11 +114,29 @@ async function generateReply(senderId: string, text: string): Promise<string | n
     messages,
   });
 
-  return response.content
-    .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
-    .trim() || null;
+  let buffer = '';
+  const flush = async (atEnd: boolean): Promise<void> => {
+    for (;;) {
+      const idx = findFlushPoint(buffer, atEnd);
+      if (idx < 0) return;
+      const chunk = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx);
+      if (!chunk) {
+        if (atEnd && !buffer.trim()) return;
+        continue;
+      }
+      await MeshWhisper.send(senderId, new TextEncoder().encode(chunk));
+      if (atEnd && !buffer.trim()) return;
+    }
+  };
+
+  for await (const event of stream) {
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+      buffer += event.delta.text;
+      await flush(false);
+    }
+  }
+  await flush(true);
 }
 
 // ----- Main ----------------------------------------------------------------
@@ -140,13 +187,14 @@ async function main(): Promise<void> {
 
       try {
         MeshWhisper.sendTyping(sender);
-        const reply = await generateReply(sender, text);
+        // streamReply does the encryption-and-send itself, possibly as
+        // multiple chunks for LLM streaming — see findFlushPoint for the
+        // chunking strategy.
+        await streamReply(sender, text);
         MeshWhisper.stopTyping(sender);
-        if (reply) {
-          await MeshWhisper.send(sender, new TextEncoder().encode(reply));
-          console.log(`[out] ${sender.slice(0, 8)}: ${reply.slice(0, 80)}`);
-        }
+        console.log(`[out] ${sender.slice(0, 8)}: (reply complete)`);
       } catch (err) {
+        MeshWhisper.stopTyping(sender);
         console.error(`[err] reply to ${sender.slice(0, 8)} failed:`, err);
       } finally {
         inFlight.delete(sender);
