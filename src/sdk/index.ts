@@ -883,7 +883,8 @@ export class MeshWhisper {
     const group = this.groupManager.createGroup(options.name, options.members ?? [], options.permissionModel ?? 'open');
     // Record a revival for the new groupId — covers the (unlikely) case where
     // a previous group with the same id was tombstoned, and ensures consistent
-    // onArchiveDirty firing for any new "this id is alive" event.
+    // onArchiveDirty firing for any new "this id is alive" event. No history
+    // auto-fetch for groups by design.
     this.recordRevival(group.id).catch(() => {});
 
     // Send an invite to each initial member over their pairwise encrypted channel
@@ -1051,7 +1052,8 @@ export class MeshWhisper {
     // Record a revival for the group itself so a prior delete-tombstone on
     // this groupId doesn't suppress messages/{groupId} after the next pull.
     // Fire-and-forget — joinGroup is sync and the archive push happens
-    // separately via onArchiveDirty.
+    // separately via onArchiveDirty. No history auto-fetch for groups —
+    // group conversations don't show backfill from before you joined.
     this.recordRevival(groupId).catch(() => {});
   }
 
@@ -1214,10 +1216,11 @@ export class MeshWhisper {
       this.permissionManager.addContact(peerId);
     }
 
-    await this.recordRevival(peerId);
+    const hadTombstone = await this.recordRevival(peerId);
 
     this.peerCache.addPeer(peerId, edwardsToMontgomeryPub(bundle.identityKey));
     await this.sessionManager.initiateHandshake(peerId, bundle);
+    this.autoRequestHistoryIfRevived(peerId, hadTombstone);
   }
 
   /**
@@ -1255,8 +1258,9 @@ export class MeshWhisper {
     } else {
       this.permissionManager.addContact(peerId);
     }
-    await this.recordRevival(peerId);
+    const hadTombstone = await this.recordRevival(peerId);
     this.persistContacts().catch(() => {});
+    this.autoRequestHistoryIfRevived(peerId, hadTombstone);
 
     // Initiate a new handshake if either:
     //   - No session exists at all, or
@@ -1497,9 +1501,11 @@ export class MeshWhisper {
    * strictly greater than any existing tombstone for the peer, so the
    * revival can't tie or lose against same-millisecond writes. Fires
    * onArchiveDirty so the app pushes the post-revival archive immediately.
+   * Returns `true` if a prior tombstone existed for this peer — callers
+   * use this to auto-request conversation history from the peer.
    */
-  private async recordRevival(peerId: string): Promise<void> {
-    if (!this.storage) return;
+  private async recordRevival(peerId: string): Promise<boolean> {
+    if (!this.storage) return false;
     const tombstones = await readTombstones(this.storage);
     const revivals = await readRevivals(this.storage);
     const tombTs = tombstones[peerId] ?? 0;
@@ -1508,6 +1514,27 @@ export class MeshWhisper {
     revivals[peerId] = Math.max(revivals[peerId] ?? 0, ts);
     await this.storage.set('revivals', JSON.stringify(revivals));
     try { this.config.onArchiveDirty?.('revival'); } catch { /* swallow handler errors */ }
+    return tombTs > 0;
+  }
+
+  /**
+   * If `hadTombstone` is true, schedule an automatic request_history send
+   * to `peerId`. Used by the contact-add / inbound-handshake paths to
+   * recover conversation history after an accidental delete. Fires after
+   * a short delay so the just-established session is fully set up.
+   * The peer's app still gates with onHistoryRequest — auto-fire on our
+   * side doesn't bypass their consent.
+   */
+  private autoRequestHistoryIfRevived(peerId: string, hadTombstone: boolean): void {
+    if (!hadTombstone) return;
+    // 1s delay lets the new session's handshake_activate land and the send
+    // chain bootstrap before we try to use it.
+    const timer = setTimeout(() => {
+      this.sendControl(peerId, { __mw_ctrl: 'request_history' });
+    }, 1_000);
+    if (typeof timer === 'object' && 'unref' in timer) {
+      (timer as NodeJS.Timeout).unref();
+    }
   }
 
   // ================================================================
@@ -1915,7 +1942,10 @@ export class MeshWhisper {
     // sending us a fresh handshake now, or our cleared-tombstone state hadn't
     // been pushed to the relay yet when we last reloaded). The recordRevival
     // helper also fires onArchiveDirty so the archive gets pushed immediately.
-    this.recordRevival(peerId).catch(() => {});
+    // If there was a prior tombstone, also auto-request history from the peer.
+    this.recordRevival(peerId)
+      .then((hadTombstone) => this.autoRequestHistoryIfRevived(peerId, hadTombstone))
+      .catch(() => {});
 
     // peerId is the hex-encoded X25519 public key — add it to peerCache so
     // sendMessage can compute the dest hash. Persist immediately so it survives restarts.

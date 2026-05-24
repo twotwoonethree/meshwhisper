@@ -567,18 +567,22 @@ export default function App() {
 
   // Peer has just sent back our requested history. The SDK already wrote the
   // recovered messages to IDB; reload them into React state so the UI shows
-  // them. count > 0 means actual new messages landed (after dedup).
-  const handleHistoryRestored = useCallback((peerId: string, count: number) => {
-    if (count === 0) return;
+  // them. count > 0 means actual new messages landed (after dedup). We mirror
+  // the same isControlMessage filter the boot loader uses — Prudence's app-
+  // level control messages (__prudence_ctrl: 'contact_request' etc.) are
+  // persisted alongside real messages but must not surface in the thread.
+  const handleHistoryRestored = useCallback((peerId: string, _count: number) => {
     void (async () => {
       const sdk = getSDK();
       if (!sdk) return;
       const msgs = await sdk.getMessagesInstance(peerId).catch(() => null);
       if (!msgs) return;
-      const appMsgs: AppMessage[] = msgs.map((m: StoredMessage) => {
+      const appMsgs: AppMessage[] = [];
+      for (const m of msgs as StoredMessage[]) {
         const text = decoder(m.payload);
+        if (text && isControlMessage(text)) continue;
         const mediaPtr = text ? extractMediaPointer(text) : null;
-        return {
+        appMsgs.push({
           id: m.id,
           conversationId: peerId,
           text: mediaPtr
@@ -588,8 +592,8 @@ export default function App() {
           direction: m.direction,
           status: m.status,
           ...(mediaPtr ? { media: { ...mediaPtr, status: 'ready' as const } } : {}),
-        };
-      });
+        });
+      }
       setState((prev) => ({
         ...prev,
         messages: { ...prev.messages, [peerId]: appMsgs },
