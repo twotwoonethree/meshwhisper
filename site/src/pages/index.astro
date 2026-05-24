@@ -198,7 +198,71 @@ import Nav from '../components/Nav.astro';
         <div class="mt-8 text-center text-sm text-slate-500">
           <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/api.md" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Full API reference →</a>
           <span class="mx-3">·</span>
+          <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/identity-patterns.md" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Identity patterns →</a>
+          <span class="mx-3">·</span>
           <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/self-hosting.md" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Self-hosting guide →</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Reference codebases -->
+    <section class="border-t border-slate-800">
+      <div class="max-w-6xl mx-auto px-6 py-24">
+        <h2 class="text-3xl font-bold text-white text-center mb-4">Learn by reading real code</h2>
+        <p class="text-slate-400 text-center mb-12 max-w-2xl mx-auto">
+          Four working integrations, each maintained as a living reference for SDK adopters. None are slides;
+          all are <code class="text-brand-300">git clone</code> away.
+        </p>
+
+        <div class="grid md:grid-cols-2 gap-6">
+          <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/prudence/REFERENCE.md" target="_blank" rel="noopener noreferrer"
+             class="block bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-xl p-6 transition-colors">
+            <div class="text-brand-400 font-mono text-xs font-medium mb-2 uppercase tracking-widest">PWA</div>
+            <h3 class="text-xl font-bold text-white mb-2">Prudence</h3>
+            <p class="text-slate-400 text-sm leading-relaxed">
+              A complete PWA covering every SDK feature — DMs, groups, media, push, multi-device archive sync,
+              conversation history recovery. The cross-reference doc maps each SDK feature to the file where it's wired.
+            </p>
+            <div class="mt-4 text-brand-400 text-sm">prudence/REFERENCE.md →</div>
+          </a>
+
+          <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/examples/support-bot/README.md" target="_blank" rel="noopener noreferrer"
+             class="block bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-xl p-6 transition-colors">
+            <div class="text-brand-400 font-mono text-xs font-medium mb-2 uppercase tracking-widest">AI agent</div>
+            <h3 class="text-xl font-bold text-white mb-2">support-bot</h3>
+            <p class="text-slate-400 text-sm leading-relaxed">
+              A customer-service agent running as a MeshWhisper peer. ~150 lines, two modes (echo + LLM-backed
+              with streaming replies). The relay sees only ciphertext; the agent's process sees plaintext.
+            </p>
+            <div class="mt-4 text-brand-400 text-sm">examples/support-bot →</div>
+          </a>
+
+          <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/examples/supervised-chat/README.md" target="_blank" rel="noopener noreferrer"
+             class="block bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-xl p-6 transition-colors">
+            <div class="text-brand-400 font-mono text-xs font-medium mb-2 uppercase tracking-widest">Compliance</div>
+            <h3 class="text-xl font-bold text-white mb-2">supervised-chat</h3>
+            <p class="text-slate-400 text-sm leading-relaxed">
+              "The supervisor can read every chat" without breaking E2EE. Three actors plus a Vite + React +
+              FlexSearch dashboard for browsing the audit log. Supervisor reads via group membership, not a backdoor.
+            </p>
+            <div class="mt-4 text-brand-400 text-sm">examples/supervised-chat →</div>
+          </a>
+
+          <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/examples/ticket-lifecycle/README.md" target="_blank" rel="noopener noreferrer"
+             class="block bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-xl p-6 transition-colors">
+            <div class="text-brand-400 font-mono text-xs font-medium mb-2 uppercase tracking-widest">End-to-end</div>
+            <h3 class="text-xl font-bold text-white mb-2">ticket-lifecycle</h3>
+            <p class="text-slate-400 text-sm leading-relaxed">
+              LLM triage front-line with tool-use-driven escalation to a supervised human handoff. The
+              closest thing to a real customer-service product running on MeshWhisper, composed from the
+              previous two examples.
+            </p>
+            <div class="mt-4 text-brand-400 text-sm">examples/ticket-lifecycle →</div>
+          </a>
+        </div>
+
+        <div class="mt-10 text-center text-sm text-slate-500">
+          <a href="https://github.com/twotwoonethree/meshwhisper/tree/main/examples" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Browse all examples on GitHub →</a>
         </div>
       </div>
     </section>
@@ -222,12 +286,15 @@ import Nav from '../components/Nav.astro';
         <div class="space-y-2">
           <div class="text-slate-400 font-medium">Developers</div>
           <div><a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/api.md" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">API reference</a></div>
+          <div><a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/identity-patterns.md" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">Identity patterns</a></div>
+          <div><a href="https://github.com/twotwoonethree/meshwhisper/tree/main/examples" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">Examples</a></div>
           <div><a href="https://github.com/twotwoonethree/meshwhisper" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">GitHub</a></div>
           <div><a href="https://relay.meshwhisper.org/health" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">Relay status</a></div>
         </div>
         <div class="space-y-2">
           <div class="text-slate-400 font-medium">Apps</div>
           <div><a href="https://prudence.meshwhisper.org" class="hover:text-white transition-colors">Prudence</a></div>
+          <div><a href="https://github.com/twotwoonethree/meshwhisper/blob/main/prudence/REFERENCE.md" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">Prudence as reference</a></div>
         </div>
       </div>
     </div>

@@ -40,12 +40,16 @@ interface MeshWhisperConfig {
   permissionModel?: 'open' | 'mutual' | 'introduction' | 'transactional' | 'custom';
   push?: PushConfig;
   storage?: StorageBackend;
+  messageRetention?: 'unbounded' | { kind: 'count'; max: number } | { kind: 'ageMs'; max: number };
   onMessage?: (message: Message) => void;
   onPresence?: (peerId: string, status: PresenceStatus) => void;
   onMessageStatus?: (messageId: string, status: MessageStatus) => void;
   onTyping?: (peerId: string, isTyping: boolean) => void;
   onContactRequest?: (peerId: string, introducedBy: string, username?: string) => void | Promise<void>;
   onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>;
+  onArchiveDirty?: (reason: 'tombstone' | 'revival') => void;
+  onHistoryRequest?: (peerId: string) => boolean | Promise<boolean>;
+  onHistoryRestored?: (peerId: string, count: number) => void;
   config?: {
     relayWillingness?: 'auto' | 'eager' | 'willing' | 'reluctant' | 'unavailable';
     chaffRate?: 'low' | 'normal' | 'high';
@@ -64,12 +68,16 @@ interface MeshWhisperConfig {
 | `permissionModel` | No | `"open"` | Who can send messages. `"open"` = anyone. `"mutual"` = only existing contacts. |
 | `push` | No | — | Push notification configuration. Required for offline delivery. See [`PushConfig`](#pushconfig). |
 | `storage` | No | auto | Storage backend. Auto-selected in browser (IDBStorage) and Node.js (null). Pass explicitly to override. See [`StorageBackend`](#storagebackend). |
+| `messageRetention` | No | `'unbounded'` | Per-conversation history cap. `'unbounded'` keeps everything (default, suitable for customer-service / compliance). `{ kind: 'count', max }` keeps the N most recent. `{ kind: 'ageMs', max }` drops messages older than `max` ms. Eviction runs on write and at boot. |
 | `onMessage` | No | — | Called when a message is received. |
 | `onPresence` | No | — | Called when a peer's online status changes. |
 | `onMessageStatus` | No | — | Called when an outbound message's delivery status changes (`sent` → `delivered` → `read`). |
 | `onTyping` | No | — | Called when a peer starts or stops typing. `isTyping` is `true` for start, `false` for stop. Ephemeral — not stored or reliable. |
 | `onContactRequest` | No | — | Called when a new peer wants to talk to you. Fires in two cases: (1) a mutual contact introduces a new peer (`introducedBy` is the introducer's peer ID, `username` may be set); (2) a stranger initiates a direct handshake (`introducedBy === peerId`, `username` may be undefined until the peer's app sends a follow-up identifying themselves). Call `addContactByKey(peerId)` from this handler to confirm the contact, or ignore it to decline. |
 | `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
+| `onArchiveDirty` | No | — | Called whenever the SDK writes a tombstone (delete) or revival (re-add) event that must reach the relay before the next reload. The app should push the archive immediately (bypass any debounce). Apps that don't provide this still work, but stale relay state can resurrect deleted peers on the next pull until a normal push fires. |
+| `onHistoryRequest` | No | refuse | Called when a peer asks for their conversation history to be replayed (typically after they accidentally deleted it). Return `true` to authorise the share, `false` to refuse. Default behaviour without this callback is refuse silently. Apps usually prompt the user once per peer and cache the decision. |
+| `onHistoryRestored` | No | — | Called after a peer has replayed history into local storage. `count` is the number of new messages persisted after dedup. Reload the conversation view in response. |
 
 ---
 
@@ -214,13 +222,23 @@ await MeshWhisper.deleteMessage(messageId: string, conversationId: string): Prom
 
 ### `MeshWhisper.markRead(messageId, peerId)`
 
-Mark an inbound message as read. Sends a read receipt to the sender.
+Mark an inbound DM message as read. Persists the `'read'` status locally **and** sends a read receipt to the sender.
 
 ```ts
 await MeshWhisper.markRead(messageId: string, peerId: string): Promise<void>
 ```
 
 Triggers `onMessageStatus` on the sender's device with `status: 'read'`.
+
+### `MeshWhisper.markReadLocal(messageId, conversationId)`
+
+Persists `'read'` status locally **without** sending a receipt to the sender. Use for group messages (where the SDK has no single peer to receipt to) or any case where you want the unread badge to clear on reload without notifying anyone.
+
+```ts
+await MeshWhisper.markReadLocal(messageId: string, conversationId: string): Promise<void>
+```
+
+Without this, `getConversations()` recomputes `unreadCount` from `messages/*` with `status !== 'read'` on every boot — so the unread badge resurfaces after a reload unless one of `markRead` or `markReadLocal` has persisted the read status to storage.
 
 ### `onMessageStatus` (config callback)
 
@@ -231,6 +249,93 @@ onMessageStatus: (messageId: string, status: 'sent' | 'delivered' | 'read' | 'fa
 ```
 
 Status flow: `sending` → `sent` → `delivered` (automatic on decrypt by recipient) → `read` (on `markRead()` call).
+
+---
+
+## Conversation export
+
+Use this to ship "Export chat" features, compliance archives, or to migrate history out of MeshWhisper.
+
+### `MeshWhisper.exportConversation(peerId, options?)`
+
+Export one conversation as a string. Default format is pretty-printed JSON; pass `format: 'text'` for a WhatsApp-style transcript.
+
+```ts
+await MeshWhisper.exportConversation(
+  peerId: string,
+  options?: ExportConversationOptions,
+): Promise<string>
+```
+
+```ts
+interface ExportConversationOptions {
+  format?: 'json' | 'text';
+  /** Drop messages by predicate (e.g. filter out app-level control envelopes). */
+  filter?: (m: StoredMessage) => boolean;
+  /** peerId → display name, for the `'text'` format. Falls back to `peerId.slice(0,8)`. */
+  displayName?: Record<string, string>;
+  /** Custom renderer for a single message in the `'text'` format. */
+  textFormatter?: (m: StoredMessage, nameFor: (peerId: string) => string) => string;
+}
+```
+
+**Example — WhatsApp-style transcript:**
+```ts
+const transcript = await MeshWhisper.exportConversation(bobId, {
+  format: 'text',
+  displayName: { [bobId]: 'bob', [meId]: 'me' },
+});
+// [2026-05-24 14:30] @bob: Hello!
+// [2026-05-24 14:31] @me: Hi back
+```
+
+### `MeshWhisper.exportAllConversations(options?)`
+
+Export every conversation. Returns a `Record<peerId, exportedString>` with each value formatted per the supplied options.
+
+```ts
+await MeshWhisper.exportAllConversations(
+  options?: ExportConversationOptions,
+): Promise<Record<string, string>>
+```
+
+---
+
+## History recovery
+
+If a user accidentally deletes a conversation, the messages are gone from their archive (the post-delete push overwrites the relay's copy). But the peer on the other side still has the conversation in their archive. History recovery lets the deleter ask the peer to replay it back.
+
+### `MeshWhisper.requestHistory(peerId)`
+
+Ask a peer to replay their view of your conversation. Sends a `request_history` control message; the peer's app gates on its `onHistoryRequest` callback. If they accept, the messages stream back as chunked control messages, dedupe by id, and persist locally. The requester's `onHistoryRestored` fires when the replay completes.
+
+```ts
+await MeshWhisper.requestHistory(peerId: string): Promise<void>
+```
+
+**Auto-fire on revival-after-delete:** the SDK automatically calls this internally when it detects a re-add of a peer that had a prior tombstone (the "I accidentally deleted them" path). Manual invocation is for explicit "restore history" UI buttons (Prudence has one) or for fresh-device scenarios.
+
+### `onHistoryRequest` (config callback)
+
+Called when a peer requests history. Return `true` to authorise the share, `false` to refuse. Without this callback, refuse silently is the default.
+
+```ts
+onHistoryRequest: (peerId: string) => boolean | Promise<boolean>
+```
+
+Apps typically prompt the user once per peer and cache the decision (Prudence stores `prudence:share-history-consent:{peerId}` in localStorage with `'yes' | 'no'`). Cached `'no'` answers prevent a malicious peer from spamming requests.
+
+**Trust model:** the requester is an established peer with whom you share a ratchet session, and they were a participant in the original conversation — so they're not learning anything new about it. The relay still sees only ciphertext throughout the replay.
+
+### `onHistoryRestored` (config callback)
+
+Called after a peer's history has been replayed and merged into local storage.
+
+```ts
+onHistoryRestored: (peerId: string, count: number) => void
+```
+
+`count` is the number of messages actually persisted after dedup (0 if everything was already present). Reload the conversation view in response so the recovered messages appear in your UI.
 
 ---
 
@@ -490,6 +595,7 @@ Decrypts and **merges** an archive blob into local storage. Existing local data 
 - `contacts`, `seen_ids`, `blocked` arrays are unioned.
 - `messages/*` arrays are merged and deduplicated by message `id`, sorted by timestamp.
 - `peers/*` are updated from the archive.
+- Tombstones and revivals (see below) are merged per-peer with max-timestamp-wins; tombstoned peers are then suppressed from the merged contacts list and their archived keys are not installed.
 
 ```ts
 const { extra } = await mw.importArchive(blob: Uint8Array): Promise<{ extra?: Record<string, unknown> }>
@@ -551,6 +657,17 @@ Two things stand out about MeshWhisper's approach:
 
 The trade-off is that recovery is gated on remembering the password — there's no "forgot password"
 flow. By design.
+
+### Tombstones and revivals
+
+The archive's merge is additive — without an explicit signal, a peer deleted on one device would resurrect on the next pull. The SDK tracks two paired events to handle this cleanly:
+
+- **`addTombstone(peerId)`** fires whenever you call `deleteConversation(peerId)`. Suppresses the peer's archived `messages/{peerId}`, `peers/{peerId}`, `edkeys/{peerId}` keys on merge, and filters them out of the merged `contacts` array.
+- **`addRevival(peerId)`** fires whenever a peer is re-added (`acceptContact`, `addContactByKey`, inbound `x3dh_init`, `acceptGroupInvite`, `createGroup`). On merge, a peer is considered tombstoned **iff** `tombstone > revival` (max-timestamp per peer per event type, last event wins).
+
+Both events fire the optional `onArchiveDirty` callback so apps can push the archive immediately rather than waiting on a debounce — critical because stale relay state would otherwise resurrect deletions or re-suppress revivals on the next pull. Apps that don't provide `onArchiveDirty` still work but lose the immediate-push property.
+
+You don't call these directly — they're triggered automatically by the public API methods. The mechanism is documented here so multi-device delete/re-add behaviour is predictable.
 
 ---
 
