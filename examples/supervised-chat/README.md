@@ -14,11 +14,12 @@ A supervised conversation is a **three-person MeshWhisper group**: customer + ag
 
 ## What's in this directory
 
-| File | What it is |
+| File / dir | What it is |
 |---|---|
 | `src/shared.ts` | Common SDK init helper. Both actors run identically except for which callbacks they wire up. |
 | `src/agent.ts` | The support agent. Auto-accepts group invites, replies with a canned acknowledgement on inbound group messages. Swap the canned reply for any logic (LLM, ticket creation, human queue handoff). |
 | `src/supervisor.ts` | The compliance supervisor. Auto-accepts group invites, **never sends**, and appends every received message to a JSON-Lines audit log. |
+| **[`dashboard/`](dashboard/)** | Small Vite + React + FlexSearch app for browsing and searching the supervisor's audit log. The operator-side UI a real deployment would build on. |
 | `.env.example` | Configuration: namespace, relay URL, usernames, data directories. |
 
 ## Quick start
