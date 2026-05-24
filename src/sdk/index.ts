@@ -73,6 +73,7 @@ import { GroupManager } from '../group/index.js';
 import { ChaffGenerator } from '../chaff/index.js';
 import { SessionManager } from './session-manager.js';
 import { MessageHandler } from './message-handler.js';
+import { KeyedMutex } from './keyed-mutex.js';
 import { SybilManager, RELAY_TRUST_FLOOR } from './sybil-manager.js';
 import {
   uint8ArrayToHex,
@@ -251,6 +252,12 @@ export class MeshWhisper {
   // --- Focused managers ---
   private readonly sessionManager: SessionManager;
   private readonly messageHandler: MessageHandler;
+
+  // Serialises the read-encrypt-write block in sendMessage per-recipient.
+  // Without this, two concurrent sends to the same peer both ratchetEncrypt
+  // off the same snapshot, produce identical msgN=0 packets, and the receiver
+  // can only decrypt one — the others fail with "invalid ghash tag".
+  private readonly sessionMutex = new KeyedMutex();
 
   // --- Transports ---
   private readonly wsTransport: MWTransport;
@@ -644,7 +651,7 @@ export class MeshWhisper {
 
     await this.sessionManager.ensureSession(recipientId);
 
-    let session = this.sessionManager.getSession(recipientId);
+    const session = this.sessionManager.getSession(recipientId);
     if (!session) {
       const err = new Error(`Failed to establish session with ${recipientId}`);
       this.fireError(err);
@@ -655,7 +662,10 @@ export class MeshWhisper {
     // message hasn't arrived yet. The sending chain bootstraps when we
     // process that activation, so wait briefly rather than failing the
     // user's send. If it never arrives the existing throw still fires.
-    session = await this.waitForSendableSession(recipientId, session);
+    // Done outside the sessionMutex so we don't hold the per-recipient lock
+    // for the full 6s wait window — the mutex re-reads inside its critical
+    // section anyway.
+    await this.waitForSendableSession(recipientId, session);
 
     const messageId = generateMessageId();
     const envelope = {
@@ -670,8 +680,17 @@ export class MeshWhisper {
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));
     const compressed = compressPayload(envelopeBytes);
-    const { state: newState, header, ciphertext } = ratchetEncrypt(session, compressed);
-    this.sessionManager.setSession(recipientId, newState);
+
+    const { header, ciphertext } = await this.sessionMutex.run(recipientId, async () => {
+      const current = this.sessionManager.getSession(recipientId);
+      if (!current) throw new Error(`Session for ${recipientId} disappeared mid-send`);
+      if (current.sendingChainKey === null) {
+        throw new Error(`Session for ${recipientId} reverted to receiver-only mid-send`);
+      }
+      const r = ratchetEncrypt(current, compressed);
+      this.sessionManager.setSession(recipientId, r.state);
+      return { header: r.header, ciphertext: r.ciphertext };
+    });
 
     const headerBytes = serializeRatchetHeader(header);
     const fullPayload = concat(headerBytes, ciphertext);
@@ -709,9 +728,9 @@ export class MeshWhisper {
    *  which manages its own storage under the group conversation ID. */
   private async sendMessageRaw(recipientId: string, payload: Uint8Array): Promise<void> {
     await this.sessionManager.ensureSession(recipientId);
-    let session = this.sessionManager.getSession(recipientId);
+    const session = this.sessionManager.getSession(recipientId);
     if (!session) throw new Error(`No session for ${recipientId}`);
-    session = await this.waitForSendableSession(recipientId, session);
+    await this.waitForSendableSession(recipientId, session);
 
     const envelope = {
       id: generateMessageId(),
@@ -724,8 +743,17 @@ export class MeshWhisper {
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));
     const compressed = compressPayload(envelopeBytes);
-    const { state: newState, header, ciphertext } = ratchetEncrypt(session, compressed);
-    this.sessionManager.setSession(recipientId, newState);
+
+    const { header, ciphertext } = await this.sessionMutex.run(recipientId, async () => {
+      const current = this.sessionManager.getSession(recipientId);
+      if (!current) throw new Error(`Session for ${recipientId} disappeared mid-send`);
+      if (current.sendingChainKey === null) {
+        throw new Error(`Session for ${recipientId} reverted to receiver-only mid-send`);
+      }
+      const r = ratchetEncrypt(current, compressed);
+      this.sessionManager.setSession(recipientId, r.state);
+      return { header: r.header, ciphertext: r.ciphertext };
+    });
 
     const headerBytes = serializeRatchetHeader(header);
     const fullPayload = concat(headerBytes, ciphertext);
