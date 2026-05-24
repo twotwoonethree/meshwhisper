@@ -11,6 +11,7 @@ Self-hosted, post-quantum end-to-end encrypted messaging for any app — PWA, Re
 <a href="docs/getting-started.md">Getting started</a> ·
 <a href="docs/api.md">API reference</a> ·
 <a href="prudence/REFERENCE.md">Reference app</a> ·
+<a href="examples/">Examples</a> ·
 <a href="docs/self-hosting.md">Self-hosting</a> ·
 <a href="docs/whitepaper.md">Whitepaper</a> ·
 <a href="docs/presentation.pdf">Presentation</a>
@@ -135,6 +136,8 @@ The SDK auto-detects the environment. In a browser it uses IndexedDB for storage
 
 Try it live at [prudence.meshwhisper.org](https://prudence.meshwhisper.org) or run it locally from `prudence/`.
 
+For server-side integrations — AI agents, customer-service bots, IoT gateways — see **[examples/](examples/)**. The first reference is **[examples/support-bot](examples/support-bot/)**: a customer-service agent running as a MeshWhisper peer, ~150 lines, with an echo mode (no API key) and an LLM mode (Claude). Same protocol, different deployment shape.
+
 ---
 
 ## Scaffold in 60 seconds
@@ -198,6 +201,7 @@ In the future, node operators can choose to **peer** with other nodes for redund
 - **[docs/getting-started.md](docs/getting-started.md)** — complete walkthrough from zero to working PWA
 - **[docs/api.md](docs/api.md)** — full SDK API reference
 - **[prudence/REFERENCE.md](prudence/REFERENCE.md)** — Prudence as a living example: which SDK feature lives where in the demo app, and the non-obvious patterns to copy
+- **[examples/](examples/)** — Minimal end-to-end integrations. Start with **[support-bot](examples/support-bot/)** — a customer-service AI agent as a MeshWhisper peer, ~150 lines.
 - **[docs/identity-patterns.md](docs/identity-patterns.md)** — Six identity-derivation patterns (username+password, email, phone, OS keychain, Secure Enclave, passkey) — pick what matches your threat model; the SDK is neutral
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers

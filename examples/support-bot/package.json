@@ -1,0 +1,21 @@
+{
+  "name": "@meshwhisper/example-support-bot",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: a customer-service agent running as a MeshWhisper peer",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --enable-source-maps dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../..",
+    "@anthropic-ai/sdk": "^0.40.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
