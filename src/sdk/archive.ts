@@ -24,14 +24,23 @@ export interface ArchivePayload {
   kv: Record<string, string>;
   /**
    * Deletion tombstones — peerId/groupId → ms epoch of the delete event.
-   * Suppresses the peer's archived keys and contacts-array entry on merge.
-   * A re-add (acceptContact / addContactByKey) clears the local tombstone,
-   * and the absence of a remote tombstone with a newer timestamp lets the
-   * peer re-appear. Older devices that don't know about this field still
-   * read version=1 archives without crashing — they just lose
-   * tombstone semantics and may resurrect deleted peers until they update.
+   * Suppresses the peer's archived keys and contacts-array entry on merge
+   * when the peer's most-recent event is a tombstone. Older devices that
+   * don't know about this field still read version=1 archives without
+   * crashing — they just lose tombstone semantics and may resurrect
+   * deleted peers until they update.
    */
   tombstones?: Record<string, number>;
+  /**
+   * Revivals — peerId → ms epoch of an explicit re-add (acceptContact,
+   * addContactByKey, or inbound x3dh_init from a previously-deleted peer).
+   * Merge picks the most-recent event per peer; a revival newer than the
+   * tombstone means the peer is active. Without this, a re-add whose
+   * archive push didn't fire (e.g. via a Prudence handler that forgot
+   * scheduleArchiveSync) would be undone on the next pull by the stale
+   * remote tombstone.
+   */
+  revivals?: Record<string, number>;
   extra?: Record<string, unknown>;
 }
 
@@ -184,19 +193,38 @@ export async function mergeKv(
   storage: StorageBackend,
   lock?: <T>(key: string, fn: () => Promise<T>) => Promise<T>,
   remoteTombstones: Record<string, number> = {},
+  remoteRevivals: Record<string, number> = {},
 ): Promise<void> {
   const localTombstones = await readTombstones(storage);
+  const localRevivals = await readRevivals(storage);
+
   const mergedTombstones: Record<string, number> = { ...localTombstones };
   for (const [peer, t] of Object.entries(remoteTombstones)) {
     mergedTombstones[peer] = Math.max(mergedTombstones[peer] ?? 0, t);
   }
+  const mergedRevivals: Record<string, number> = { ...localRevivals };
+  for (const [peer, t] of Object.entries(remoteRevivals)) {
+    mergedRevivals[peer] = Math.max(mergedRevivals[peer] ?? 0, t);
+  }
+
   await writeTombstones(storage, mergedTombstones);
+  await writeRevivals(storage, mergedRevivals);
+
+  // A peer is currently tombstoned iff its most-recent event is a delete.
+  // Equal timestamps fall back to "revived" (favour resurrection — better UX
+  // than dropping the peer when timestamps coincide by accident).
+  const peerIsTombstoned = (peerId: string): boolean => {
+    const tomb = mergedTombstones[peerId];
+    if (tomb === undefined) return false;
+    const rev = mergedRevivals[peerId] ?? 0;
+    return tomb > rev;
+  };
 
   const isPeerTombstoned = (key: string): boolean => {
     for (const prefix of ARCHIVE_PREFIXES) {
       if (key.startsWith(prefix)) {
         const peerId = key.slice(prefix.length);
-        return peerId in mergedTombstones;
+        return peerIsTombstoned(peerId);
       }
     }
     return false;
@@ -223,7 +251,9 @@ export async function mergeKv(
           await storage.set(k, JSON.stringify(merged));
         } else if (k === 'contacts') {
           const union = new Set([...(local as string[]), ...(remote as string[])]);
-          for (const peerId of Object.keys(mergedTombstones)) union.delete(peerId);
+          for (const peerId of Object.keys(mergedTombstones)) {
+            if (peerIsTombstoned(peerId)) union.delete(peerId);
+          }
           await storage.set(k, JSON.stringify([...union]));
         } else {
           await storage.set(k, JSON.stringify([...new Set([...(local as string[]), ...(remote as string[])])]));
@@ -251,7 +281,7 @@ export async function mergeKv(
   if (localContactsRaw) {
     try {
       const arr = JSON.parse(localContactsRaw) as string[];
-      const filtered = arr.filter((p) => !(p in mergedTombstones));
+      const filtered = arr.filter((p) => !peerIsTombstoned(p));
       if (filtered.length !== arr.length) {
         await storage.set('contacts', JSON.stringify(filtered));
       }
@@ -260,10 +290,11 @@ export async function mergeKv(
 }
 
 // ============================================================
-// Tombstones — local storage helpers
+// Tombstones + revivals — local storage helpers
 // ============================================================
 
 const TOMBSTONE_KEY = 'tombstones';
+const REVIVAL_KEY = 'revivals';
 
 export async function readTombstones(storage: StorageBackend): Promise<Record<string, number>> {
   const raw = await storage.get(TOMBSTONE_KEY);
@@ -282,17 +313,38 @@ export async function writeTombstones(
   await storage.set(TOMBSTONE_KEY, JSON.stringify(tombstones));
 }
 
+export async function readRevivals(storage: StorageBackend): Promise<Record<string, number>> {
+  const raw = await storage.get(REVIVAL_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+export async function writeRevivals(
+  storage: StorageBackend,
+  revivals: Record<string, number>,
+): Promise<void> {
+  await storage.set(REVIVAL_KEY, JSON.stringify(revivals));
+}
+
 export async function addTombstone(storage: StorageBackend, peerId: string): Promise<void> {
   const cur = await readTombstones(storage);
   cur[peerId] = Date.now();
   await writeTombstones(storage, cur);
 }
 
-export async function clearTombstone(storage: StorageBackend, peerId: string): Promise<void> {
-  const cur = await readTombstones(storage);
-  if (!(peerId in cur)) return;
-  delete cur[peerId];
-  await writeTombstones(storage, cur);
+/**
+ * Record a revival event for `peerId` (re-add after delete). On merge, the
+ * peer is considered tombstoned only if its tombstone timestamp is greater
+ * than its revival timestamp — so this beats any stale remote tombstone.
+ */
+export async function addRevival(storage: StorageBackend, peerId: string): Promise<void> {
+  const cur = await readRevivals(storage);
+  cur[peerId] = Date.now();
+  await writeRevivals(storage, cur);
 }
 
 // ============================================================

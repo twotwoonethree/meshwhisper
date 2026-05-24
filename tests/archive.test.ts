@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   mergeKv,
   readTombstones,
+  readRevivals,
   addTombstone,
-  clearTombstone,
+  addRevival,
 } from '../src/sdk/archive.js';
 import type { StorageBackend } from '../src/persistence/types.js';
 
@@ -58,19 +59,26 @@ describe('tombstone helpers', () => {
     expect(t.alice).toBeLessThanOrEqual(after);
   });
 
-  it('clearTombstone removes the entry', async () => {
+  it('addRevival records peer with current timestamp', async () => {
     const s = memoryStorage();
-    await addTombstone(s, 'alice');
-    await clearTombstone(s, 'alice');
-    expect(await readTombstones(s)).toEqual({});
+    const before = Date.now();
+    await addRevival(s, 'alice');
+    const after = Date.now();
+    const r = await readRevivals(s);
+    expect(Object.keys(r)).toEqual(['alice']);
+    expect(r.alice).toBeGreaterThanOrEqual(before);
+    expect(r.alice).toBeLessThanOrEqual(after);
   });
 
-  it('clearTombstone is a no-op for unknown peer', async () => {
+  it('addRevival does not delete the tombstone entry', async () => {
+    // The revival event is recorded alongside the tombstone — mergeKv picks
+    // the most recent of the two. Keeping both lets the revival propagate to
+    // other devices that still have the old tombstone.
     const s = memoryStorage();
     await addTombstone(s, 'alice');
-    await clearTombstone(s, 'bob');
-    const t = await readTombstones(s);
-    expect(Object.keys(t)).toEqual(['alice']);
+    await addRevival(s, 'alice');
+    expect(Object.keys(await readTombstones(s))).toEqual(['alice']);
+    expect(Object.keys(await readRevivals(s))).toEqual(['alice']);
   });
 });
 
@@ -226,5 +234,69 @@ describe('mergeKv with tombstones', () => {
     expect(await local.get('edkeys/alice')).toBeNull();
     const contacts = JSON.parse(await local.get('contacts') as string) as string[];
     expect(contacts).toEqual(['bob']);
+  });
+
+  it('revival beats a stale remote tombstone — re-add survives reload', async () => {
+    // The follow-up bug: user deleted Alice, then re-added her, but the
+    // post-revival archive push never reached the relay (e.g. Prudence handler
+    // missed scheduleArchiveSync). On next reload, the relay archive still
+    // has the tombstone — and without revivals, mergeKv re-applies it.
+    // With revivals, the locally-recorded revival event beats the stale
+    // remote tombstone.
+
+    // Local state post-re-add: contacts include alice, tombstone older, revival fresh.
+    await local.set('contacts', JSON.stringify(['alice', 'bob']));
+    await local.set('tombstones', JSON.stringify({ alice: 100 }));
+    await local.set('revivals', JSON.stringify({ alice: 200 }));
+
+    // Stale relay archive: still has the tombstone, no revival, contacts pre-add.
+    await mergeKv(
+      { contacts: JSON.stringify(['bob']) },
+      local,
+      undefined,
+      { alice: 100 },
+      {},
+    );
+
+    const contacts = JSON.parse(await local.get('contacts') as string) as string[];
+    expect(contacts.sort()).toEqual(['alice', 'bob']);
+  });
+
+  it('revival in remote archive beats local tombstone (cross-device re-add)', async () => {
+    // Another device re-added Alice and pushed the revival. This device still
+    // has the old tombstone but no revival yet. Merge should clear the
+    // suppression because the remote revival is newer.
+    await local.set('tombstones', JSON.stringify({ alice: 100 }));
+
+    await mergeKv(
+      {
+        contacts: JSON.stringify(['alice']),
+        'messages/alice': JSON.stringify([{ id: 'm1', timestamp: 1 }]),
+      },
+      local,
+      undefined,
+      { alice: 100 },
+      { alice: 200 },
+    );
+
+    expect(await local.get('messages/alice')).not.toBeNull();
+    const contacts = JSON.parse(await local.get('contacts') as string) as string[];
+    expect(contacts).toEqual(['alice']);
+  });
+
+  it('tombstone newer than revival still suppresses (re-delete after re-add)', async () => {
+    // User re-added then re-deleted. The newer tombstone should win.
+    await local.set('tombstones', JSON.stringify({ alice: 300 }));
+    await local.set('revivals', JSON.stringify({ alice: 200 }));
+
+    await mergeKv(
+      { 'messages/alice': JSON.stringify([{ id: 'm1', timestamp: 1 }]) },
+      local,
+      undefined,
+      { alice: 300 },
+      { alice: 200 },
+    );
+
+    expect(await local.get('messages/alice')).toBeNull();
   });
 });

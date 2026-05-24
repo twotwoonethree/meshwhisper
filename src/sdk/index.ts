@@ -95,8 +95,9 @@ import {
   downloadArchive,
   MAX_ARCHIVE_BYTES,
   readTombstones,
+  readRevivals,
   addTombstone,
-  clearTombstone,
+  addRevival,
 } from './archive.js';
 export type { ArchivePayload } from './archive.js';
 
@@ -1204,7 +1205,7 @@ export class MeshWhisper {
       this.permissionManager.addContact(peerId);
     }
 
-    if (this.storage) await clearTombstone(this.storage, peerId);
+    if (this.storage) await addRevival(this.storage, peerId);
 
     this.peerCache.addPeer(peerId, edwardsToMontgomeryPub(bundle.identityKey));
     await this.sessionManager.initiateHandshake(peerId, bundle);
@@ -1245,7 +1246,7 @@ export class MeshWhisper {
     } else {
       this.permissionManager.addContact(peerId);
     }
-    if (this.storage) await clearTombstone(this.storage, peerId);
+    if (this.storage) await addRevival(this.storage, peerId);
     this.persistContacts().catch(() => {});
 
     // Initiate a new handshake if either:
@@ -1496,6 +1497,7 @@ export class MeshWhisper {
     const backupKey = await _deriveBackupKey(identityKey);
     const kv = await collectKv(this.storage);
     const tombstones = await readTombstones(this.storage);
+    const revivals = await readRevivals(this.storage);
     const payload = {
       version: 1 as const,
       createdAt: Date.now(),
@@ -1503,6 +1505,7 @@ export class MeshWhisper {
       relayUrl: this.archiveRelayUrl(),
       kv,
       tombstones,
+      revivals,
       extra,
     };
     return encryptArchive(payload, backupKey);
@@ -1525,6 +1528,7 @@ export class MeshWhisper {
       this.storage,
       (key, fn) => this.messageHandler.storageMutex.run(key, fn),
       payload.tombstones ?? {},
+      payload.revivals ?? {},
     );
     await this.loadPersistedState();
 
@@ -1556,6 +1560,7 @@ export class MeshWhisper {
     const authToken = await deriveArchiveToken(identityKey);
     const kv = await collectKv(this.storage);
     const tombstones = await readTombstones(this.storage);
+    const revivals = await readRevivals(this.storage);
     const payload = {
       version: 1 as const,
       createdAt: Date.now(),
@@ -1563,6 +1568,7 @@ export class MeshWhisper {
       relayUrl: this.archiveRelayUrl(),
       kv,
       tombstones,
+      revivals,
       extra,
     };
     const plainSize = JSON.stringify(payload).length;
@@ -1860,9 +1866,11 @@ export class MeshWhisper {
 
     this.permissionManager.addContact(peerId);
     this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())).catch(() => {});
-    // The peer initiated an inbound X3DH — that overrides any prior tombstone
-    // (e.g. peer was deleted locally but is sending us a fresh handshake now).
-    if (this.storage) clearTombstone(this.storage, peerId).catch(() => {});
+    // The peer initiated an inbound X3DH — record a revival so it beats any
+    // prior tombstone in archive merge (e.g. peer was deleted locally but is
+    // sending us a fresh handshake now, or our cleared-tombstone state hadn't
+    // been pushed to the relay yet when we last reloaded).
+    if (this.storage) addRevival(this.storage, peerId).catch(() => {});
 
     // peerId is the hex-encoded X25519 public key — add it to peerCache so
     // sendMessage can compute the dest hash. Persist immediately so it survives restarts.

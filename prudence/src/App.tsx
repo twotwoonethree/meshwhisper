@@ -1381,6 +1381,10 @@ export default function App() {
                 ],
               };
             });
+            // The SDK recorded a revival event for this peer. Push the archive
+            // so the relay sees the revival and a future pull won't re-apply
+            // any stale tombstone.
+            scheduleArchiveSync(getSDK());
           }}
         />
       </div>
