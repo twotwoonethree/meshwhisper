@@ -205,6 +205,8 @@ In the future, node operators can choose to **peer** with other nodes for redund
 - **[docs/identity-patterns.md](docs/identity-patterns.md)** — Six identity-derivation patterns (username+password, email, phone, OS keychain, Secure Enclave, passkey) — pick what matches your threat model; the SDK is neutral
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers
+- **[docs/direction.md](docs/direction.md)** — what MeshWhisper is today, where it's going, what we're deliberately not building
+- **[docs/adr/](docs/adr/)** — architecture decision records: the *why* behind significant choices
 - **[docs/multi-device.md](docs/multi-device.md)** — strategy for multi-device support (hand-off, hard boot, linked devices)
 - **[docs/whitepaper.md](docs/whitepaper.md)** — full protocol whitepaper ([PDF](docs/whitepaper.pdf))
 - **[docs/presentation.pdf](docs/presentation.pdf)** — slide deck overview of the protocol and project
