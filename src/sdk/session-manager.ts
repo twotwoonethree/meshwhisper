@@ -64,6 +64,13 @@ export class SessionManager {
   private lastReestablishAt = 0;
   private static readonly REESTABLISH_COOLDOWN_MS = 60_000;
 
+  // Per-peer last-handshake-attempt timestamp for targeted re-handshake.
+  // Independent of the global cooldown: lets a single broken pair re-handshake
+  // immediately, but caps churn at one attempt per 30s per peer to prevent
+  // tight loops if both sides are continuously failing.
+  private readonly lastTargetedReestablishAt: Map<string, number> = new Map();
+  private static readonly TARGETED_REESTABLISH_COOLDOWN_MS = 30_000;
+
   // Peer pre-key bundles (needed for initiating X3DH and re-establishment)
   private readonly peerPreKeyBundles: Map<string, PreKeyBundle> = new Map();
 
@@ -357,6 +364,45 @@ export class SessionManager {
       } catch {
         // Best effort — peer may be offline; session will re-establish on reconnect
       }
+    }
+  }
+
+  /**
+   * Immediately re-handshake with a single peer whose session looks broken
+   * (e.g. an inbound packet's dhKey indexed to them but ratchetDecrypt
+   * threw). Per-peer cooldown of 30s prevents tight handshake loops if
+   * both sides are continuously failing. Best-effort: silently no-ops when
+   * we have no cached bundle and the directory lookup fails.
+   *
+   * Prefer this over scheduleReestablishment when the failing peer is
+   * known — it's faster (no 2s debounce) and narrower (doesn't ping every
+   * contact).
+   */
+  async targetedReestablish(peerId: string): Promise<void> {
+    const now = Date.now();
+    const last = this.lastTargetedReestablishAt.get(peerId) ?? 0;
+    if (now - last < SessionManager.TARGETED_REESTABLISH_COOLDOWN_MS) return;
+    this.lastTargetedReestablishAt.set(peerId, now);
+
+    let bundle = this.peerPreKeyBundles.get(peerId);
+    if (!bundle) {
+      const edKey = this.peerEdKeys.get(peerId);
+      if (!edKey) return;
+      try {
+        const fresh = await this.lookupPreKeyBundle(uint8ArrayToHex(edKey));
+        if (!fresh) return;
+        this.setBundle(peerId, fresh.bundle);
+        bundle = fresh.bundle;
+      } catch {
+        return;
+      }
+    }
+
+    try {
+      await this.initiateHandshake(peerId, bundle);
+    } catch {
+      // Peer offline or unreachable — cooldown still applies; next failure
+      // after cooldown expires gets another shot.
     }
   }
 

@@ -62,9 +62,11 @@ export class MessageHandler {
     /**
      * Called when a DATA packet addressed to us fails to decrypt across all
      * known sessions. Signals that a session may be lost (e.g. after reinstall)
-     * and that re-establishment should be attempted.
+     * and that re-establishment should be attempted. The `hintPeerId` is set
+     * when the failed packet's dhKey is indexed to a known peer — caller uses
+     * it to drive a targeted re-handshake rather than a global one.
      */
-    private readonly onDecryptFailure: (() => void) | null = null,
+    private readonly onDecryptFailure: ((hintPeerId: string | null) => void) | null = null,
     /**
      * Called when a group-envelope message is received after pairwise decryption.
      * The coordinator decrypts the inner ciphertext with the group sender key
@@ -172,11 +174,17 @@ export class MessageHandler {
       }
 
       if (!decrypted || !matchedPeerId) {
+        // If the dhKey indexed to a known peer but ratchetDecrypt threw,
+        // the session for THAT peer is the broken one — pass the hint so
+        // the coordinator can target a single re-handshake rather than
+        // re-handshaking every contact globally.
+        const hint = indexedPeerId ?? null;
         console.warn(
           '[meshwhisper] decrypt failed for inbound packet — no session matched. ' +
-          `dhKey=${uint8ArrayToHex(header.dhPublicKey).slice(0, 16)}…`,
+          `dhKey=${uint8ArrayToHex(header.dhPublicKey).slice(0, 16)}…` +
+          (hint ? ` (hint peerId=${hint.slice(0, 8)})` : ''),
         );
-        this.onDecryptFailure?.();
+        this.onDecryptFailure?.(hint);
         return;
       }
 

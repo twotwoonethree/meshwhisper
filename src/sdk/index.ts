@@ -447,7 +447,17 @@ export class MeshWhisper {
       (peerId, payload) => this.sendControl(peerId, payload),
       this.cluster,
       (ctrl, fromPeerId) => this.handleSybilControl(ctrl, fromPeerId),
-      () => this.sessionManager.scheduleReestablishment(),
+      (hintPeerId) => {
+        // Targeted re-handshake when we can identify the broken peer (the
+        // failed packet's dhKey was indexed to them). Per-peer 30s cooldown
+        // prevents tight loops if both sides are continuously failing.
+        if (hintPeerId) {
+          this.sessionManager.targetedReestablish(hintPeerId).catch(() => {});
+          return;
+        }
+        // Unknown peer — fall back to the debounced global re-handshake.
+        this.sessionManager.scheduleReestablishment();
+      },
       (groupId, groupSenderId, ciphertext) => {
         try {
           const plaintext = this.groupManager.decryptFromGroup(groupId, groupSenderId, ciphertext);
@@ -2049,10 +2059,16 @@ export class MeshWhisper {
     // sending us a fresh handshake now, or our cleared-tombstone state hadn't
     // been pushed to the relay yet when we last reloaded). The recordRevival
     // helper also fires onArchiveDirty so the archive gets pushed immediately.
-    // If there was a prior tombstone, also auto-request history from the peer.
-    this.recordRevival(peerId)
-      .then((hadTombstone) => this.autoRequestHistoryIfRevived(peerId, hadTombstone))
-      .catch(() => {});
+    //
+    // We deliberately DO NOT auto-request history on the inbound path. Auto-
+    // request is the "I just re-added this peer" affordance and only belongs
+    // on paths we initiated (acceptContact, addContactByKey). Firing it here
+    // floods the bootstrap window with control traffic — entropy_challenge +
+    // reputation_proof + request_history all queued behind a session that's
+    // still receiver-only — and any one of them timing out can leave the
+    // session in a half-broken state. If the other side wants history they
+    // can request it explicitly via the "restore" button.
+    this.recordRevival(peerId).catch(() => {});
 
     // peerId is the hex-encoded X25519 public key — add it to peerCache so
     // sendMessage can compute the dest hash. Persist immediately so it survives restarts.
