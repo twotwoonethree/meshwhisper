@@ -2763,6 +2763,56 @@ export class MeshWhisper {
     return result?.username;
   }
 
+  /**
+   * Returns true if `identifier` is not currently claimed by another
+   * identity in this namespace's directory. Returns true if the
+   * identifier is already ours.
+   *
+   * Use this before `setIdentifier()` or during a registration flow
+   * to give the user a clean "that handle is taken — try another"
+   * affordance.
+   *
+   * Availability is a point-in-time check. Two clients can both
+   * observe "available" and race to register; treat the result as
+   * a hint, and handle the race with retry-on-collision logic if
+   * the consequence matters.
+   *
+   * See [docs/identifier-patterns.md](../../docs/identifier-patterns.md).
+   */
+  static async checkIdentifierAvailable(identifier: string): Promise<boolean> {
+    return MeshWhisper.instance.checkIdentifierAvailable(identifier);
+  }
+
+  async checkIdentifierAvailable(identifier: string): Promise<boolean> {
+    this.assertRunning();
+    if (!identifier) return false;
+    const found = await this.sessionManager.lookupPreKeyBundle(`@${identifier}`);
+    if (!found) return true;
+    return found.publicKey === uint8ArrayToHex(this.identity.getEdPublicKey());
+  }
+
+  /**
+   * Changes the identifier this device is registered under in the
+   * relay's directory and republishes the prekey bundle so subsequent
+   * lookups resolve to this peer.
+   *
+   * The cryptographic identity (peerId, keys, sessions, contacts) is
+   * unchanged — only the human-readable handle moves.
+   *
+   * See [docs/identifier-patterns.md](../../docs/identifier-patterns.md).
+   */
+  static async setIdentifier(identifier: string): Promise<void> {
+    return MeshWhisper.instance.setIdentifier(identifier);
+  }
+
+  async setIdentifier(identifier: string): Promise<void> {
+    this.assertRunning();
+    if (!identifier) throw new Error('Identifier cannot be empty');
+    this.config.username = identifier;
+    const bundle = this.sessionManager.getOrCreatePreKeyBundle();
+    await this.sessionManager.publishPreKeyBundle(bundle, identifier);
+  }
+
   private broadcastReputationProof(): void {
     const proof = this.sybilManager.buildLocalProof(
       this.reciprocityLedger,
