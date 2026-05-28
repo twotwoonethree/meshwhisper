@@ -117,7 +117,11 @@ export interface ControlMessage {
     | 'delete'
     | 'handshake_activate'
     | 'request_history'
-    | 'history_replay';
+    | 'history_replay'
+    | 'session_ping'
+    | 'session_pong';
+  /** session_ping / session_pong correlation id. */
+  sessionPingId?: string;
   /** history_replay: a chunk of historical messages from the sender's view. */
   historyMessages?: Array<{
     id: string;

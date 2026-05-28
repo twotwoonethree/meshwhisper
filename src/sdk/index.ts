@@ -305,6 +305,20 @@ export class MeshWhisper {
   private readonly sessionManager: SessionManager;
   private readonly messageHandler: MessageHandler;
 
+  // Session-health ping/pong state. After every initiateHandshake we schedule
+  // a session_ping; if no session_pong arrives within the timeout, the
+  // session is considered broken and we trigger a targeted re-handshake.
+  // Detects the "silent half-broken session" failure mode that onDecryptFailure
+  // can't catch (because nothing is failing to decrypt — there's just nothing
+  // flowing in one direction).
+  private readonly pendingPings: Map<string, {
+    pingId: string;
+    sendTimer: ReturnType<typeof setTimeout> | null;
+    timeoutTimer: ReturnType<typeof setTimeout> | null;
+  }> = new Map();
+  private static readonly SESSION_PING_DELAY_MS = 4_000;
+  private static readonly SESSION_PONG_TIMEOUT_MS = 10_000;
+
   // Serialises the read-encrypt-write block in sendMessage per-recipient.
   // Without this, two concurrent sends to the same peer both ratchetEncrypt
   // off the same snapshot, produce identical msgN=0 packets, and the receiver
@@ -435,6 +449,7 @@ export class MeshWhisper {
       config.namespace,
       config.node ?? 'mesh',
       this.namespaceManager.getNamespaceId(),
+      (peerId, role) => this.onSessionEstablishedHook(peerId, role),
     );
 
     // --- Message handler ---
@@ -678,6 +693,10 @@ export class MeshWhisper {
       clearInterval(this.reputationBroadcastTimer);
       this.reputationBroadcastTimer = null;
     }
+
+    // Cancel any in-flight session-health timers so they don't fire after
+    // shutdown and trigger spurious re-handshakes during the next init.
+    for (const peerId of [...this.pendingPings.keys()]) this.clearPendingPing(peerId);
 
     await Promise.allSettled([
       this.wsTransport.stop(),
@@ -1654,6 +1673,63 @@ export class MeshWhisper {
     }
   }
 
+  // ----------------------------------------------------------------
+  // Session-health ping/pong
+  // ----------------------------------------------------------------
+
+  /**
+   * Called by SessionManager every time a handshake completes. Initiator
+   * schedules a `session_ping` send; responder just clears any stale
+   * pending-ping state (a new handshake supersedes whatever was pending).
+   *
+   * The ping is delayed ~4s after the handshake to give handshake_activate
+   * time to land on the responder side. If no `session_pong` arrives within
+   * 10s of sending, we treat the session as broken and call
+   * `targetedReestablish`, which has its own per-peer cooldown.
+   */
+  private onSessionEstablishedHook(peerId: string, role: 'initiator' | 'responder'): void {
+    // Cancel any prior pending ping for this peer — superseded by the new session.
+    this.clearPendingPing(peerId);
+    if (role !== 'initiator') return;
+
+    const pingId = uint8ArrayToHex(randomBytes(8));
+    const sendTimer = setTimeout(() => {
+      this.sendControl(peerId, { __mw_ctrl: 'session_ping', sessionPingId: pingId });
+    }, MeshWhisper.SESSION_PING_DELAY_MS);
+    if (typeof sendTimer === 'object' && 'unref' in sendTimer) {
+      (sendTimer as NodeJS.Timeout).unref();
+    }
+
+    const timeoutTimer = setTimeout(() => {
+      // Still pending → no pong arrived. Treat as broken.
+      const pending = this.pendingPings.get(peerId);
+      if (!pending || pending.pingId !== pingId) return;
+      this.pendingPings.delete(peerId);
+      console.warn(`[meshwhisper] session_ping to ${peerId.slice(0, 8)} unanswered — re-handshaking`);
+      this.sessionManager.targetedReestablish(peerId).catch(() => {});
+    }, MeshWhisper.SESSION_PING_DELAY_MS + MeshWhisper.SESSION_PONG_TIMEOUT_MS);
+    if (typeof timeoutTimer === 'object' && 'unref' in timeoutTimer) {
+      (timeoutTimer as NodeJS.Timeout).unref();
+    }
+
+    this.pendingPings.set(peerId, { pingId, sendTimer, timeoutTimer });
+  }
+
+  /** Called when a session_pong arrives. Marks the matching ping resolved. */
+  private resolvePendingPing(peerId: string, pingId: string): void {
+    const pending = this.pendingPings.get(peerId);
+    if (!pending || pending.pingId !== pingId) return;
+    this.clearPendingPing(peerId);
+  }
+
+  private clearPendingPing(peerId: string): void {
+    const pending = this.pendingPings.get(peerId);
+    if (!pending) return;
+    if (pending.sendTimer) clearTimeout(pending.sendTimer);
+    if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+    this.pendingPings.delete(peerId);
+  }
+
   // ================================================================
   // Public API — Encrypted archive (backup / restore)
   // ================================================================
@@ -2299,6 +2375,19 @@ export class MeshWhisper {
 
       case 'history_replay':
         this.handleHistoryReplay(fromPeerId, ctrl).catch(() => {});
+        break;
+
+      case 'session_ping': {
+        // The fact that we decrypted this ping is itself proof that our
+        // receive direction works. Replying with the matching pong proves
+        // the same for the sender. No payload beyond the correlation id.
+        if (!ctrl.sessionPingId) break;
+        this.sendControl(fromPeerId, { __mw_ctrl: 'session_pong', sessionPingId: ctrl.sessionPingId });
+        break;
+      }
+
+      case 'session_pong':
+        if (ctrl.sessionPingId) this.resolvePendingPing(fromPeerId, ctrl.sessionPingId);
         break;
     }
   }

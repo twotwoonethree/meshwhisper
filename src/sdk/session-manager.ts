@@ -135,6 +135,21 @@ export class SessionManager {
     private readonly namespace: string,
     private readonly nodeUrl: string | string[] | 'mesh',
     private readonly namespaceId: Uint8Array,
+    /**
+     * Called when a handshake completes and a fresh session is in place.
+     * The coordinator uses this to schedule a session-health ping that
+     * confirms the new session is usable in both directions — silent
+     * half-broken sessions (where the handshake "succeeded" but messages
+     * don't decrypt on the other side) are detected and recovered from
+     * rather than persisting.
+     *
+     * `role` is `'initiator'` when WE called initiateHandshake, and
+     * `'responder'` when the peer's x3dh_init landed and we called
+     * completeIncomingHandshake. Only the initiator should actually
+     * send the ping; the responder uses the hook to clear stale health
+     * state from a prior session.
+     */
+    private readonly onSessionEstablished: (peerId: string, role: 'initiator' | 'responder') => void = () => {},
   ) {}
 
   // ----------------------------------------------------------------
@@ -727,6 +742,9 @@ export class SessionManager {
     // This advances the receiver's state from receive-only to fully usable
     // on first decrypt. See the constructor doc comment.
     this.onHandshakeInitiated(peerId);
+
+    // Schedule the session-health ping. Coordinator decides timing.
+    this.onSessionEstablished(peerId, 'initiator');
   }
 
   completeIncomingHandshake(envelope: HandshakeEnvelope): void {
@@ -791,6 +809,10 @@ export class SessionManager {
 
     // Notify the coordinator so it can update the permission manager
     this.onContactEstablished(envelope.senderId);
+
+    // Fresh session as the responder — clear any stale health state. We
+    // do NOT initiate a ping ourselves; the initiator handles that.
+    this.onSessionEstablished(envelope.senderId, 'responder');
 
     // Send handshake response
     const response: HandshakeEnvelope = {
