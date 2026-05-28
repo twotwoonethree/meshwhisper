@@ -561,6 +561,12 @@ export class MeshWhisper {
           if (contacts.length > 0) {
             instance.sessionManager.reinitiateSessionsOnStartup(contacts).catch(() => {});
           }
+          // Also schedule a boot-time session-health check for every existing
+          // session. Heals sessions that ended up broken under the old OPK
+          // resurrection bug without the user having to do anything — they
+          // open the app, broken sessions get pinged, no pong fires a
+          // targeted re-handshake, recovery is silent.
+          instance.scheduleBootHealthCheck();
         }
       }
     };
@@ -1595,6 +1601,28 @@ export class MeshWhisper {
     return MeshWhisper.instance.deleteConversationInstance(peerId);
   }
 
+  /**
+   * Force a fresh X3DH handshake with `peerId`, replacing whatever session
+   * we currently have. Use this when you know (or suspect) a session is
+   * broken and want immediate recovery without waiting for the next
+   * decrypt-failure to trigger automatic re-establishment.
+   *
+   * Preserves contacts, message history, and tombstones — only the
+   * ratchet state is replaced. The other side picks up the new session
+   * automatically when they receive the fresh x3dh_init.
+   *
+   * Bypasses the 30s per-peer cooldown that automatic re-establishment
+   * uses, so two users hammering the button won't deadlock each other.
+   */
+  static async resetSession(peerId: string): Promise<void> {
+    return MeshWhisper.instance.resetSessionInstance(peerId);
+  }
+
+  async resetSessionInstance(peerId: string): Promise<void> {
+    this.assertRunning();
+    await this.sessionManager.targetedReestablish(peerId, /* force */ true);
+  }
+
   async deleteConversationInstance(peerId: string): Promise<void> {
     this.permissionManager.removeContact(peerId);
     this.peerCache.removePeer(peerId);
@@ -1713,6 +1741,38 @@ export class MeshWhisper {
     }
 
     this.pendingPings.set(peerId, { pingId, sendTimer, timeoutTimer });
+  }
+
+  /**
+   * Pings every existing session shortly after startup. Sessions that
+   * answer with a pong are confirmed healthy; sessions that don't get
+   * automatically re-handshaked. This is the silent-recovery path for
+   * sessions that ended up broken under earlier protocol bugs — the user
+   * opens the app and broken conversations heal themselves within ~15s
+   * without any UI affordance to discover.
+   *
+   * Cheap: each ping is a small ratchet message, fan-out is per-contact,
+   * the 4s ping-send delay gives the connection time to settle.
+   */
+  private scheduleBootHealthCheck(): void {
+    // Capture contacts at scheduling time — we want to ping whoever was a
+    // contact when the SDK first connected, not chase contacts added later.
+    const peers = this.permissionManager.getContacts().filter(
+      (peerId) => this.sessionManager.hasSession(peerId),
+    );
+    if (peers.length === 0) return;
+    // Small stagger across peers so we don't fire all timers in one tick
+    // on a user with many contacts. Doesn't affect correctness.
+    for (let i = 0; i < peers.length; i++) {
+      const peerId = peers[i]!;
+      const jitter = 200 + i * 100;
+      const timer = setTimeout(() => {
+        this.onSessionEstablishedHook(peerId, 'initiator');
+      }, jitter);
+      if (typeof timer === 'object' && 'unref' in timer) {
+        (timer as NodeJS.Timeout).unref();
+      }
+    }
   }
 
   /** Called when a session_pong arrives. Marks the matching ping resolved. */

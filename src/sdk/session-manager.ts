@@ -418,10 +418,12 @@ export class SessionManager {
    * known — it's faster (no 2s debounce) and narrower (doesn't ping every
    * contact).
    */
-  async targetedReestablish(peerId: string): Promise<void> {
+  async targetedReestablish(peerId: string, force = false): Promise<void> {
     const now = Date.now();
-    const last = this.lastTargetedReestablishAt.get(peerId) ?? 0;
-    if (now - last < SessionManager.TARGETED_REESTABLISH_COOLDOWN_MS) return;
+    if (!force) {
+      const last = this.lastTargetedReestablishAt.get(peerId) ?? 0;
+      if (now - last < SessionManager.TARGETED_REESTABLISH_COOLDOWN_MS) return;
+    }
     this.lastTargetedReestablishAt.set(peerId, now);
 
     let bundle = this.peerPreKeyBundles.get(peerId);
