@@ -262,7 +262,9 @@ export class SessionManager {
       }
     }
 
-    // Generate fresh keys if the pool is short
+    // Generate fresh keys if the pool is short. Persist BEFORE uploading
+    // (same ordering rule as replenishOPKPool — relay must not know about
+    // OPKs that aren't yet durable on disk).
     if (this.opkPool.size < OPK_POOL_SIZE) {
       const needed = OPK_POOL_SIZE - this.opkPool.size;
       const edKeyPair = { publicKey: this.identity.getEdPublicKey(), privateKey: this.identity.getEdPrivateKey() };
@@ -270,13 +272,27 @@ export class SessionManager {
       for (const kp of newKeys) {
         const pubHex = uint8ArrayToHex(kp.publicKey);
         this.opkPool.set(pubHex, kp);
-        this.storage?.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey)).catch(() => {});
+        if (this.storage) {
+          await this.storage.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey));
+        }
       }
+      await this.uploadOPKs(newKeys);
     }
 
-    // Upload the full pool on startup — this handles relay restarts where the
-    // relay's OPK table was wiped but our private keys are still in local storage.
-    await this.uploadOPKs([...this.opkPool.values()]);
+    // We deliberately do NOT re-upload the *existing* pool on startup.
+    // An earlier revision did this as defence against relay-side OPK-table
+    // wipes — but it caused a worse bug: an OPK consumed by a peer
+    // (deleted from the relay's pool) would be RESURRECTED by the next
+    // startup's bulk re-upload. The next peer to claim a "fresh" OPK
+    // would get one we no longer have locally; X3DH would silently
+    // mismatch (peer does 4-DH, we fall back to 3-DH) and every
+    // subsequent ratchet packet would fail to decrypt. Caused the
+    // "messages don't go through after re-add" bug.
+    //
+    // If the relay loses its OPK table, the SDK recovers organically:
+    // peers fall back to 3-DH (which still gives forward secrecy and
+    // authentication), and the natural pool-depletion path triggers
+    // replenishOPKPool which uploads fresh OPKs.
   }
 
   /**
@@ -288,10 +304,19 @@ export class SessionManager {
     const needed = OPK_POOL_SIZE - this.opkPool.size;
     const edKeyPair = { publicKey: this.identity.getEdPublicKey(), privateKey: this.identity.getEdPrivateKey() };
     const newKeys = generateOneTimePreKeys(edKeyPair, needed);
+    // CRITICAL ORDERING: persist locally BEFORE uploading to the relay.
+    // If the relay learns about an OPK we don't have on disk yet, a
+    // peer who claims that OPK will compute a 4-DH shared secret; we'll
+    // look up the OPK locally, miss, and fall back to 3-DH. The shared
+    // secrets diverge silently and every subsequent ratchet packet from
+    // that peer fails to decrypt. Caused the "messages don't go through
+    // after re-add" bug.
     for (const kp of newKeys) {
       const pubHex = uint8ArrayToHex(kp.publicKey);
       this.opkPool.set(pubHex, kp);
-      this.storage?.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey)).catch(() => {});
+      if (this.storage) {
+        await this.storage.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey));
+      }
     }
     await this.uploadOPKs(newKeys);
   }
