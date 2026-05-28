@@ -5,7 +5,7 @@ import { initSDK, getSDK } from './sdk.ts';
 import { getPushSubscription } from './push.ts';
 import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
-import { saveContactName, getContactName, getAllContactNames, removeContactName } from './contact-names.ts';
+import { saveContactName, saveContactNameInteractive, getContactName, getAllContactNames, removeContactName } from './contact-names.ts';
 import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as getAllAccepted, restoreAll as restoreAccepted } from './accepted-contacts.ts';
 import { loadGroups, upsertGroup, removeStoredGroup } from './group-storage.ts';
 import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
@@ -892,8 +892,10 @@ export default function App() {
     markAccepted(peerId);
     const req = state.pendingRequests.find((r) => r.peerId === peerId);
     const resolvedUsername = reqUsername ?? req?.username;
-    if (resolvedUsername) saveContactName(peerId, resolvedUsername);
-    const contact = makeContact(peerId, resolvedUsername);
+    const finalDisplayName = resolvedUsername
+      ? saveContactNameInteractive(peerId, resolvedUsername)
+      : undefined;
+    const contact = makeContact(peerId, finalDisplayName);
     setState((prev) => ({
       ...prev,
       pendingRequests: prev.pendingRequests.filter((r) => r.peerId !== peerId),
@@ -911,12 +913,12 @@ export default function App() {
     if (!resolvedUsername) {
       void MeshWhisper.resolveUsername(peerId).then((username) => {
         if (!username) return;
-        saveContactName(peerId, username);
+        const finalName = saveContactNameInteractive(peerId, username);
         setState((prev) => ({
           ...prev,
           conversations: prev.conversations.map((c) =>
             c.id === peerId
-              ? { ...c, contact: { ...c.contact, username, displayName: username } }
+              ? { ...c, contact: { ...c.contact, username: finalName, displayName: finalName } }
               : c,
           ),
         }));
@@ -1520,21 +1522,21 @@ export default function App() {
           onGroupInviteClick={() => setShowGroupInvites(true)}
           onNewGroup={() => setShowCreateGroup(true)}
           onContactAdded={(peerId, addedUsername) => {
-            saveContactName(peerId, addedUsername);
+            const finalName = saveContactNameInteractive(peerId, addedUsername);
             setState((prev) => {
               const existing = prev.conversations.find((c) => c.id === peerId);
               if (existing) {
                 return {
                   ...prev,
                   conversations: prev.conversations.map((c) =>
-                    c.id === peerId ? { ...c, contact: makeContact(peerId, addedUsername) } : c,
+                    c.id === peerId ? { ...c, contact: makeContact(peerId, finalName) } : c,
                   ),
                 };
               }
               return {
                 ...prev,
                 conversations: [
-                  { id: peerId, contact: makeContact(peerId, addedUsername), unread: 0, isTyping: false },
+                  { id: peerId, contact: makeContact(peerId, finalName), unread: 0, isTyping: false },
                   ...prev.conversations,
                 ],
               };
