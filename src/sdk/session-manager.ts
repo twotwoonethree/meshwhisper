@@ -265,34 +265,48 @@ export class SessionManager {
     // Generate fresh keys if the pool is short. Persist BEFORE uploading
     // (same ordering rule as replenishOPKPool — relay must not know about
     // OPKs that aren't yet durable on disk).
+    const newKeys: KeyPair[] = [];
     if (this.opkPool.size < OPK_POOL_SIZE) {
       const needed = OPK_POOL_SIZE - this.opkPool.size;
       const edKeyPair = { publicKey: this.identity.getEdPublicKey(), privateKey: this.identity.getEdPrivateKey() };
-      const newKeys = generateOneTimePreKeys(edKeyPair, needed);
-      for (const kp of newKeys) {
+      const generated = generateOneTimePreKeys(edKeyPair, needed);
+      for (const kp of generated) {
         const pubHex = uint8ArrayToHex(kp.publicKey);
         this.opkPool.set(pubHex, kp);
         if (this.storage) {
           await this.storage.set(`opks/${pubHex}`, uint8ArrayToHex(kp.privateKey));
         }
+        newKeys.push(kp);
       }
-      await this.uploadOPKs(newKeys);
     }
 
-    // We deliberately do NOT re-upload the *existing* pool on startup.
-    // An earlier revision did this as defence against relay-side OPK-table
-    // wipes — but it caused a worse bug: an OPK consumed by a peer
-    // (deleted from the relay's pool) would be RESURRECTED by the next
-    // startup's bulk re-upload. The next peer to claim a "fresh" OPK
-    // would get one we no longer have locally; X3DH would silently
-    // mismatch (peer does 4-DH, we fall back to 3-DH) and every
-    // subsequent ratchet packet would fail to decrypt. Caused the
-    // "messages don't go through after re-add" bug.
+    // One-shot migration after the OPK-resurrection fix.
     //
-    // If the relay loses its OPK table, the SDK recovers organically:
-    // peers fall back to 3-DH (which still gives forward secrecy and
-    // authentication), and the natural pool-depletion path triggers
-    // replenishOPKPool which uploads fresh OPKs.
+    // The pre-fix SDK bulk-re-uploaded the full local pool on every init,
+    // which silently resurrected OPKs at the relay that had been claimed
+    // by other peers (and consequently deleted locally). The next peer
+    // to claim a "fresh" OPK from the relay could get one we no longer
+    // had — Alice does 4-DH, Bob falls back to 3-DH, every ratchet
+    // packet between them silently fails to decrypt.
+    //
+    // The fix prevents NEW resurrection but doesn't clean up the zombies
+    // already accumulated at the relay. This migration purges the relay's
+    // entire OPK pool for our identity and re-uploads only what's
+    // actually in our local store — guaranteeing relay-side pool ==
+    // local-side pool.
+    //
+    // Runs exactly once per device (gated by the storage flag below);
+    // best-effort, retries on next init if anything fails.
+    const migrationDone = this.storage ? await this.storage.get('opk_migration_v2_done') : null;
+    if (!migrationDone) {
+      await this.purgeRelayOPKPool();
+      await this.uploadOPKs([...this.opkPool.values()]);
+      await this.storage?.set('opk_migration_v2_done', '1');
+    } else if (newKeys.length > 0) {
+      // Migration already ran — just upload any freshly-generated keys
+      // (the relay's pool is in sync; we only need to push the deltas).
+      await this.uploadOPKs(newKeys);
+    }
   }
 
   /**
@@ -319,6 +333,62 @@ export class SessionManager {
       }
     }
     await this.uploadOPKs(newKeys);
+  }
+
+  /**
+   * Derive the per-identity OPK-pool auth token. Same HKDF construction as
+   * deriveArchiveToken but with a different info string so the OPK-pool
+   * authority is independent from the archive authority — losing one
+   * doesn't expose the other.
+   */
+  private async deriveOPKPoolToken(): Promise<string> {
+    const identityKey = this.identity.getEdPrivateKey();
+    const base = await globalThis.crypto.subtle.importKey(
+      'raw', identityKey.buffer as ArrayBuffer, 'HKDF', false, ['deriveBits'],
+    );
+    const bits = await globalThis.crypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new TextEncoder().encode('meshwhisper:opks:v1'),
+        info: new TextEncoder().encode('pool-purge-token'),
+      },
+      base,
+      256,
+    );
+    return btoa(String.fromCharCode(...new Uint8Array(bits)));
+  }
+
+  /**
+   * Purges every OPK at the relay for our identity in the configured
+   * namespace. Used by the one-shot migration that follows the OPK-
+   * resurrection fix — clients with bad zombie OPKs (uploaded by the
+   * buggy pre-fix bulk re-upload) wipe the relay's pool and re-upload
+   * what's actually in their local store. After that, the relay's
+   * pool and the client's pool are guaranteed to match.
+   *
+   * Authenticated via TOFU per identity_pubkey at the relay.
+   */
+  private async purgeRelayOPKPool(): Promise<void> {
+    const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
+    const primaryWsUrl = wsUrls[0];
+    if (!primaryWsUrl || primaryWsUrl === 'mesh') return;
+    const httpUrl = primaryWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+    const token = await this.deriveOPKPoolToken();
+    await fetch(`${httpUrl}/opks`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        namespace: this.namespace,
+        publicKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
+      }),
+    }).catch(() => {
+      // Best-effort. If the purge fails, the migration flag stays unset
+      // and we'll retry on next init.
+    });
   }
 
   /** Uploads OPK public keys to the relay. Best-effort — silently ignored on failure. */

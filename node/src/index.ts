@@ -119,6 +119,15 @@ db.exec(`
     UNIQUE (identity_key, opk_public)
   );
   CREATE INDEX IF NOT EXISTS opks_identity_key ON opks (identity_key);
+
+  -- TOFU auth for DELETE /opks. Identity_pubkey is the user's Ed25519
+  -- public key hex (cross-namespace). First DELETE establishes the hash;
+  -- subsequent DELETEs must match.
+  CREATE TABLE IF NOT EXISTS opk_auth (
+    identity_pubkey TEXT PRIMARY KEY,
+    auth_hash       TEXT NOT NULL,
+    stored_at       INTEGER NOT NULL
+  );
   CREATE UNIQUE INDEX IF NOT EXISTS prekey_username_idx
     ON prekey_bundles (namespace, username)
     WHERE username IS NOT NULL;
@@ -207,6 +216,21 @@ const stmts = {
   ),
   countOpks: db.prepare(
     'SELECT COUNT(*) AS cnt FROM opks',
+  ),
+  // Purges every OPK row for one (namespace, publicKey) pair. Used by the
+  // SDK's one-shot migration after the OPK-resurrection fix to clear out
+  // zombie entries that the buggy bulk re-upload left behind. The auth_hash
+  // check (separate TOFU table below) prevents anyone other than the
+  // identity owner from purging the pool.
+  deleteOpksForKey: db.prepare<[string]>(
+    'DELETE FROM opks WHERE identity_key = ?',
+  ),
+  // opk_auth (TOFU per identity)
+  getOpkAuthHash: db.prepare<[string]>(
+    'SELECT auth_hash FROM opk_auth WHERE identity_pubkey = ?',
+  ),
+  insertOpkAuthHash: db.prepare(
+    'INSERT OR IGNORE INTO opk_auth (identity_pubkey, auth_hash, stored_at) VALUES (?, ?, ?)',
   ),
 
   // media
@@ -921,6 +945,55 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       stmts.insertOpk.run(identityKey, opk, now);
     }
     sendJson(res, 200, { ok: true, stored: toStore.length });
+    return;
+  }
+
+  // Purge all OPKs for a (namespace, publicKey) pair.
+  // DELETE /opks  { namespace, publicKey }
+  // Authorization: Bearer <token>
+  //
+  // TOFU auth: first DELETE for a given publicKey establishes the auth hash;
+  // subsequent DELETEs must present a token whose SHA-256 matches the stored
+  // hash. Identity_pubkey is cross-namespace so the same person purging
+  // their pool in different namespaces uses the same token.
+  //
+  // Used by the SDK's one-shot OPK-pool migration to clear zombie entries
+  // left by the pre-fix bulk re-upload bug. Apps don't need to call this
+  // directly — the SDK runs it on first init after the fix.
+  if (url.pathname === '/opks' && method === 'DELETE') {
+    const auth = req.headers['authorization'];
+    if (!auth || !auth.startsWith('Bearer ')) {
+      sendJson(res, 401, { error: 'Missing bearer token' });
+      return;
+    }
+    const token = auth.slice('Bearer '.length).trim();
+
+    let body: { namespace?: string; publicKey?: string };
+    try {
+      body = JSON.parse(await parseBody(req));
+    } catch {
+      sendJson(res, 400, { error: 'Invalid JSON body' });
+      return;
+    }
+    const { namespace, publicKey } = body;
+    if (typeof namespace !== 'string' || !namespace || typeof publicKey !== 'string' || !publicKey) {
+      sendJson(res, 400, { error: 'Missing required fields: namespace, publicKey' });
+      return;
+    }
+
+    const incomingHash = nodeCrypto.createHash('sha256').update(token).digest('hex');
+
+    // TOFU: insert-or-ignore establishes the hash on first call. Subsequent
+    // calls succeed only if the hash matches what's already stored.
+    stmts.insertOpkAuthHash.run(publicKey, incomingHash, Date.now());
+    const existing = stmts.getOpkAuthHash.get(publicKey) as { auth_hash: string } | undefined;
+    if (!existing || existing.auth_hash !== incomingHash) {
+      sendJson(res, 403, { error: 'Invalid OPK pool token' });
+      return;
+    }
+
+    const result = stmts.deleteOpksForKey.run(directoryKey(namespace, publicKey));
+    sendJson(res, 200, { ok: true, deleted: result.changes });
     return;
   }
 
