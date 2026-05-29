@@ -51,7 +51,11 @@ export interface ArchivePayload {
 //               handshake without the user re-adding contacts manually
 //   messages/ — full per-conversation message history
 const ARCHIVE_PREFIXES = ['peers/', 'edkeys/', 'messages/'];
-const ARCHIVE_SINGLE_KEYS = ['contacts', 'seen_ids', 'blocked'];
+// `contacts_v2` is the multi-device-aware contact list (an array of
+// { accountKey, deviceKeys[] }). `contacts` is its single-device
+// legacy form (a flat string[] of peerIds). Both are archived during
+// the v1→v2 transition so a downgrade is non-destructive.
+const ARCHIVE_SINGLE_KEYS = ['contacts', 'contacts_v2', 'seen_ids', 'blocked'];
 
 // Maximum archive size we'll attempt to upload (10 MB plaintext).
 export const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
@@ -255,6 +259,24 @@ export async function mergeKv(
             if (peerIsTombstoned(peerId)) union.delete(peerId);
           }
           await storage.set(k, JSON.stringify([...union]));
+        } else if (k === 'contacts_v2') {
+          // Union accounts across both sides; for each account, union
+          // the device-key sets. Tombstoned accounts are dropped (a
+          // delete of the account-level identity removes all devices
+          // belonging to it). Per-device tombstones are not yet a
+          // concept — phase A only tombstones at the account level.
+          type Record = { accountKey: string; deviceKeys: string[] };
+          const byAccount = new Map<string, Set<string>>();
+          for (const r of [...(local as Record[]), ...(remote as Record[])]) {
+            if (!r?.accountKey) continue;
+            if (peerIsTombstoned(r.accountKey)) continue;
+            if (!byAccount.has(r.accountKey)) byAccount.set(r.accountKey, new Set());
+            for (const dk of r.deviceKeys ?? []) byAccount.get(r.accountKey)!.add(dk);
+          }
+          const merged: Record[] = Array.from(byAccount.entries()).map(
+            ([accountKey, devices]) => ({ accountKey, deviceKeys: [...devices] }),
+          );
+          await storage.set(k, JSON.stringify(merged));
         } else {
           await storage.set(k, JSON.stringify([...new Set([...(local as string[]), ...(remote as string[])])]));
         }
@@ -284,6 +306,17 @@ export async function mergeKv(
       const filtered = arr.filter((p) => !peerIsTombstoned(p));
       if (filtered.length !== arr.length) {
         await storage.set('contacts', JSON.stringify(filtered));
+      }
+    } catch { /* leave it */ }
+  }
+  const localContactsV2Raw = await storage.get('contacts_v2');
+  if (localContactsV2Raw) {
+    try {
+      type Record = { accountKey: string; deviceKeys: string[] };
+      const arr = JSON.parse(localContactsV2Raw) as Record[];
+      const filtered = arr.filter((r) => r?.accountKey && !peerIsTombstoned(r.accountKey));
+      if (filtered.length !== arr.length) {
+        await storage.set('contacts_v2', JSON.stringify(filtered));
       }
     } catch { /* leave it */ }
   }

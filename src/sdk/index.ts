@@ -1441,10 +1441,35 @@ export class MeshWhisper {
    *  privileges (e.g. in 'mutual' permission model they can no longer send). */
   static removeContact(peerId: string): void {
     MeshWhisper.instance.permissionManager.removeContact(peerId);
-    MeshWhisper.instance.storage?.set(
-      'contacts',
-      JSON.stringify(MeshWhisper.instance.permissionManager.getContacts()),
-    ).catch(() => {});
+    MeshWhisper.instance.persistContacts().catch(() => {});
+  }
+
+  /**
+   * Returns the account-level identity key for a given device peer id,
+   * or `null` if the peer is not a known contact device. For single-device
+   * contacts (the default), the account key equals the device key.
+   */
+  static getAccountForDevice(deviceKey: string): string | null {
+    return MeshWhisper.instance.permissionManager.getAccountForDevice(deviceKey);
+  }
+
+  /**
+   * Returns every device key currently linked to the given account.
+   * Empty array if the account is unknown. For single-device contacts
+   * the array has length 1 and contains the account key.
+   */
+  static getDevicesForAccount(accountKey: string): string[] {
+    return MeshWhisper.instance.permissionManager.getDevicesForAccount(accountKey);
+  }
+
+  /**
+   * Returns every account-level identity key in the contact list.
+   * Companion to `getContacts()` which returns the flat device-key view
+   * for backwards compatibility. For single-device contacts the two
+   * lists have identical contents.
+   */
+  static getContactAccounts(): string[] {
+    return MeshWhisper.instance.permissionManager.getAllContactAccounts();
   }
 
   /** Blocks a peer. Blocked peers' packets are dropped on arrival. */
@@ -1658,7 +1683,7 @@ export class MeshWhisper {
     // the old session instead of building a fresh one.
     this.sessionManager.deleteSession(peerId);
     await Promise.all([
-      this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())),
+      this.persistContacts(),
       this.storage?.delete(`peers/${peerId}`),
       this.storage?.delete(`messages/${peerId}`),
     ].filter(Boolean));
@@ -2215,7 +2240,7 @@ export class MeshWhisper {
     const isNewPeer = !this.permissionManager.isContact(peerId);
 
     this.permissionManager.addContact(peerId);
-    this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts())).catch(() => {});
+    this.persistContacts().catch(() => {});
     // The peer initiated an inbound X3DH — record a revival so it beats any
     // prior tombstone in archive merge (e.g. peer was deleted locally but is
     // sending us a fresh handshake now, or our cleared-tombstone state hadn't
@@ -3026,16 +3051,29 @@ export class MeshWhisper {
       this.peerCache.addPeer(peerId, hexToUint8Array(hex));
     }
 
-    // Contacts
-    const contactsRaw = await this.storage.get('contacts');
-    if (contactsRaw) {
-      this.permissionManager.loadContacts(JSON.parse(contactsRaw) as string[]);
-      // Rebuild peerCache from contacts — the X25519 peerId is the public key hex,
-      // so we can restore it without a relay lookup even if peers/ keys are missing.
-      for (const peerId of this.permissionManager.getContacts()) {
-        if (!this.peerCache.getPeerPublicKey(peerId)) {
-          this.peerCache.addPeer(peerId, hexToUint8Array(peerId));
-        }
+    // Contacts. Prefer the v2 (account/device) format; fall back to v1
+    // (flat string[] of peerIds) for installs that haven't yet been
+    // upgraded. The v2 loader treats single-device entries identically
+    // to the v1 ones, so behavior is preserved.
+    const contactsV2Raw = await this.storage.get('contacts_v2');
+    if (contactsV2Raw) {
+      try {
+        this.permissionManager.loadContactRecords(
+          JSON.parse(contactsV2Raw) as Array<{ accountKey: string; deviceKeys: string[] }>,
+        );
+      } catch { /* fall through to v1 */ }
+    }
+    if (this.permissionManager.getContacts().length === 0) {
+      const contactsRaw = await this.storage.get('contacts');
+      if (contactsRaw) {
+        this.permissionManager.loadContacts(JSON.parse(contactsRaw) as string[]);
+      }
+    }
+    // Rebuild peerCache from contacts — the X25519 peerId is the public key hex,
+    // so we can restore it without a relay lookup even if peers/ keys are missing.
+    for (const peerId of this.permissionManager.getContacts()) {
+      if (!this.peerCache.getPeerPublicKey(peerId)) {
+        this.peerCache.addPeer(peerId, hexToUint8Array(peerId));
       }
     }
 
@@ -3049,7 +3087,16 @@ export class MeshWhisper {
   }
 
   private async persistContacts(): Promise<void> {
-    await this.storage?.set('contacts', JSON.stringify(this.permissionManager.getContacts()));
+    if (!this.storage) return;
+    // Dual-write during the v1→v2 transition so a rollback to an older
+    // SDK build still finds usable contact state. Drop the v1 write
+    // once the SDK version that only reads v2 has been deployed long
+    // enough that no older client is expected to come back.
+    await this.storage.set('contacts', JSON.stringify(this.permissionManager.getContacts()));
+    await this.storage.set(
+      'contacts_v2',
+      JSON.stringify(this.permissionManager.getContactRecords()),
+    );
   }
 
   private async persistPeers(): Promise<void> {

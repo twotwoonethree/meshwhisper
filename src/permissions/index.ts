@@ -3,7 +3,7 @@
 // Endpoint-side permission enforcement for P2P contact initiation.
 // ============================================================
 
-import type { PermissionModel } from '../types';
+import type { ContactRecord, PermissionModel } from '../types';
 
 // --- Interfaces ---
 
@@ -68,7 +68,28 @@ export class PermissionManager {
     event: string,
   ) => boolean | Promise<boolean>;
 
+  /**
+   * Flat view of every device key currently treated as a contact —
+   * maintained in sync with `contactDevices`. Used by permission-check
+   * call sites that only need "is this peerId trusted in any role?"
+   * For single-device contacts, this set has exactly the same content
+   * as the account-keyed map below.
+   */
   private readonly contacts: Set<string> = new Set();
+  /**
+   * Account-level structure: accountKey → set of deviceKey strings
+   * known to belong to that account. For today's single-device flows
+   * every account has exactly one device whose key equals the
+   * accountKey. Multi-device flows (see docs/multi-device.md) add
+   * additional deviceKeys via signed control messages.
+   */
+  private readonly contactDevices: Map<string, Set<string>> = new Map();
+  /**
+   * Reverse mapping: deviceKey → accountKey. Lets the SDK answer
+   * "which account does this peerId belong to?" in O(1) without
+   * scanning the contactDevices map.
+   */
+  private readonly deviceToAccount: Map<string, string> = new Map();
   private readonly blocked: Set<string> = new Set();
   private readonly allowed: Set<string> = new Set();
 
@@ -124,13 +145,85 @@ export class PermissionManager {
   // Contact management
   // ------------------------------------------------------------------
 
+  /**
+   * Legacy single-peer contact add. Idempotently registers `peerId`
+   * as an account whose only device is itself.
+   */
   addContact(peerId: string): void {
-    this.contacts.add(peerId);
+    this.addContactAccount(peerId);
   }
 
+  /**
+   * Multi-device-aware contact add. Registers `accountKey` with the
+   * given device keys (defaulting to `[accountKey]` for single-device).
+   * Idempotent: re-calling with the same arguments is a no-op; calling
+   * with new device keys appends them.
+   */
+  addContactAccount(accountKey: string, deviceKeys: string[] = [accountKey]): void {
+    let devices = this.contactDevices.get(accountKey);
+    if (!devices) {
+      devices = new Set();
+      this.contactDevices.set(accountKey, devices);
+    }
+    for (const dk of deviceKeys) {
+      devices.add(dk);
+      this.deviceToAccount.set(dk, accountKey);
+      this.contacts.add(dk);
+    }
+  }
+
+  /**
+   * Append a single device key to an existing contact account. If the
+   * account doesn't exist yet, it's created implicitly (the accountKey
+   * becomes its first device).
+   */
+  addDeviceToContact(accountKey: string, deviceKey: string): void {
+    if (!this.contactDevices.has(accountKey)) {
+      this.addContactAccount(accountKey);
+    }
+    this.contactDevices.get(accountKey)!.add(deviceKey);
+    this.deviceToAccount.set(deviceKey, accountKey);
+    this.contacts.add(deviceKey);
+  }
+
+  /**
+   * Remove a single device from a contact account. If the account
+   * has no devices left after the removal, the account itself is
+   * removed (and any mutual-confirmation state for it cleared).
+   */
+  removeDeviceFromContact(accountKey: string, deviceKey: string): void {
+    const devices = this.contactDevices.get(accountKey);
+    if (!devices) return;
+    devices.delete(deviceKey);
+    this.deviceToAccount.delete(deviceKey);
+    this.contacts.delete(deviceKey);
+    if (devices.size === 0) {
+      this.contactDevices.delete(accountKey);
+      this.mutualConfirmed.delete(accountKey);
+    }
+  }
+
+  /**
+   * Legacy removal. `peerId` may name either an account or a device:
+   * if it's an account, the whole account (and all its devices) is
+   * removed; if it's a device, the device is removed from its
+   * account (which may itself then become empty and be removed).
+   */
   removeContact(peerId: string): void {
-    this.contacts.delete(peerId);
-    this.mutualConfirmed.delete(peerId);
+    const directAccount = this.contactDevices.get(peerId);
+    if (directAccount) {
+      for (const deviceKey of directAccount) {
+        this.deviceToAccount.delete(deviceKey);
+        this.contacts.delete(deviceKey);
+      }
+      this.contactDevices.delete(peerId);
+      this.mutualConfirmed.delete(peerId);
+      return;
+    }
+    const accountKey = this.deviceToAccount.get(peerId);
+    if (accountKey) {
+      this.removeDeviceFromContact(accountKey, peerId);
+    }
   }
 
   isContact(peerId: string): boolean {
@@ -141,8 +234,39 @@ export class PermissionManager {
     return Array.from(this.contacts);
   }
 
+  /**
+   * Legacy v1 loader: each entry is a peerId that becomes a
+   * single-device account.
+   */
   loadContacts(contacts: string[]): void {
-    for (const id of contacts) this.contacts.add(id);
+    for (const id of contacts) this.addContact(id);
+  }
+
+  /**
+   * v2 loader: structured records preserving account/device shape.
+   */
+  loadContactRecords(records: ContactRecord[]): void {
+    for (const r of records) this.addContactAccount(r.accountKey, r.deviceKeys);
+  }
+
+  /** Serialize current contacts in v2 shape. */
+  getContactRecords(): ContactRecord[] {
+    return Array.from(this.contactDevices.entries()).map(([accountKey, devices]) => ({
+      accountKey,
+      deviceKeys: Array.from(devices),
+    }));
+  }
+
+  getAccountForDevice(deviceKey: string): string | null {
+    return this.deviceToAccount.get(deviceKey) ?? null;
+  }
+
+  getDevicesForAccount(accountKey: string): string[] {
+    return Array.from(this.contactDevices.get(accountKey) ?? []);
+  }
+
+  getAllContactAccounts(): string[] {
+    return Array.from(this.contactDevices.keys());
   }
 
   blockPeer(peerId: string): void {
@@ -305,7 +429,7 @@ export class PermissionManager {
    */
   confirmMutualContact(peerId: string): void {
     this.mutualConfirmed.add(peerId);
-    this.contacts.add(peerId);
+    this.addContact(peerId);
   }
 
   // ------------------------------------------------------------------
@@ -367,7 +491,7 @@ export class PermissionManager {
     request.status = 'accepted';
     this.introductionRequests.set(request.id, request);
     this.introducedPeers.add(request.fromPeerId);
-    this.contacts.add(request.fromPeerId);
+    this.addContact(request.fromPeerId);
   }
 
   // ------------------------------------------------------------------

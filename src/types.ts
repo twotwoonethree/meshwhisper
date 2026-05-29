@@ -36,6 +36,23 @@ export interface PreKeyBundle {
 }
 
 /**
+ * A contact's identity broken into its account-level key and the set
+ * of device keys currently linked to that account. For single-device
+ * contacts (the default), `accountKey === deviceKeys[0]` and the
+ * array has length 1.
+ *
+ * Multi-device flows (see docs/multi-device.md) populate the
+ * deviceKeys array via signed device-added control messages from the
+ * account owner. The SDK fans out sends to all known device keys.
+ */
+export interface ContactRecord {
+  /** Ed25519 hex of the account-level identity key. */
+  accountKey: string;
+  /** Ed25519 hex of every device currently active for this account. */
+  deviceKeys: string[];
+}
+
+/**
  * Authorization issued by the current owner of a username, allowing
  * `toPublicKey` to take it over under the namespace's signed-transfer
  * policy. Treated like a short-lived auth code: share it freely with
