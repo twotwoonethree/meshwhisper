@@ -21,10 +21,11 @@ import type {
   StoredMessage,
   Conversation,
   Transport as MWTransport,
+  UsernameTransferToken,
 } from '../types.js';
 import { PacketFlags } from '../types.js';
 
-import { edwardsToMontgomeryPub } from '@noble/curves/ed25519';
+import { edwardsToMontgomeryPub, ed25519 } from '@noble/curves/ed25519';
 import {
   encrypt,
   decrypt,
@@ -99,6 +100,31 @@ import {
   addTombstone,
 } from './archive.js';
 export type { ArchivePayload } from './archive.js';
+
+// ============================================================
+// Username-transfer canonical message
+//
+// MUST match the bytes the relay reconstructs in
+// `node/src/index.ts:canonicalTransferMessage`. Bumping the version
+// tag is a wire-format break; coordinate both sides.
+// ============================================================
+
+function buildCanonicalTransferMessage(
+  namespace: string,
+  username: string,
+  toPublicKey: string,
+  expiresAt: number,
+): Uint8Array {
+  return new TextEncoder().encode(
+    [
+      'meshwhisper.username-transfer.v1',
+      namespace,
+      username,
+      toPublicKey,
+      String(expiresAt),
+    ].join('\n'),
+  );
+}
 
 // ============================================================
 // Public option/event types
@@ -2857,6 +2883,105 @@ export class MeshWhisper {
   async getNamespacePolicy(): Promise<'signed-transfer' | 'last-writer-wins'> {
     this.assertRunning();
     return this.sessionManager.getNamespacePolicy();
+  }
+
+  /**
+   * Mint a transfer token authorizing `toPublicKey` to take over
+   * `username` in this namespace. Signed by this device's Ed25519
+   * identity key — the relay accepts the resulting handover only if
+   * this device is the current owner of the username.
+   *
+   * The token expires after `expiresInMs` (default 24h). Share it
+   * with the recipient via any channel (QR, paste, message); it
+   * isn't secret in the cryptographic sense, but it's bound to one
+   * specific new owner key, so anyone else holding the token can't
+   * redeem it.
+   *
+   * See [docs/identifier-patterns.md](../../docs/identifier-patterns.md).
+   */
+  static async createUsernameTransferToken(opts: {
+    username: string;
+    toPublicKey: string;
+    expiresInMs?: number;
+  }): Promise<UsernameTransferToken> {
+    return MeshWhisper.instance.createUsernameTransferToken(opts);
+  }
+
+  async createUsernameTransferToken(opts: {
+    username: string;
+    toPublicKey: string;
+    expiresInMs?: number;
+  }): Promise<UsernameTransferToken> {
+    this.assertRunning();
+    if (!opts.username) throw new Error('username required');
+    if (!opts.toPublicKey) throw new Error('toPublicKey required');
+    const ttl = opts.expiresInMs ?? 24 * 60 * 60 * 1000;
+    const expiresAt = Date.now() + ttl;
+    const namespace = this.config.namespace;
+    const fromPublicKey = uint8ArrayToHex(this.identity.getEdPublicKey());
+    const message = buildCanonicalTransferMessage(
+      namespace,
+      opts.username,
+      opts.toPublicKey,
+      expiresAt,
+    );
+    const signature = ed25519.sign(message, this.identity.getEdPrivateKey());
+    return {
+      version: 'v1',
+      namespace,
+      username: opts.username,
+      fromPublicKey,
+      toPublicKey: opts.toPublicKey,
+      expiresAt,
+      signature: uint8ArrayToBase64(signature),
+    };
+  }
+
+  /**
+   * Accept a transfer token issued by the previous owner of a
+   * username. Republishes this device's prekey bundle under the new
+   * username, attaching the signed token so the relay accepts the
+   * takeover under signed-transfer policy.
+   *
+   * Throws if the token is for a different recipient, namespace,
+   * or has expired, or if the relay rejects the signature.
+   */
+  static async acceptUsernameTransfer(token: UsernameTransferToken): Promise<void> {
+    return MeshWhisper.instance.acceptUsernameTransfer(token);
+  }
+
+  async acceptUsernameTransfer(token: UsernameTransferToken): Promise<void> {
+    this.assertRunning();
+    if (token.version !== 'v1') {
+      throw new Error(`Unsupported transfer token version: ${String(token.version)}`);
+    }
+    const myPubHex = uint8ArrayToHex(this.identity.getEdPublicKey());
+    if (token.toPublicKey.toLowerCase() !== myPubHex.toLowerCase()) {
+      throw new Error('Transfer token is not addressed to this device');
+    }
+    if (token.namespace !== this.config.namespace) {
+      throw new Error('Transfer token is for a different namespace');
+    }
+    if (Date.now() > token.expiresAt) {
+      throw new Error('Transfer token has expired');
+    }
+
+    const bundle = this.sessionManager.getOrCreatePreKeyBundle();
+    const result = await this.sessionManager.publishPreKeyBundle(bundle, token.username, {
+      fromPublicKey: token.fromPublicKey,
+      expiresAt: token.expiresAt,
+      signature: token.signature,
+    });
+    if (!result.ok) {
+      if (result.transferAuthInvalid) {
+        throw new Error('Relay rejected transferAuth: signature/expiry/sender mismatch');
+      }
+      if (result.usernameTaken) {
+        throw new Error('Username still claimed by a different identity (no transfer accepted)');
+      }
+      throw new Error('Failed to publish transferred bundle');
+    }
+    this.config.username = token.username;
   }
 
   private broadcastReputationProof(): void {

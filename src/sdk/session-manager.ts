@@ -637,7 +637,8 @@ export class SessionManager {
   async publishPreKeyBundle(
     bundle: PreKeyBundle,
     username?: string,
-  ): Promise<{ ok: boolean; usernameTaken?: boolean }> {
+    transferAuth?: { fromPublicKey: string; expiresAt: number; signature: string },
+  ): Promise<{ ok: boolean; usernameTaken?: boolean; transferAuthInvalid?: boolean }> {
     const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
     const primaryWsUrl = wsUrls[0];
     if (!primaryWsUrl || primaryWsUrl === 'mesh') return { ok: false };
@@ -646,7 +647,7 @@ export class SessionManager {
       .replace(/^wss:\/\//, 'https://')
       .replace(/^ws:\/\//, 'http://');
 
-    const post = (withUsername: string | undefined) =>
+    const post = (withUsername: string | undefined, withTransferAuth?: typeof transferAuth) =>
       fetch(`${httpUrl}/directory`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -655,10 +656,17 @@ export class SessionManager {
           publicKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
           bundle: uint8ArrayToBase64(serializePreKeyBundle(bundle)),
           ...(withUsername ? { username: withUsername } : {}),
+          ...(withTransferAuth ? { transferAuth: withTransferAuth } : {}),
         }),
       });
 
-    const res = await post(username);
+    const res = await post(username, transferAuth);
+    if (res.status === 403 && transferAuth) {
+      // Relay rejected the transfer-auth proof. Fall back to a username-less
+      // publish so the identity stays discoverable, and surface the failure.
+      await post(undefined).catch(() => {});
+      return { ok: false, transferAuthInvalid: true };
+    }
     if (res.status === 409 && username) {
       await post(undefined).catch(() => {});
       return { ok: false, usernameTaken: true };

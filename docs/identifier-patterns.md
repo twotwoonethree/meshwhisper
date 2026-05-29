@@ -22,7 +22,7 @@ Two rules:
 1. **The `username` field is just a string.** The SDK doesn't parse it, validate its shape, or treat phone numbers differently from emails or handles. Whatever you pass in is what `addContactByKey` looks up.
 2. **Uniqueness is per-namespace, with a policy.** The relay maintains a UNIQUE index on `(namespace, username)`. What happens when a *different* key tries to register an already-claimed username is governed by a per-namespace policy:
 
-   - **`signed-transfer` (default).** Takeover is rejected with HTTP 409. The original owner keeps the handle. Re-publishing the bundle from the SAME key always succeeds (covers bundle refresh, key-rotation flows that retain the key, etc.).
+   - **`signed-transfer` (default).** Takeover is rejected with HTTP 409 *unless* the request includes a transfer token signed by the current owner (see [Signed transfer](#signed-transfer) below). Re-publishing the bundle from the SAME key always succeeds (covers bundle refresh, key-rotation flows that retain the key, etc.).
    - **`last-writer-wins` (opt-in).** Takeover is permitted; the new key displaces the prior owner silently. Useful for password-derived identity flows where re-deriving the same key from credentials is the recovery story.
 
    Set the policy once per namespace, early:
@@ -193,6 +193,15 @@ const available = await MeshWhisper.checkIdentifierAvailable('alice');
 // a different identity in this namespace.
 await MeshWhisper.setIdentifier('alice2');
 
+// Authorize a different device to take over a username you own
+// (see "Signed transfer" section below).
+const token = await MeshWhisper.createUsernameTransferToken({
+  username: 'alice',
+  toPublicKey: '<new device hex pubkey>',
+});
+// On the new device:
+await MeshWhisper.acceptUsernameTransfer(token);
+
 // Look up a contact by identifier
 const peerId = await MeshWhisper.resolveUsername('alice');
 
@@ -202,6 +211,60 @@ await MeshWhisper.addContactByKey('alice');
 
 `addContactByKey` accepts either a registered identifier OR a raw hex peerId — it tries identifier lookup first, falls back to treating the input as a peerId.
 
+## Signed transfer
+
+Under the default `signed-transfer` policy, a username is sticky to whichever key first claims it — a different key cannot take it via a plain re-registration. To support legitimate handovers (device migration, key rotation, gifting a handle to a friend) the current owner can mint a *transfer token* that authorizes one specific new key to take over.
+
+The token is signed by the current owner's Ed25519 identity key and is bound to:
+
+- the namespace,
+- the username being transferred,
+- the new owner's public key (so a leaked token can't be redirected),
+- an expiry (so a leaked token has limited blast radius).
+
+Default expiry is 24 hours; pick something shorter for higher-risk handles.
+
+### Issuing a token (current device)
+
+```ts
+const token = await MeshWhisper.createUsernameTransferToken({
+  username: 'alice',
+  toPublicKey: '<new device hex Ed25519 pubkey>',
+  expiresInMs: 60 * 60 * 1000, // optional, default 24h
+});
+// token is a plain JSON object — share via QR, paste, share sheet, etc.
+```
+
+The signature is over `meshwhisper.username-transfer.v1\n{namespace}\n{username}\n{toPublicKey}\n{expiresAt}` (UTF-8 bytes). The relay reconstructs the same canonical bytes to verify.
+
+### Redeeming a token (new device)
+
+```ts
+await MeshWhisper.acceptUsernameTransfer(token);
+// throws if token is for a different recipient, namespace, expired,
+// or the relay rejects the signature.
+```
+
+Internally this republishes the new device's prekey bundle with `username: '<token.username>'` and a `transferAuth` payload, which the relay verifies against the current owner's stored key.
+
+### Security properties
+
+| Property | Holds because |
+|---|---|
+| Wrong-recipient replay | Token signature covers `toPublicKey`. The relay reconstructs the canonical message using the actual registrant's public key — a different key trying to redeem fails verification. |
+| Cross-namespace replay | Token signature covers `namespace`. |
+| Cross-username replay | Token signature covers `username`. |
+| Stale token replay | Token has an `expiresAt` checked server-side. |
+| Forged token by a non-owner | The relay verifies against the *current owner's* key looked up from the directory, not the `fromPublicKey` field in the token. A non-owner signing a transfer fails verification. |
+
+### What this does NOT do
+
+- **No multi-use protection.** A valid token can be redeemed any number of times until it expires. If you want single-use, set a short expiry — or build single-use semantics at your app layer. The relay doesn't track redeemed tokens.
+- **No revocation.** Once a token is signed, it's valid until expiry. If you sign a 24h token then change your mind, you can't recall it (other than by rotating your identity key, which is a much bigger operation).
+- **No transfer of sessions, contacts, or messages.** The token moves the *directory entry only*. Existing X3DH sessions, contacts and message history remain bound to whichever device owns them. A "true" device migration requires app-level archive transfer in addition to the handle.
+
+For most apps, "short-expiry token + share via QR + accept once" is the right shape.
+
 ## What the SDK does NOT provide (intentionally)
 
 - **No verification flows.** SMS, email, captcha — your app's job. The SDK doesn't know if the identifier represents a real verified user; it just stores it.
@@ -209,7 +272,6 @@ await MeshWhisper.addContactByKey('alice');
 - **No multi-identifier records.** One identity = one identifier in the directory. If you want a user to be discoverable by both phone AND email, you'd register one as the canonical identifier and maintain the other as a separate app-side lookup.
 - **No identifier-uniqueness across apps.** "alice" in `com.app-a` and "alice" in `com.app-b` are two different identities; the relay's directory is partitioned by namespace.
 - **No collision UX.** If `setIdentifier('alice')` throws "taken," it's up to your app to prompt the user, suggest alternatives, etc.
-- **No relay-side cross-key handover signing (yet).** Under the signed-transfer policy a taken username is sticky to its current key. If a user needs to move their handle to a new key (key loss, device migration), that's an app-level recovery flow you design. A signed-transfer wire format (so users can prove ownership and migrate) is planned for a follow-up stage.
 
 These are deliberate. They keep the SDK protocol-agnostic and let app builders compose identifier flows that fit their threat model and product UX.
 

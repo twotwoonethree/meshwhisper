@@ -495,13 +495,99 @@ function getNamespaceUsernamePolicy(namespace: string): UsernamePolicy {
   return row?.username_policy ?? 'signed-transfer';
 }
 
-type RegisterResult = 'ok' | 'username_taken';
+// Wire format for username-transfer authorizations. The signed bytes MUST
+// match what the SDK produces; see `src/sdk/username-transfer.ts`. Bumping
+// the version tag breaks old tokens — fine, transfer tokens are short-lived.
+function canonicalTransferMessage(
+  namespace: string,
+  username: string,
+  toPublicKeyHex: string,
+  expiresAt: number,
+): Buffer {
+  return Buffer.from(
+    [
+      'meshwhisper.username-transfer.v1',
+      namespace,
+      username,
+      toPublicKeyHex,
+      String(expiresAt),
+    ].join('\n'),
+    'utf8',
+  );
+}
+
+// DER SubjectPublicKeyInfo prefix for a raw Ed25519 public key.
+// Lets `nodeCrypto.createPublicKey` ingest a 32-byte key without
+// pulling in an external Ed25519 library.
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+interface TransferAuthInput {
+  fromPublicKey: string; // hex; informational — current owner is the source of truth
+  expiresAt: number;     // unix ms
+  signature: string;     // base64, 64 raw bytes
+}
+
+function verifyTransferAuth(
+  namespace: string,
+  username: string,
+  newOwnerPublicKeyHex: string,
+  currentOwnerPublicKeyHex: string,
+  auth: TransferAuthInput,
+): boolean {
+  if (typeof auth.expiresAt !== 'number' || !Number.isFinite(auth.expiresAt)) return false;
+  if (Date.now() > auth.expiresAt) return false;
+
+  // fromPublicKey in the request is informational; the relay binds
+  // verification to the actual current owner. We still cross-check
+  // so an obviously-mismatched token is rejected early.
+  if (
+    typeof auth.fromPublicKey === 'string' &&
+    auth.fromPublicKey.toLowerCase() !== currentOwnerPublicKeyHex.toLowerCase()
+  ) {
+    return false;
+  }
+
+  let signatureBytes: Buffer;
+  try {
+    signatureBytes = Buffer.from(auth.signature, 'base64');
+  } catch { return false; }
+  if (signatureBytes.length !== 64) return false;
+
+  let publicKeyBytes: Buffer;
+  try {
+    publicKeyBytes = Buffer.from(currentOwnerPublicKeyHex, 'hex');
+  } catch { return false; }
+  if (publicKeyBytes.length !== 32) return false;
+
+  let publicKey;
+  try {
+    publicKey = nodeCrypto.createPublicKey({
+      key: Buffer.concat([ED25519_SPKI_PREFIX, publicKeyBytes]),
+      format: 'der',
+      type: 'spki',
+    });
+  } catch { return false; }
+
+  const message = canonicalTransferMessage(
+    namespace,
+    username,
+    newOwnerPublicKeyHex,
+    auth.expiresAt,
+  );
+
+  try {
+    return nodeCrypto.verify(null, message, publicKey, signatureBytes);
+  } catch { return false; }
+}
+
+type RegisterResult = 'ok' | 'username_taken' | 'invalid_transfer_auth';
 
 const registerPrekeyTx = db.transaction((
   namespace: string,
   publicKey: string,
   bundle: string,
   username: string | null,
+  transferAuth: TransferAuthInput | null,
 ): RegisterResult => {
   const key = directoryKey(namespace, publicKey);
   if (username) {
@@ -510,14 +596,29 @@ const registerPrekeyTx = db.transaction((
       | undefined;
     if (existing && existing.key !== key) {
       const policy = getNamespaceUsernamePolicy(namespace);
-      if (policy === 'signed-transfer') {
-        // A different identity already owns this username and the namespace
-        // policy forbids unsigned takeover. Reject; the caller surfaces 409.
+      if (policy === 'last-writer-wins') {
+        // Legacy/opt-in: displace the prior owner without proof.
+        db.prepare('DELETE FROM prekey_bundles WHERE key = ?').run(existing.key);
+      } else if (transferAuth) {
+        // Signed-transfer policy with handover token: verify the prior owner
+        // authorized this takeover. existing.key is `${namespace}:${publicKey}`;
+        // splitting on the last colon recovers the publicKey hex (which itself
+        // never contains a colon).
+        const lastColon = existing.key.lastIndexOf(':');
+        const currentOwnerHex = lastColon >= 0 ? existing.key.slice(lastColon + 1) : '';
+        const ok = verifyTransferAuth(
+          namespace,
+          username,
+          publicKey,
+          currentOwnerHex,
+          transferAuth,
+        );
+        if (!ok) return 'invalid_transfer_auth';
+        db.prepare('DELETE FROM prekey_bundles WHERE key = ?').run(existing.key);
+      } else {
+        // Signed-transfer policy, no token — reject takeover.
         return 'username_taken';
       }
-      // last-writer-wins (opt-in): displace the prior owner. Suits namespaces
-      // whose identity model is "password-derived, re-derived from credentials."
-      db.prepare('DELETE FROM prekey_bundles WHERE key = ?').run(existing.key);
     }
   }
   stmts.upsertPrekey.run(key, bundle, username, namespace);
@@ -869,7 +970,13 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       sendJson(res, 429, { error: 'Too many requests' });
       return;
     }
-    let body: { namespace?: string; publicKey?: string; bundle?: string; username?: string };
+    let body: {
+      namespace?: string;
+      publicKey?: string;
+      bundle?: string;
+      username?: string;
+      transferAuth?: unknown;
+    };
     try {
       body = JSON.parse(await parseBody(req));
     } catch {
@@ -896,10 +1003,35 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
     }
 
-    const result = registerPrekeyTx(namespace, publicKey, bundle, username);
+    let transferAuth: TransferAuthInput | null = null;
+    if (body.transferAuth && typeof body.transferAuth === 'object') {
+      const ta = body.transferAuth as Record<string, unknown>;
+      if (
+        typeof ta.fromPublicKey === 'string' &&
+        typeof ta.expiresAt === 'number' &&
+        typeof ta.signature === 'string'
+      ) {
+        transferAuth = {
+          fromPublicKey: ta.fromPublicKey,
+          expiresAt: ta.expiresAt,
+          signature: ta.signature,
+        };
+      } else {
+        sendJson(res, 400, { error: 'Invalid transferAuth shape' });
+        return;
+      }
+    }
+
+    const result = registerPrekeyTx(namespace, publicKey, bundle, username, transferAuth);
     if (result === 'username_taken') {
       sendJson(res, 409, {
         error: 'Username already claimed by a different identity in this namespace',
+      });
+      return;
+    }
+    if (result === 'invalid_transfer_auth') {
+      sendJson(res, 403, {
+        error: 'transferAuth invalid: signature, expiry, or sender mismatch',
       });
       return;
     }

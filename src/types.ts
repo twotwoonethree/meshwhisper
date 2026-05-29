@@ -35,6 +35,28 @@ export interface PreKeyBundle {
   pqPublicKey?: Uint8Array;
 }
 
+/**
+ * Authorization issued by the current owner of a username, allowing
+ * `toPublicKey` to take it over under the namespace's signed-transfer
+ * policy. Treated like a short-lived auth code: share it freely with
+ * the intended recipient, but bound to one new owner and an expiry so
+ * a leaked token has limited blast radius.
+ */
+export interface UsernameTransferToken {
+  /** Wire format version. Bumping invalidates older tokens. */
+  version: 'v1';
+  namespace: string;
+  username: string;
+  /** Hex Ed25519 public key of the current owner (signed the token). */
+  fromPublicKey: string;
+  /** Hex Ed25519 public key of the intended new owner. */
+  toPublicKey: string;
+  /** Unix milliseconds when this token stops being valid. */
+  expiresAt: number;
+  /** Base64-encoded 64-byte Ed25519 signature over the canonical message. */
+  signature: string;
+}
+
 export interface EncryptedPayload {
   ciphertext: Uint8Array;
   nonce: Uint8Array;
