@@ -627,8 +627,54 @@ export class SessionManager {
    * Publishes the pre-key bundle to the relay's /directory endpoint so peers
    * can initiate contact without an out-of-band QR exchange.
    * If `username` is provided it is registered alongside the bundle.
+   *
+   * Under the namespace's signed-transfer policy (the SDK default), a
+   * username taken by a different identity returns `{ ok: false, usernameTaken: true }`.
+   * In that case the bundle is re-published without the username so the
+   * identity remains discoverable by peerId, and the caller can surface
+   * the conflict to the user.
    */
-  async publishPreKeyBundle(bundle: PreKeyBundle, username?: string): Promise<void> {
+  async publishPreKeyBundle(
+    bundle: PreKeyBundle,
+    username?: string,
+  ): Promise<{ ok: boolean; usernameTaken?: boolean }> {
+    const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
+    const primaryWsUrl = wsUrls[0];
+    if (!primaryWsUrl || primaryWsUrl === 'mesh') return { ok: false };
+
+    const httpUrl = primaryWsUrl
+      .replace(/^wss:\/\//, 'https://')
+      .replace(/^ws:\/\//, 'http://');
+
+    const post = (withUsername: string | undefined) =>
+      fetch(`${httpUrl}/directory`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          namespace: this.namespace,
+          publicKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
+          bundle: uint8ArrayToBase64(serializePreKeyBundle(bundle)),
+          ...(withUsername ? { username: withUsername } : {}),
+        }),
+      });
+
+    const res = await post(username);
+    if (res.status === 409 && username) {
+      await post(undefined).catch(() => {});
+      return { ok: false, usernameTaken: true };
+    }
+    return { ok: res.ok };
+  }
+
+  /**
+   * Sets the namespace-wide policy that governs username ownership.
+   * First-writer-wins at the relay — the first call locks the policy in.
+   * Subsequent calls with the same value succeed; with a different value
+   * the relay returns 409 and this method throws.
+   */
+  async setNamespacePolicy(
+    usernamePolicy: 'signed-transfer' | 'last-writer-wins',
+  ): Promise<void> {
     const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
     const primaryWsUrl = wsUrls[0];
     if (!primaryWsUrl || primaryWsUrl === 'mesh') return;
@@ -637,16 +683,38 @@ export class SessionManager {
       .replace(/^wss:\/\//, 'https://')
       .replace(/^ws:\/\//, 'http://');
 
-    await fetch(`${httpUrl}/directory`, {
+    const res = await fetch(`${httpUrl}/namespace-policy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        namespace: this.namespace,
-        publicKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
-        bundle: uint8ArrayToBase64(serializePreKeyBundle(bundle)),
-        ...(username ? { username } : {}),
-      }),
+      body: JSON.stringify({ namespace: this.namespace, usernamePolicy }),
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `setNamespacePolicy failed: HTTP ${res.status}`);
+    }
+  }
+
+  /**
+   * Reads the effective namespace policy from the relay. Returns
+   * 'signed-transfer' as the default when no policy row exists.
+   */
+  async getNamespacePolicy(): Promise<'signed-transfer' | 'last-writer-wins'> {
+    const wsUrls = Array.isArray(this.nodeUrl) ? this.nodeUrl : [this.nodeUrl];
+    const primaryWsUrl = wsUrls[0];
+    if (!primaryWsUrl || primaryWsUrl === 'mesh') return 'signed-transfer';
+
+    const httpUrl = primaryWsUrl
+      .replace(/^wss:\/\//, 'https://')
+      .replace(/^ws:\/\//, 'http://');
+
+    const res = await fetch(
+      `${httpUrl}/namespace-policy?namespace=${encodeURIComponent(this.namespace)}`,
+    );
+    if (!res.ok) return 'signed-transfer';
+    const body = await res.json() as { usernamePolicy?: string };
+    return body.usernamePolicy === 'last-writer-wins'
+      ? 'last-writer-wins'
+      : 'signed-transfer';
   }
 
   // ----------------------------------------------------------------

@@ -20,7 +20,16 @@ your registration flow → decide what to call this user
 Two rules:
 
 1. **The `username` field is just a string.** The SDK doesn't parse it, validate its shape, or treat phone numbers differently from emails or handles. Whatever you pass in is what `addContactByKey` looks up.
-2. **Uniqueness is per-namespace.** The relay maintains a UNIQUE index on `(namespace, username)`. Re-registering the same username from a different key **transfers ownership** to the new key — the previous registrant's entry is removed. This is deliberate (it lets a password-derived identity re-attach after key rotation or recovery without manual cleanup) but means apps that need strong ownership semantics must enforce them at their own layer (verification, signed proofs, etc.).
+2. **Uniqueness is per-namespace, with a policy.** The relay maintains a UNIQUE index on `(namespace, username)`. What happens when a *different* key tries to register an already-claimed username is governed by a per-namespace policy:
+
+   - **`signed-transfer` (default).** Takeover is rejected with HTTP 409. The original owner keeps the handle. Re-publishing the bundle from the SAME key always succeeds (covers bundle refresh, key-rotation flows that retain the key, etc.).
+   - **`last-writer-wins` (opt-in).** Takeover is permitted; the new key displaces the prior owner silently. Useful for password-derived identity flows where re-deriving the same key from credentials is the recovery story.
+
+   Set the policy once per namespace, early:
+   ```ts
+   await MeshWhisper.setNamespacePolicy('last-writer-wins'); // opt out of default
+   ```
+   The policy is sticky — the first call wins. Re-calling with the same value is a no-op; re-calling with a different value returns 409.
 
 What follows from these two rules: **the identifier system is your choice**, including verification (or its absence), collision policy, and renames. The SDK gives you the directory primitive; you compose it into whatever flow your product needs.
 
@@ -170,10 +179,18 @@ await storeDisplayName(MeshWhisper.getLocalPeerId(), displayName);
 The SDK provides a few utilities for working with identifiers:
 
 ```ts
+// Set the namespace's username-ownership policy once, early.
+// Default is 'signed-transfer'; opt into 'last-writer-wins' if you want
+// the password-derived re-attach flow.
+await MeshWhisper.setNamespacePolicy('signed-transfer');
+const current = await MeshWhisper.getNamespacePolicy();
+
 // Check if a string is available before claiming it
 const available = await MeshWhisper.checkIdentifierAvailable('alice');
 
-// Change your registered identifier (republishes your prekey bundle)
+// Change your registered identifier (republishes your prekey bundle).
+// Under signed-transfer policy, throws if the identifier is held by
+// a different identity in this namespace.
 await MeshWhisper.setIdentifier('alice2');
 
 // Look up a contact by identifier
@@ -191,7 +208,8 @@ await MeshWhisper.addContactByKey('alice');
 - **No identifier normalisation.** `+44 7700 900123` and `+447700900123` are different strings to the SDK. If you want to treat them as the same, canonicalise before passing to the SDK.
 - **No multi-identifier records.** One identity = one identifier in the directory. If you want a user to be discoverable by both phone AND email, you'd register one as the canonical identifier and maintain the other as a separate app-side lookup.
 - **No identifier-uniqueness across apps.** "alice" in `com.app-a` and "alice" in `com.app-b` are two different identities; the relay's directory is partitioned by namespace.
-- **No collision UX.** If `setIdentifier('alice')` returns "taken," it's up to your app to prompt the user, suggest alternatives, etc.
+- **No collision UX.** If `setIdentifier('alice')` throws "taken," it's up to your app to prompt the user, suggest alternatives, etc.
+- **No relay-side cross-key handover signing (yet).** Under the signed-transfer policy a taken username is sticky to its current key. If a user needs to move their handle to a new key (key loss, device migration), that's an app-level recovery flow you design. A signed-transfer wire format (so users can prove ownership and migrate) is planned for a follow-up stage.
 
 These are deliberate. They keep the SDK protocol-agnostic and let app builders compose identifier flows that fit their threat model and product UX.
 
@@ -213,7 +231,7 @@ Nothing stops you combining patterns or changing them later. Common combinations
 
 - **Phone for first-time discovery, opaque ID for export**: register phone, but also generate an opaque id the user can share without exposing their phone number.
 - **Handle with email recovery**: register a handle, but bind it to an email server-side for "I forgot my handle" recovery flows (your app's logic, not the SDK's).
-- **Migrating from one identifier to another**: a user can `setIdentifier()` to a new string at any time. The old one is released and someone else can claim it. Their cryptographic identity (and existing contacts) is unaffected — peerId is what really matters; the identifier is just a directory entry.
+- **Migrating from one identifier to another**: a user can `setIdentifier()` to a new string at any time (provided no one else holds it under signed-transfer). The old one is released and someone else can claim it. Their cryptographic identity (and existing contacts) is unaffected — peerId is what really matters; the identifier is just a directory entry.
 
 The SDK doesn't know or care which combination you pick. It stores the current identifier as a string, and that string is what `addContactByKey` looks up.
 

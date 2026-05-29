@@ -2808,9 +2808,55 @@ export class MeshWhisper {
   async setIdentifier(identifier: string): Promise<void> {
     this.assertRunning();
     if (!identifier) throw new Error('Identifier cannot be empty');
-    this.config.username = identifier;
     const bundle = this.sessionManager.getOrCreatePreKeyBundle();
-    await this.sessionManager.publishPreKeyBundle(bundle, identifier);
+    const result = await this.sessionManager.publishPreKeyBundle(bundle, identifier);
+    if (result.usernameTaken) {
+      throw new Error(
+        `Identifier "${identifier}" is already claimed by a different identity ` +
+        `in this namespace`,
+      );
+    }
+    this.config.username = identifier;
+  }
+
+  /**
+   * Sets the namespace-wide policy that governs username ownership.
+   * Call once early in your app's lifecycle (before any user registers
+   * a username) to opt into a non-default policy. Returns silently
+   * if the namespace is already on this policy; throws if it's already
+   * on a different one.
+   *
+   * Default for unrecorded namespaces is `'signed-transfer'` — a
+   * username is sticky to whichever identity first claimed it. Choose
+   * `'last-writer-wins'` for password-derived identity flows where
+   * re-deriving the same key from credentials is the recovery story.
+   *
+   * See [docs/identifier-patterns.md](../../docs/identifier-patterns.md).
+   */
+  static async setNamespacePolicy(
+    usernamePolicy: 'signed-transfer' | 'last-writer-wins',
+  ): Promise<void> {
+    return MeshWhisper.instance.setNamespacePolicy(usernamePolicy);
+  }
+
+  async setNamespacePolicy(
+    usernamePolicy: 'signed-transfer' | 'last-writer-wins',
+  ): Promise<void> {
+    this.assertRunning();
+    await this.sessionManager.setNamespacePolicy(usernamePolicy);
+  }
+
+  /**
+   * Returns the effective namespace policy. Defaults to
+   * `'signed-transfer'` if no row has been set on the relay.
+   */
+  static async getNamespacePolicy(): Promise<'signed-transfer' | 'last-writer-wins'> {
+    return MeshWhisper.instance.getNamespacePolicy();
+  }
+
+  async getNamespacePolicy(): Promise<'signed-transfer' | 'last-writer-wins'> {
+    this.assertRunning();
+    return this.sessionManager.getNamespacePolicy();
   }
 
   private broadcastReputationProof(): void {

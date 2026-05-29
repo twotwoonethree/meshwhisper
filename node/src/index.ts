@@ -139,6 +139,21 @@ db.exec(`
     stored_at  INTEGER NOT NULL,
     size       INTEGER NOT NULL
   );
+
+  -- Per-namespace policy controlling username ownership semantics.
+  -- 'signed-transfer' (default for unrecorded namespaces): username is sticky
+  --   to whichever identity first claims it; a different key cannot take it
+  --   over via a plain re-registration. Re-publishing with the SAME key is
+  --   always allowed (covers bundle refresh and key-rotation flows).
+  -- 'last-writer-wins': legacy/opt-in behavior — a fresh key claiming a taken
+  --   username silently displaces the prior owner. Useful for password-derived
+  --   identities where re-deriving the same key from credentials is the
+  --   recovery story.
+  CREATE TABLE IF NOT EXISTS namespace_policy (
+    namespace       TEXT PRIMARY KEY,
+    username_policy TEXT NOT NULL CHECK (username_policy IN ('signed-transfer', 'last-writer-wins')),
+    set_at          INTEGER NOT NULL
+  );
 `);
 
 // Prepared statements
@@ -248,6 +263,14 @@ const stmts = {
   ),
   countMedia: db.prepare(
     'SELECT COUNT(*) AS cnt FROM media',
+  ),
+
+  // namespace policy
+  getNamespacePolicy: db.prepare<[string]>(
+    'SELECT username_policy FROM namespace_policy WHERE namespace = ?',
+  ),
+  insertNamespacePolicy: db.prepare(
+    'INSERT OR IGNORE INTO namespace_policy (namespace, username_policy, set_at) VALUES (?, ?, ?)',
   ),
 
   // archives
@@ -463,26 +486,42 @@ function validateUsername(raw: string): string | null {
   return USERNAME_RE.test(u) ? u : null;
 }
 
+type UsernamePolicy = 'signed-transfer' | 'last-writer-wins';
+
+function getNamespaceUsernamePolicy(namespace: string): UsernamePolicy {
+  const row = stmts.getNamespacePolicy.get(namespace) as
+    | { username_policy: UsernamePolicy }
+    | undefined;
+  return row?.username_policy ?? 'signed-transfer';
+}
+
+type RegisterResult = 'ok' | 'username_taken';
+
 const registerPrekeyTx = db.transaction((
   namespace: string,
   publicKey: string,
   bundle: string,
   username: string | null,
-): boolean => {
+): RegisterResult => {
   const key = directoryKey(namespace, publicKey);
-  // Remove any existing entry for this username so the new key can take over.
-  // With password-derived keys, re-registration with the same credentials is
-  // idempotent; a different key means the user rotated or recovered their identity.
   if (username) {
     const existing = stmts.getPrekeyByUsername.get(namespace, username) as
       | { key: string }
       | undefined;
     if (existing && existing.key !== key) {
+      const policy = getNamespaceUsernamePolicy(namespace);
+      if (policy === 'signed-transfer') {
+        // A different identity already owns this username and the namespace
+        // policy forbids unsigned takeover. Reject; the caller surfaces 409.
+        return 'username_taken';
+      }
+      // last-writer-wins (opt-in): displace the prior owner. Suits namespaces
+      // whose identity model is "password-derived, re-derived from credentials."
       db.prepare('DELETE FROM prekey_bundles WHERE key = ?').run(existing.key);
     }
   }
   stmts.upsertPrekey.run(key, bundle, username, namespace);
-  return true;
+  return 'ok';
 });
 
 function lookupPrekeyByPublicKey(
@@ -857,8 +896,69 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
     }
 
-    registerPrekeyTx(namespace, publicKey, bundle, username);
+    const result = registerPrekeyTx(namespace, publicKey, bundle, username);
+    if (result === 'username_taken') {
+      sendJson(res, 409, {
+        error: 'Username already claimed by a different identity in this namespace',
+      });
+      return;
+    }
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // Set or read namespace policy
+  // POST /namespace-policy { namespace, usernamePolicy }
+  //   First writer wins. Once set, the policy is sticky. Re-POSTing the
+  //   same value returns 200; a different value returns 409.
+  // GET  /namespace-policy?namespace=
+  //   Returns the effective policy. Falls back to defaults when no row.
+  if (url.pathname === '/namespace-policy' && method === 'POST') {
+    if (!checkRateLimit(getClientIp(req), 'dir', RATE_LIMIT_DIR)) {
+      sendJson(res, 429, { error: 'Too many requests' });
+      return;
+    }
+    let body: { namespace?: string; usernamePolicy?: string };
+    try {
+      body = JSON.parse(await parseBody(req));
+    } catch {
+      sendJson(res, 400, { error: 'Invalid JSON body' });
+      return;
+    }
+    const { namespace, usernamePolicy } = body;
+    if (typeof namespace !== 'string' || !namespace) {
+      sendJson(res, 400, { error: 'Missing required field: namespace' });
+      return;
+    }
+    if (usernamePolicy !== 'signed-transfer' && usernamePolicy !== 'last-writer-wins') {
+      sendJson(res, 400, {
+        error: "usernamePolicy must be 'signed-transfer' or 'last-writer-wins'",
+      });
+      return;
+    }
+    stmts.insertNamespacePolicy.run(namespace, usernamePolicy, Date.now());
+    const current = getNamespaceUsernamePolicy(namespace);
+    if (current !== usernamePolicy) {
+      sendJson(res, 409, {
+        error: 'Namespace policy already set to a different value',
+        currentPolicy: current,
+      });
+      return;
+    }
+    sendJson(res, 200, { ok: true, usernamePolicy: current });
+    return;
+  }
+
+  if (url.pathname === '/namespace-policy' && method === 'GET') {
+    const namespace = url.searchParams.get('namespace');
+    if (!namespace) {
+      sendJson(res, 400, { error: 'Missing query param: namespace' });
+      return;
+    }
+    sendJson(res, 200, {
+      namespace,
+      usernamePolicy: getNamespaceUsernamePolicy(namespace),
+    });
     return;
   }
 
