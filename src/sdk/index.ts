@@ -822,11 +822,66 @@ export class MeshWhisper {
       throw err;
     }
 
-    await this.sessionManager.ensureSession(recipientId);
+    // Multi-device fan-out (phase C). Resolve the recipient's accountKey
+    // and iterate every known device for that account. The original
+    // `recipientId` argument is used as the conversationId for the local
+    // outbound save so the user still sees a single thread "with Alice"
+    // regardless of how many devices Alice has.
+    //
+    // Backwards-compat: if the recipient isn't a known contact (e.g. a
+    // first-time send via addContactByKey before the contact graph is
+    // populated), the device list is empty and we fall back to sending
+    // to the raw recipientId.
+    const accountKey = this.permissionManager.getAccountForDevice(recipientId) ?? recipientId;
+    let devices = this.permissionManager.getDevicesForAccount(accountKey);
+    if (devices.length === 0) devices = [recipientId];
 
-    const session = this.sessionManager.getSession(recipientId);
+    const messageId = generateMessageId();
+    const timestamp = Date.now();
+
+    const results = await Promise.allSettled(
+      devices.map((device) => this.sendMessageToDevice(device, payload, messageId, timestamp, options)),
+    );
+    const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+    if (succeeded === 0) {
+      const firstError = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+      throw firstError?.reason ?? new Error(`No device of ${recipientId} accepted the message`);
+    }
+
+    const isControl = isControlPayload(payload);
+    if (!isControl) {
+      const expiresAt = options?.expiry ? timestamp + options.expiry * 1000 : undefined;
+      await this.messageHandler.saveMessage({
+        id: messageId,
+        conversationId: recipientId,
+        senderId: this.getLocalPeerId(),
+        recipientId,
+        payload: Array.from(payload),
+        timestamp,
+        direction: 'outbound',
+        status: 'sent',
+        expiresAt,
+      });
+    }
+  }
+
+  /**
+   * Send one ratchet-encrypted copy of a message to a single device.
+   * Same messageId across every device copy of a logically-single
+   * send, so cross-device dedup at receivers is content-stable.
+   */
+  private async sendMessageToDevice(
+    deviceKey: string,
+    payload: Uint8Array,
+    messageId: string,
+    timestamp: number,
+    options: SendOptions | undefined,
+  ): Promise<void> {
+    await this.sessionManager.ensureSession(deviceKey);
+
+    const session = this.sessionManager.getSession(deviceKey);
     if (!session) {
-      const err = new Error(`Failed to establish session with ${recipientId}`);
+      const err = new Error(`Failed to establish session with ${deviceKey}`);
       this.fireError(err);
       throw err;
     }
@@ -838,15 +893,14 @@ export class MeshWhisper {
     // Done outside the sessionMutex so we don't hold the per-recipient lock
     // for the full 6s wait window — the mutex re-reads inside its critical
     // section anyway.
-    await this.waitForSendableSession(recipientId, session);
+    await this.waitForSendableSession(deviceKey, session);
 
-    const messageId = generateMessageId();
     const envelope = {
       id: messageId,
       senderId: this.getLocalPeerId(),
-      recipientId,
+      recipientId: deviceKey,
       payload: Array.from(payload),
-      timestamp: Date.now(),
+      timestamp,
       urgency: options?.urgency ?? 'normal',
       expiry: options?.expiry,
     };
@@ -854,22 +908,22 @@ export class MeshWhisper {
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));
     const compressed = compressPayload(envelopeBytes);
 
-    const { header, ciphertext } = await this.sessionMutex.run(recipientId, async () => {
-      const current = this.sessionManager.getSession(recipientId);
-      if (!current) throw new Error(`Session for ${recipientId} disappeared mid-send`);
+    const { header, ciphertext } = await this.sessionMutex.run(deviceKey, async () => {
+      const current = this.sessionManager.getSession(deviceKey);
+      if (!current) throw new Error(`Session for ${deviceKey} disappeared mid-send`);
       if (current.sendingChainKey === null) {
-        throw new Error(`Session for ${recipientId} reverted to receiver-only mid-send`);
+        throw new Error(`Session for ${deviceKey} reverted to receiver-only mid-send`);
       }
       const r = ratchetEncrypt(current, compressed);
-      this.sessionManager.setSession(recipientId, r.state);
+      this.sessionManager.setSession(deviceKey, r.state);
       return { header: r.header, ciphertext: r.ciphertext };
     });
 
     const headerBytes = serializeRatchetHeader(header);
     const fullPayload = concat(headerBytes, ciphertext);
 
-    const recipientPublicKey = this.peerCache.getPeerPublicKey(recipientId);
-    if (!recipientPublicKey) throw new Error(`No public key for recipient ${recipientId}`);
+    const recipientPublicKey = this.peerCache.getPeerPublicKey(deviceKey);
+    if (!recipientPublicKey) throw new Error(`No public key for recipient ${deviceKey}`);
 
     const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
@@ -877,23 +931,7 @@ export class MeshWhisper {
 
     const burst = this.chaffGenerator.camouflageRealMessage(packet);
     for (const p of burst) {
-      await this.routeAndSend(p, recipientId);
-    }
-
-    const isControl = isControlPayload(payload);
-    if (!isControl) {
-      const expiresAt = options?.expiry ? envelope.timestamp + options.expiry * 1000 : undefined;
-      await this.messageHandler.saveMessage({
-        id: messageId,
-        conversationId: recipientId,
-        senderId: this.getLocalPeerId(),
-        recipientId,
-        payload: Array.from(payload),
-        timestamp: envelope.timestamp,
-        direction: 'outbound',
-        status: 'sent',
-        expiresAt,
-      });
+      await this.routeAndSend(p, deviceKey);
     }
   }
 
