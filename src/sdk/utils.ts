@@ -119,7 +119,9 @@ export interface ControlMessage {
     | 'request_history'
     | 'history_replay'
     | 'session_ping'
-    | 'session_pong';
+    | 'session_pong'
+    | 'device_added'
+    | 'device_revoked';
   /** session_ping / session_pong correlation id. */
   sessionPingId?: string;
   /** history_replay: a chunk of historical messages from the sender's view. */
@@ -183,6 +185,19 @@ export interface ControlMessage {
     senderKeys: Record<string, number[]>;
     /** Per-member Ed25519 keys; needed for X3DH lookup between non-creator members. */
     memberEdKeys?: Record<string, number[]>;
+  };
+  // device_added / device_revoked — multi-device phase B. The sender's
+  // accountKey signs (Ed25519) over the canonical message:
+  //   "meshwhisper.device-added.v1\n{accountKey}\n{newDeviceKey}\n{addedAt}"
+  //   "meshwhisper.device-revoked.v1\n{accountKey}\n{revokedDeviceKey}\n{revokedAt}"
+  // Receivers MUST verify the signature against the sender's accountKey
+  // (which, in phase B, equals the sender's peerId since accountKey ===
+  // primary-device key for now).
+  deviceAnnouncement?: {
+    accountKey: string;          // hex; the signer
+    deviceKey: string;           // hex; the device being added or revoked
+    eventAt: number;             // unix ms; addedAt or revokedAt
+    signature: string;           // base64; 64 raw bytes
   };
 }
 

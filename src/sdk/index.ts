@@ -127,6 +127,65 @@ function buildCanonicalTransferMessage(
 }
 
 // ============================================================
+// Device-announcement canonical messages
+//
+// Both event types are signed by an accountKey (Ed25519). The signed
+// bytes bind the account, the device, and the moment of the change so
+// a replayed announcement can be detected (same signature ⇒ same
+// payload ⇒ idempotent merge in PermissionManager).
+// ============================================================
+
+export function buildCanonicalDeviceAddedMessage(
+  accountKey: string,
+  newDeviceKey: string,
+  addedAt: number,
+): Uint8Array {
+  return new TextEncoder().encode(
+    ['meshwhisper.device-added.v1', accountKey, newDeviceKey, String(addedAt)].join('\n'),
+  );
+}
+
+export function buildCanonicalDeviceRevokedMessage(
+  accountKey: string,
+  revokedDeviceKey: string,
+  revokedAt: number,
+): Uint8Array {
+  return new TextEncoder().encode(
+    ['meshwhisper.device-revoked.v1', accountKey, revokedDeviceKey, String(revokedAt)].join('\n'),
+  );
+}
+
+/**
+ * Verifies the Ed25519 signature on a device announcement against the
+ * declared accountKey. Returns true only if the signature is well-formed
+ * AND signs the exact canonical bytes for this (accountKey, deviceKey,
+ * eventAt) tuple under the named event kind. The caller is responsible
+ * for trust binding (i.e. the sender is the account in question) and
+ * for replay protection.
+ */
+export function verifyDeviceAnnouncementSignature(
+  kind: 'device_added' | 'device_revoked',
+  announcement: { accountKey: string; deviceKey: string; eventAt: number; signature: string },
+): boolean {
+  if (typeof announcement.eventAt !== 'number' || !Number.isFinite(announcement.eventAt)) return false;
+  let sigBytes: Uint8Array;
+  let pubBytes: Uint8Array;
+  try {
+    sigBytes = base64ToUint8Array(announcement.signature);
+    pubBytes = hexToUint8Array(announcement.accountKey);
+  } catch { return false; }
+  if (sigBytes.length !== 64 || pubBytes.length !== 32) return false;
+  const message = kind === 'device_added'
+    ? buildCanonicalDeviceAddedMessage(announcement.accountKey, announcement.deviceKey, announcement.eventAt)
+    : buildCanonicalDeviceRevokedMessage(announcement.accountKey, announcement.deviceKey, announcement.eventAt);
+  try {
+    return ed25519.verify(sigBytes, message, pubBytes);
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================
 // Public option/event types
 // ============================================================
 
@@ -2500,6 +2559,13 @@ export class MeshWhisper {
       case 'session_pong':
         if (ctrl.sessionPingId) this.resolvePendingPing(fromPeerId, ctrl.sessionPingId);
         break;
+
+      case 'device_added':
+      case 'device_revoked':
+        if (ctrl.deviceAnnouncement) {
+          this.applyDeviceAnnouncement(fromPeerId, ctrl.__mw_ctrl, ctrl.deviceAnnouncement);
+        }
+        break;
     }
   }
 
@@ -3007,6 +3073,151 @@ export class MeshWhisper {
       throw new Error('Failed to publish transferred bundle');
     }
     this.config.username = token.username;
+  }
+
+  // ================================================================
+  // Public API — Multi-device announcements (phase B)
+  //
+  // The primary device of an account is the only signer for device
+  // membership today: its identityKey IS the accountKey. Future
+  // phases may introduce per-device signing certificates so secondary
+  // devices can broadcast revocations independently, but for now any
+  // change to the device list must originate from the primary.
+  // ================================================================
+
+  /**
+   * Announce a newly-linked device to every contact. The current
+   * device's identity key signs (Ed25519) the canonical message:
+   *   meshwhisper.device-added.v1\n{accountKey}\n{newDeviceKey}\n{addedAt}
+   * Recipients verify the signature against the sender's accountKey
+   * (which today equals the sender's peerId) and append the new
+   * device to their local Map<account, devices> view of the contact.
+   *
+   * The local PermissionManager is also updated immediately so this
+   * device's own state reflects the announcement.
+   */
+  static async broadcastDeviceAdded(newDeviceKey: string): Promise<void> {
+    return MeshWhisper.instance.broadcastDeviceAdded(newDeviceKey);
+  }
+
+  async broadcastDeviceAdded(newDeviceKey: string): Promise<void> {
+    this.assertRunning();
+    if (!newDeviceKey) throw new Error('newDeviceKey required');
+    const accountKey = uint8ArrayToHex(this.identity.getEdPublicKey());
+    const addedAt = Date.now();
+    const sig = ed25519.sign(
+      buildCanonicalDeviceAddedMessage(accountKey, newDeviceKey, addedAt),
+      this.identity.getEdPrivateKey(),
+    );
+    const announcement = {
+      accountKey,
+      deviceKey: newDeviceKey,
+      eventAt: addedAt,
+      signature: uint8ArrayToBase64(sig),
+    };
+    // Update our own contact view first so we see our own linked
+    // device immediately without needing to re-receive our own
+    // broadcast. This is a no-op for non-contact use (the SDK uses
+    // PermissionManager for tracking BOTH contact accounts and our
+    // own accountKey is not in contacts) — but app builders may
+    // wish to inspect getDevicesForAccount on the broadcasting
+    // device, so we record locally too.
+    this.permissionManager.addDeviceToContact(accountKey, newDeviceKey);
+    await this.persistContacts();
+    for (const peerId of this.permissionManager.getContacts()) {
+      if (peerId === accountKey || peerId === newDeviceKey) continue;
+      this.sendControl(peerId, {
+        __mw_ctrl: 'device_added',
+        deviceAnnouncement: announcement,
+      });
+    }
+  }
+
+  /**
+   * Announce that a device should no longer be considered part of the
+   * account. Signed by the primary's identityKey. Receivers strip the
+   * deviceKey from their local view.
+   */
+  static async broadcastDeviceRevoked(revokedDeviceKey: string): Promise<void> {
+    return MeshWhisper.instance.broadcastDeviceRevoked(revokedDeviceKey);
+  }
+
+  async broadcastDeviceRevoked(revokedDeviceKey: string): Promise<void> {
+    this.assertRunning();
+    if (!revokedDeviceKey) throw new Error('revokedDeviceKey required');
+    const accountKey = uint8ArrayToHex(this.identity.getEdPublicKey());
+    const revokedAt = Date.now();
+    const sig = ed25519.sign(
+      buildCanonicalDeviceRevokedMessage(accountKey, revokedDeviceKey, revokedAt),
+      this.identity.getEdPrivateKey(),
+    );
+    const announcement = {
+      accountKey,
+      deviceKey: revokedDeviceKey,
+      eventAt: revokedAt,
+      signature: uint8ArrayToBase64(sig),
+    };
+    this.permissionManager.removeDeviceFromContact(accountKey, revokedDeviceKey);
+    await this.persistContacts();
+    for (const peerId of this.permissionManager.getContacts()) {
+      if (peerId === accountKey) continue;
+      this.sendControl(peerId, {
+        __mw_ctrl: 'device_revoked',
+        deviceAnnouncement: announcement,
+      });
+    }
+  }
+
+  /**
+   * Per-(account, device) latest applied event timestamp, for replay
+   * protection. Without it, an attacker capturing a revocation could
+   * replay it after the device was re-added and silently undo the
+   * re-add. In phase B v1 this is in-memory; phase B v2 will persist
+   * it alongside tombstones so a fresh device boot has the same
+   * protection.
+   */
+  private readonly deviceAnnouncementSeen: Map<string, number> = new Map();
+
+  private applyDeviceAnnouncement(
+    fromPeerId: string,
+    kind: 'device_added' | 'device_revoked',
+    announcement: { accountKey: string; deviceKey: string; eventAt: number; signature: string },
+  ): void {
+    // Phase B trust model: the signer of a device announcement is the
+    // primary device of the account, whose accountKey equals its peerId.
+    // A future phase introducing per-device signing certificates would
+    // relax this check and verify against a stored account certificate
+    // chain instead.
+    if (announcement.accountKey !== fromPeerId) return;
+    if (!verifyDeviceAnnouncementSignature(kind, announcement)) return;
+
+    // LWW replay guard. Skip events not strictly newer than what we've
+    // already applied for this (account, device) pair.
+    const key = `${announcement.accountKey}:${announcement.deviceKey}`;
+    const seen = this.deviceAnnouncementSeen.get(key) ?? 0;
+    if (announcement.eventAt <= seen) return;
+    this.deviceAnnouncementSeen.set(key, announcement.eventAt);
+
+    if (kind === 'device_added') {
+      this.permissionManager.addDeviceToContact(announcement.accountKey, announcement.deviceKey);
+    } else {
+      this.permissionManager.removeDeviceFromContact(announcement.accountKey, announcement.deviceKey);
+    }
+    this.persistContacts().catch(() => {});
+  }
+
+  /**
+   * Public verification helper. Returns true if the announcement is
+   * cryptographically well-formed and signs exactly the expected
+   * canonical bytes. Does NOT check trust binding (whether the sender
+   * is actually the account) — that's a per-application decision and
+   * is performed inside the SDK's inbound handler.
+   */
+  static verifyDeviceAnnouncement(
+    kind: 'device_added' | 'device_revoked',
+    announcement: { accountKey: string; deviceKey: string; eventAt: number; signature: string },
+  ): boolean {
+    return verifyDeviceAnnouncementSignature(kind, announcement);
   }
 
   private broadcastReputationProof(): void {
