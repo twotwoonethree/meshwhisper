@@ -36,6 +36,35 @@ export interface PreKeyBundle {
 }
 
 /**
+ * A short-lived offer minted by a fresh device that wants to be
+ * linked into an existing account. The secondary device shows this
+ * to the primary (via QR, deep link, or paste) and the primary calls
+ * `acceptDeviceLinkOffer` to mint the signed device-added
+ * announcement and stream the contact list back over a freshly-
+ * established ratchet session.
+ *
+ * See [docs/multi-device.md](docs/multi-device.md) "Model 3 — Linked devices."
+ */
+export interface DeviceLinkOffer {
+  version: 'v1';
+  /** Ed25519 hex pubkey of the secondary's device. Used by the
+   *  primary to look up the secondary's prekey bundle at the relay
+   *  and to populate the new device's hex in the signed
+   *  device_added announcement. */
+  deviceEdKey: string;
+  /** Must match the primary's namespace. Linking across namespaces
+   *  is not supported. */
+  namespace: string;
+  /** Base64 random nonce. The primary echoes it back in the
+   *  device_linked control message so the secondary can confirm the
+   *  acceptance corresponds to the offer it actually showed. */
+  linkChallenge: string;
+  /** Unix ms after which the offer is invalid. Default TTL is 5
+   *  minutes; tune via `createDeviceLinkOffer({ ttlMs })`. */
+  expiresAt: number;
+}
+
+/**
  * A contact's identity broken into its account-level key and the set
  * of device keys currently linked to that account. For single-device
  * contacts (the default), `accountKey === deviceKeys[0]` and the
@@ -377,6 +406,17 @@ export interface MeshWhisperConfig {
    * actually persisted after dedup (0 if everything was already present).
    */
   onHistoryRestored?: (peerId: string, count: number) => void;
+  /**
+   * Called on the secondary device after a primary device accepts its
+   * link offer. `accountPeerId` is the X25519 peerId of the account this
+   * device has now joined; `contactCount` is the number of contact
+   * accounts imported in the bootstrap payload. Apps should treat this
+   * as the signal to leave the "showing QR / waiting" screen and
+   * proceed to the main conversation list.
+   *
+   * See [docs/multi-device.md](docs/multi-device.md) "Model 3 — Linked devices."
+   */
+  onDeviceLinked?: (accountPeerId: string, contactCount: number) => void;
   /**
    * Called when a connected peer issues an entropy (proof-of-physical-device) challenge.
    * Collect `durationMs` milliseconds of readings from the requested sensor and return them.

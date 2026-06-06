@@ -22,6 +22,7 @@ import type {
   Conversation,
   Transport as MWTransport,
   UsernameTransferToken,
+  DeviceLinkOffer,
 } from '../types.js';
 import { PacketFlags } from '../types.js';
 
@@ -2604,6 +2605,12 @@ export class MeshWhisper {
           this.applyDeviceAnnouncement(fromPeerId, ctrl.__mw_ctrl, ctrl.deviceAnnouncement);
         }
         break;
+
+      case 'device_linked':
+        if (ctrl.deviceLinked) {
+          this.handleDeviceLinked(fromPeerId, ctrl.deviceLinked).catch(() => { /* swallow */ });
+        }
+        break;
     }
   }
 
@@ -3125,45 +3132,57 @@ export class MeshWhisper {
 
   /**
    * Announce a newly-linked device to every contact. The current
-   * device's identity key signs (Ed25519) the canonical message:
-   *   meshwhisper.device-added.v1\n{accountKey}\n{newDeviceKey}\n{addedAt}
-   * Recipients verify the signature against the sender's accountKey
-   * (which today equals the sender's peerId) and append the new
-   * device to their local Map<account, devices> view of the contact.
+   * device's Ed25519 identity key signs the canonical bytes:
+   *   meshwhisper.device-added.v1\n{accountEdKey}\n{deviceEdKey}\n{addedAt}
+   *
+   * `newDevicePeerId` is the X25519 peerId (SDK convention) of the
+   * new device. The Ed25519 key used in the wire format is looked up
+   * from the SDK's known-peers cache — a session with `newDevicePeerId`
+   * must have been established first (i.e. via `addContactByKey` or
+   * `acceptDeviceLinkOffer`).
+   *
+   * Recipients derive X25519 from the announcement's Ed25519 keys,
+   * trust-bind against the sender's peerId, verify the signature, and
+   * apply to their local PermissionManager.
    *
    * The local PermissionManager is also updated immediately so this
    * device's own state reflects the announcement.
    */
-  static async broadcastDeviceAdded(newDeviceKey: string): Promise<void> {
-    return MeshWhisper.instance.broadcastDeviceAdded(newDeviceKey);
+  static async broadcastDeviceAdded(newDevicePeerId: string): Promise<void> {
+    return MeshWhisper.instance.broadcastDeviceAdded(newDevicePeerId);
   }
 
-  async broadcastDeviceAdded(newDeviceKey: string): Promise<void> {
+  async broadcastDeviceAdded(newDevicePeerId: string): Promise<void> {
     this.assertRunning();
-    if (!newDeviceKey) throw new Error('newDeviceKey required');
-    const accountKey = uint8ArrayToHex(this.identity.getEdPublicKey());
+    if (!newDevicePeerId) throw new Error('newDevicePeerId required');
+    const newDeviceEdKey = this.sessionManager.getPeerEdKey(newDevicePeerId);
+    if (!newDeviceEdKey) {
+      throw new Error(
+        `Cannot broadcast device_added for ${newDevicePeerId.slice(0, 8)}…: ` +
+        `no Ed25519 key known. Establish a session first via addContactByKey or acceptDeviceLinkOffer.`,
+      );
+    }
+    const accountEdHex = uint8ArrayToHex(this.identity.getEdPublicKey());
+    const deviceEdHex = uint8ArrayToHex(newDeviceEdKey);
     const addedAt = Date.now();
     const sig = ed25519.sign(
-      buildCanonicalDeviceAddedMessage(accountKey, newDeviceKey, addedAt),
+      buildCanonicalDeviceAddedMessage(accountEdHex, deviceEdHex, addedAt),
       this.identity.getEdPrivateKey(),
     );
     const announcement = {
-      accountKey,
-      deviceKey: newDeviceKey,
+      accountKey: accountEdHex,
+      deviceKey: deviceEdHex,
       eventAt: addedAt,
       signature: uint8ArrayToBase64(sig),
     };
-    // Update our own contact view first so we see our own linked
-    // device immediately without needing to re-receive our own
-    // broadcast. This is a no-op for non-contact use (the SDK uses
-    // PermissionManager for tracking BOTH contact accounts and our
-    // own accountKey is not in contacts) — but app builders may
-    // wish to inspect getDevicesForAccount on the broadcasting
-    // device, so we record locally too.
-    this.permissionManager.addDeviceToContact(accountKey, newDeviceKey);
+    // Local PermissionManager uses X25519 peerIds throughout (SDK
+    // convention). The wire format carries Ed25519 (needed for
+    // signature verification); receivers derive X25519 on apply.
+    const myPeerId = this.getLocalPeerId();
+    this.permissionManager.addDeviceToContact(myPeerId, newDevicePeerId);
     await this.persistContacts();
     for (const peerId of this.permissionManager.getContacts()) {
-      if (peerId === accountKey || peerId === newDeviceKey) continue;
+      if (peerId === myPeerId || peerId === newDevicePeerId) continue;
       this.sendControl(peerId, {
         __mw_ctrl: 'device_added',
         deviceAnnouncement: announcement,
@@ -3173,32 +3192,41 @@ export class MeshWhisper {
 
   /**
    * Announce that a device should no longer be considered part of the
-   * account. Signed by the primary's identityKey. Receivers strip the
-   * deviceKey from their local view.
+   * account. Signed by the primary's Ed25519 identity key. Receivers
+   * strip the deviceKey from their local view.
    */
-  static async broadcastDeviceRevoked(revokedDeviceKey: string): Promise<void> {
-    return MeshWhisper.instance.broadcastDeviceRevoked(revokedDeviceKey);
+  static async broadcastDeviceRevoked(revokedDevicePeerId: string): Promise<void> {
+    return MeshWhisper.instance.broadcastDeviceRevoked(revokedDevicePeerId);
   }
 
-  async broadcastDeviceRevoked(revokedDeviceKey: string): Promise<void> {
+  async broadcastDeviceRevoked(revokedDevicePeerId: string): Promise<void> {
     this.assertRunning();
-    if (!revokedDeviceKey) throw new Error('revokedDeviceKey required');
-    const accountKey = uint8ArrayToHex(this.identity.getEdPublicKey());
+    if (!revokedDevicePeerId) throw new Error('revokedDevicePeerId required');
+    const revokedEdKey = this.sessionManager.getPeerEdKey(revokedDevicePeerId);
+    if (!revokedEdKey) {
+      throw new Error(
+        `Cannot broadcast device_revoked for ${revokedDevicePeerId.slice(0, 8)}…: ` +
+        `no Ed25519 key known.`,
+      );
+    }
+    const accountEdHex = uint8ArrayToHex(this.identity.getEdPublicKey());
+    const deviceEdHex = uint8ArrayToHex(revokedEdKey);
     const revokedAt = Date.now();
     const sig = ed25519.sign(
-      buildCanonicalDeviceRevokedMessage(accountKey, revokedDeviceKey, revokedAt),
+      buildCanonicalDeviceRevokedMessage(accountEdHex, deviceEdHex, revokedAt),
       this.identity.getEdPrivateKey(),
     );
     const announcement = {
-      accountKey,
-      deviceKey: revokedDeviceKey,
+      accountKey: accountEdHex,
+      deviceKey: deviceEdHex,
       eventAt: revokedAt,
       signature: uint8ArrayToBase64(sig),
     };
-    this.permissionManager.removeDeviceFromContact(accountKey, revokedDeviceKey);
+    const myPeerId = this.getLocalPeerId();
+    this.permissionManager.removeDeviceFromContact(myPeerId, revokedDevicePeerId);
     await this.persistContacts();
     for (const peerId of this.permissionManager.getContacts()) {
-      if (peerId === accountKey) continue;
+      if (peerId === myPeerId) continue;
       this.sendControl(peerId, {
         __mw_ctrl: 'device_revoked',
         deviceAnnouncement: announcement,
@@ -3216,30 +3244,229 @@ export class MeshWhisper {
    */
   private readonly deviceAnnouncementSeen: Map<string, number> = new Map();
 
+  /**
+   * In-memory pending link offer on the secondary. Set by
+   * createDeviceLinkOffer, cleared on receipt of a matching
+   * device_linked control. Not persisted — if the app reloads, the
+   * user re-issues the offer.
+   */
+  private pendingLinkOffer: DeviceLinkOffer | null = null;
+
+  /**
+   * Mint a one-shot offer for a primary device to consume. This
+   * device must already be initialised (so it has a published prekey
+   * bundle the primary can use for X3DH). Default TTL is 5 minutes.
+   *
+   * Serialise the returned object to JSON and present it to the
+   * primary via QR, deep link, paste — anything the user can scan or
+   * type. The SDK does not render UI; the offer is just data.
+   *
+   * See [docs/multi-device.md](../../docs/multi-device.md) "Model 3 — Linked devices."
+   */
+  static async createDeviceLinkOffer(opts?: { ttlMs?: number }): Promise<DeviceLinkOffer> {
+    return MeshWhisper.instance.createDeviceLinkOffer(opts);
+  }
+
+  async createDeviceLinkOffer(opts?: { ttlMs?: number }): Promise<DeviceLinkOffer> {
+    this.assertRunning();
+    const ttl = opts?.ttlMs ?? 5 * 60 * 1000;
+    const linkChallenge = uint8ArrayToBase64(randomBytes(16));
+    const offer: DeviceLinkOffer = {
+      version: 'v1',
+      deviceEdKey: uint8ArrayToHex(this.identity.getEdPublicKey()),
+      namespace: this.config.namespace,
+      linkChallenge,
+      expiresAt: Date.now() + ttl,
+    };
+    this.pendingLinkOffer = offer;
+    return offer;
+  }
+
+  /**
+   * Consume a DeviceLinkOffer produced by a secondary device. The
+   * caller must be the primary of the account (i.e. its identityKey
+   * is the accountKey for the new device's membership). Establishes a
+   * ratchet session with the secondary via its relay-published
+   * prekey bundle, mints a signed device_added announcement, sends
+   * the device_linked bootstrap payload back over the new session,
+   * and broadcasts the device_added to every existing contact.
+   */
+  static async acceptDeviceLinkOffer(offer: DeviceLinkOffer): Promise<void> {
+    return MeshWhisper.instance.acceptDeviceLinkOffer(offer);
+  }
+
+  async acceptDeviceLinkOffer(offer: DeviceLinkOffer): Promise<void> {
+    this.assertRunning();
+    if (offer.version !== 'v1') {
+      throw new Error(`Unsupported device-link-offer version: ${String(offer.version)}`);
+    }
+    if (offer.namespace !== this.config.namespace) {
+      throw new Error('Link offer is for a different namespace');
+    }
+    if (Date.now() > offer.expiresAt) {
+      throw new Error('Link offer has expired');
+    }
+
+    // Establish a session with the secondary via its relay-published
+    // bundle. We deliberately do NOT route through addContactByKey —
+    // the secondary isn't a contact, it's about to become a device of
+    // OUR account.
+    const result = await this.sessionManager.lookupPreKeyBundle(offer.deviceEdKey);
+    if (!result) {
+      throw new Error('Secondary device prekey bundle not found at relay');
+    }
+    const { bundle, publicKey: secondaryEdHex } = result;
+    const edPubBytes = hexToUint8Array(secondaryEdHex);
+    const x25519PubBytes = edwardsToMontgomeryPub(edPubBytes);
+    const secondaryPeerId = uint8ArrayToHex(x25519PubBytes);
+
+    this.sessionManager.setBundle(secondaryPeerId, bundle);
+    this.peerCache.addPeer(secondaryPeerId, x25519PubBytes);
+    this.storage?.set(`peers/${secondaryPeerId}`, uint8ArrayToHex(x25519PubBytes)).catch(() => {});
+
+    const existing = this.sessionManager.getSession(secondaryPeerId);
+    if (!existing || existing.sendingChainKey === null) {
+      await this.sessionManager.initiateHandshake(secondaryPeerId, bundle);
+    }
+    const session = this.sessionManager.getSession(secondaryPeerId);
+    if (!session) {
+      throw new Error('Failed to establish session with secondary device');
+    }
+    await this.waitForSendableSession(secondaryPeerId, session);
+
+    // Mint the signed device_added announcement.
+    const accountEdHex = uint8ArrayToHex(this.identity.getEdPublicKey());
+    const deviceEdHex = secondaryEdHex;
+    const addedAt = Date.now();
+    const sig = ed25519.sign(
+      buildCanonicalDeviceAddedMessage(accountEdHex, deviceEdHex, addedAt),
+      this.identity.getEdPrivateKey(),
+    );
+    const announcement = {
+      accountKey: accountEdHex,
+      deviceKey: deviceEdHex,
+      eventAt: addedAt,
+      signature: uint8ArrayToBase64(sig),
+    };
+
+    // Local PermissionManager update: secondary joins our own account.
+    const myPeerId = this.getLocalPeerId();
+    this.permissionManager.addDeviceToContact(myPeerId, secondaryPeerId);
+    await this.persistContacts();
+
+    // Send the bootstrap payload to the secondary over the new session.
+    this.sendControl(secondaryPeerId, {
+      __mw_ctrl: 'device_linked',
+      deviceLinked: {
+        linkChallenge: offer.linkChallenge,
+        deviceAnnouncement: announcement,
+        contactRecords: this.permissionManager.getContactRecords(),
+      },
+    });
+
+    // Broadcast device_added to every existing contact so their local
+    // routing picks up the new device. Skip ourselves and the secondary
+    // (the secondary gets the announcement embedded in device_linked).
+    for (const peerId of this.permissionManager.getContacts()) {
+      if (peerId === myPeerId || peerId === secondaryPeerId) continue;
+      this.sendControl(peerId, {
+        __mw_ctrl: 'device_added',
+        deviceAnnouncement: announcement,
+      });
+    }
+  }
+
+  /**
+   * Inbound device_linked handler. Fires on the secondary when the
+   * primary completes acceptDeviceLinkOffer. Validates the challenge
+   * echo and the embedded device_added announcement, imports the
+   * primary's contact list, and updates local state so this device is
+   * now part of the account.
+   */
+  private async handleDeviceLinked(
+    fromPeerId: string,
+    deviceLinked: {
+      linkChallenge: string;
+      deviceAnnouncement: { accountKey: string; deviceKey: string; eventAt: number; signature: string };
+      contactRecords: Array<{ accountKey: string; deviceKeys: string[] }>;
+    },
+  ): Promise<void> {
+    const pending = this.pendingLinkOffer;
+    if (!pending) return;
+    if (deviceLinked.linkChallenge !== pending.linkChallenge) return;
+    if (Date.now() > pending.expiresAt) {
+      this.pendingLinkOffer = null;
+      return;
+    }
+
+    // The announcement must add OUR ed-key to its account.
+    const ourEdHex = uint8ArrayToHex(this.identity.getEdPublicKey());
+    if (deviceLinked.deviceAnnouncement.deviceKey !== ourEdHex) return;
+
+    // Verify the signature.
+    if (!verifyDeviceAnnouncementSignature('device_added', deviceLinked.deviceAnnouncement)) return;
+
+    // Derive primary's X25519 peerId and trust-bind to fromPeerId.
+    let primaryPeerId: string;
+    try {
+      primaryPeerId = uint8ArrayToHex(
+        edwardsToMontgomeryPub(hexToUint8Array(deviceLinked.deviceAnnouncement.accountKey)),
+      );
+    } catch { return; }
+    if (primaryPeerId !== fromPeerId) return;
+
+    // Import the contact list and record our own membership.
+    this.permissionManager.loadContactRecords(deviceLinked.contactRecords ?? []);
+    this.permissionManager.addDeviceToContact(primaryPeerId, this.getLocalPeerId());
+    await this.persistContacts();
+
+    // Clear the pending offer so a second device_linked can't
+    // overwrite the link.
+    this.pendingLinkOffer = null;
+
+    // Fire the app's callback.
+    try {
+      this.config.onDeviceLinked?.(primaryPeerId, (deviceLinked.contactRecords ?? []).length);
+    } catch { /* swallow handler throws */ }
+  }
+
   private applyDeviceAnnouncement(
     fromPeerId: string,
     kind: 'device_added' | 'device_revoked',
     announcement: { accountKey: string; deviceKey: string; eventAt: number; signature: string },
   ): void {
-    // Phase B trust model: the signer of a device announcement is the
-    // primary device of the account, whose accountKey equals its peerId.
-    // A future phase introducing per-device signing certificates would
-    // relax this check and verify against a stored account certificate
-    // chain instead.
-    if (announcement.accountKey !== fromPeerId) return;
+    // Wire format carries Ed25519 hex (signatures require it). Derive
+    // the X25519 peerIds that PermissionManager uses everywhere else.
+    let accountX25519: string;
+    let deviceX25519: string;
+    try {
+      accountX25519 = uint8ArrayToHex(
+        edwardsToMontgomeryPub(hexToUint8Array(announcement.accountKey)),
+      );
+      deviceX25519 = uint8ArrayToHex(
+        edwardsToMontgomeryPub(hexToUint8Array(announcement.deviceKey)),
+      );
+    } catch { return; }
+
+    // Trust model: the sender of a device announcement must BE the
+    // account it claims to act for. fromPeerId is X25519 (SDK
+    // convention); accountKey on the wire is Ed25519; we derive and
+    // compare. A future phase introducing per-device signing
+    // certificates would relax this check and verify against a stored
+    // account-cert chain instead.
+    if (accountX25519 !== fromPeerId) return;
     if (!verifyDeviceAnnouncementSignature(kind, announcement)) return;
 
-    // LWW replay guard. Skip events not strictly newer than what we've
-    // already applied for this (account, device) pair.
-    const key = `${announcement.accountKey}:${announcement.deviceKey}`;
-    const seen = this.deviceAnnouncementSeen.get(key) ?? 0;
+    // LWW replay guard, keyed by the X25519 pair.
+    const seenKey = `${accountX25519}:${deviceX25519}`;
+    const seen = this.deviceAnnouncementSeen.get(seenKey) ?? 0;
     if (announcement.eventAt <= seen) return;
-    this.deviceAnnouncementSeen.set(key, announcement.eventAt);
+    this.deviceAnnouncementSeen.set(seenKey, announcement.eventAt);
 
     if (kind === 'device_added') {
-      this.permissionManager.addDeviceToContact(announcement.accountKey, announcement.deviceKey);
+      this.permissionManager.addDeviceToContact(accountX25519, deviceX25519);
     } else {
-      this.permissionManager.removeDeviceFromContact(announcement.accountKey, announcement.deviceKey);
+      this.permissionManager.removeDeviceFromContact(accountX25519, deviceX25519);
     }
     this.persistContacts().catch(() => {});
   }

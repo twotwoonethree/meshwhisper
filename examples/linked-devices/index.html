@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MeshWhisper · Linked Devices Example</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        max-width: 720px;
+        margin: 0 auto;
+        line-height: 1.5;
+      }
+      h1 { font-size: 1.5rem; margin-top: 0; }
+      h2 { font-size: 1.1rem; margin-top: 1.5rem; }
+      .role-select button {
+        padding: 12px 24px;
+        margin-right: 12px;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 0.85rem;
+        min-height: 8rem;
+      }
+      pre {
+        background: rgba(127, 127, 127, 0.15);
+        padding: 8px;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .status {
+        padding: 8px 12px;
+        border-radius: 4px;
+        margin: 8px 0;
+      }
+      .status.ok { background: rgba(60, 200, 100, 0.15); }
+      .status.err { background: rgba(220, 70, 70, 0.15); }
+      .status.info { background: rgba(80, 140, 220, 0.15); }
+      button {
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+      .hint { color: #888; font-size: 0.9rem; }
+    </style>
+  </head>
+  <body>
+    <h1>MeshWhisper · Linked Devices Example</h1>
+    <p class="hint">
+      Reference for the Model-3 multi-device protocol from
+      <code>docs/multi-device.md</code>. Two browser tabs (or two devices)
+      take the roles below. The secondary device shows an offer; the primary
+      consumes it; both end up sharing an account.
+    </p>
+
+    <div id="role-select" class="role-select">
+      <h2>Pick a role for this tab</h2>
+      <button data-role="primary">I&nbsp;am&nbsp;the&nbsp;primary&nbsp;(existing&nbsp;account)</button>
+      <button data-role="secondary">I&nbsp;am&nbsp;a&nbsp;new&nbsp;device</button>
+    </div>
+
+    <div id="app"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

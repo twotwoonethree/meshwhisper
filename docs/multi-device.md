@@ -164,6 +164,58 @@ Existing primitives reduce the surface: history sync on a freshly-added device f
 
 **Estimated effort:** 2 weeks (was 2–3 — history-recovery handles per-device catch-up, removing the largest sub-task).
 
+### Status: shipped (phases A–C v1 + QR pairing v1)
+
+The phased build of Option 3 has shipped through QR pairing. Working API today:
+
+```ts
+// ---------- Secondary device (e.g. user installing the app on a laptop) ----------
+
+await MeshWhisper.init({
+  namespace: 'com.yourapp',
+  // The secondary uses its OWN random keypair (developerKey override or
+  // generated on first init). It is NOT signing in with credentials.
+  storage,
+  onDeviceLinked: (accountPeerId, contactCount) => {
+    // The primary accepted the link. We're now a device of accountPeerId.
+    // contactCount tells you how many contacts were imported.
+    navigateToMainApp();
+  },
+});
+
+const offer = await MeshWhisper.createDeviceLinkOffer({ ttlMs: 5 * 60_000 });
+// offer is a plain JSON object — render it as a QR, deep link, or
+// copyable code. The SDK doesn't pick the rendering for you.
+showQR(JSON.stringify(offer));
+
+// ---------- Primary device (the user's existing account) ----------
+
+const scanned = await scanQRCode();              // your QR library
+const offer: DeviceLinkOffer = JSON.parse(scanned);
+
+await MeshWhisper.acceptDeviceLinkOffer(offer);
+// Behind the scenes: looks up the secondary's prekey bundle at the relay,
+// completes X3DH, mints a signed `device_added` announcement, sends the
+// `device_linked` bootstrap payload (containing your contact list and
+// the announcement) back to the secondary over the new ratchet session,
+// and broadcasts `device_added` to every other contact so their local
+// routing tables learn about your new device.
+```
+
+The protocol's signed wire format and trust binding:
+
+- Secondary's offer carries: its Ed25519 hex (so primary can look up its prekey bundle), the namespace, a base64 challenge nonce, an expiry.
+- Primary's `device_added` announcement is Ed25519-signed over `meshwhisper.device-added.v1\n{accountEdKey}\n{deviceEdKey}\n{addedAt}` and broadcast.
+- Secondary verifies the signature, confirms the announcement names *its* deviceKey, derives the primary's X25519 peerId, and accepts only if the sender peerId of the inbound matches.
+
+`MeshWhisper.broadcastDeviceRevoked(devicePeerId)` is the symmetric escape hatch — same signature shape, recipients strip the deviceKey from their local view.
+
+### What's NOT in QR pairing v1
+
+- **Persistent LWW timestamps for device announcements** — the replay-protection map is in-memory, so a fresh device boot has no historical protection. A small follow-up.
+- **Per-device signing certificates** — only the primary (the device whose `peerId === accountKey`) can broadcast announcements today. Secondary devices can't independently revoke. Phase B v2.
+- **A reference Prudence UI** — Prudence uses Option 1 (same identity everywhere via password-derived keys) and isn't a good demonstration of Option 3. See [`examples/linked-devices/`](../examples/linked-devices/) for a focused tiny app.
+
 ---
 
 ## Comparison

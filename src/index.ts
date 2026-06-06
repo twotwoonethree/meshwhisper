@@ -79,7 +79,19 @@ export type {
   // Persistence
   StoredMessage,
   Conversation,
+
+  // Multi-device + identifier extras
+  ContactRecord,
+  DeviceLinkOffer,
+  UsernameTransferToken,
 } from './types.js';
+
+// --- Storage backend interface ---
+// Platform-specific implementations are in @meshwhisper/sdk/browser and
+// @meshwhisper/sdk/node so bundlers don't pull node-only modules into a
+// browser build.
+
+export type { StorageBackend } from './persistence/types.js';
 
 // Re-export PacketFlags as a value (enum) since it is used as both
 // a type and a runtime value.

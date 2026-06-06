@@ -1,0 +1,20 @@
+{
+  "name": "@meshwhisper/example-linked-devices",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: Model-3 multi-device linking — secondary mints a link offer, primary accepts via QR/paste, both share an account",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../..",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.0.5"
+  }
+}

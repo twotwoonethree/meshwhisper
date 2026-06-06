@@ -121,7 +121,8 @@ export interface ControlMessage {
     | 'session_ping'
     | 'session_pong'
     | 'device_added'
-    | 'device_revoked';
+    | 'device_revoked'
+    | 'device_linked';
   /** session_ping / session_pong correlation id. */
   sessionPingId?: string;
   /** history_replay: a chunk of historical messages from the sender's view. */
@@ -198,6 +199,28 @@ export interface ControlMessage {
     deviceKey: string;           // hex; the device being added or revoked
     eventAt: number;             // unix ms; addedAt or revokedAt
     signature: string;           // base64; 64 raw bytes
+  };
+  // device_linked — sent by the primary to a freshly-linked secondary
+  // immediately after accepting its DeviceLinkOffer. Carries the
+  // signed device_added announcement so the secondary can verify its
+  // own membership, plus a snapshot of the primary's contact list so
+  // the secondary can bootstrap its routing.
+  deviceLinked?: {
+    /** Echo of the offer's linkChallenge so the secondary can confirm
+     *  this payload corresponds to the offer it actually showed. */
+    linkChallenge: string;
+    /** Signed device_added announcement adding the secondary's
+     *  deviceKey to the primary's accountKey. Validated by the
+     *  secondary on receipt. */
+    deviceAnnouncement: {
+      accountKey: string;
+      deviceKey: string;
+      eventAt: number;
+      signature: string;
+    };
+    /** Account/device snapshot of the primary's PermissionManager.
+     *  X25519 peerIds throughout (PermissionManager convention). */
+    contactRecords: Array<{ accountKey: string; deviceKeys: string[] }>;
   };
 }
 
