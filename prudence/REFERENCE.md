@@ -45,6 +45,7 @@ If you're building on MeshWhisper, the recommended workflow is: skim the SDK REA
 - By peer ID — `MeshWhisper.addContactByKey(hex)` in `components/AddContact.tsx:handleConnect`. Note the follow-up `sdk.sendMessage(peerId, prudenceCtrl)` that ships the user's display name in an app-level control message — this is how Prudence avoids the relay learning usernames.
 - Inbound first contact — surfaced via the `onContactRequest` callback (`App.tsx:handleContactRequest`). User accepts → `App.tsx:handleAcceptRequest` → `MeshWhisper.acceptContact`.
 - Deletion — `App.tsx:handleRemoveContact` calls `sdk.deleteConversationInstance(peerId)`. The SDK writes a tombstone and fires `onArchiveDirty` automatically; Prudence doesn't need to do anything extra to make the deletion survive a reload.
+- Display-name collision — `contact-names.ts:saveContactNameInteractive` is the wrapper to use when a contact is being actively added or accepted. It detects when a name would collide with an existing contact and prompts the user once ("There's already a contact called '@robby'. Enter a different name, or press Cancel to keep both as '@robby'."). Call sites: `App.tsx:handleAcceptRequest`, the post-accept directory backfill, and the `AddContact` `onContactAdded` callback. Background paths (group events, archive restore) still call the silent `saveContactName` since interrupting them with a prompt would be jarring.
 
 ### Groups
 - Create — `App.tsx:handleCreateGroup`. `MeshWhisper.createGroup({ name, members })` returns a handle; you persist `senderKeys` and the member roster yourself (Prudence uses `group-storage.ts`).
@@ -83,6 +84,14 @@ If you're building on MeshWhisper, the recommended workflow is: skim the SDK REA
 - Subscription — `push.ts:getPushSubscription`. Reads the VAPID public key from build env, asks the SW to subscribe, returns the `WebPushSubscription` shape the SDK expects.
 - Wiring — `App.tsx`, the `push` field on `MeshWhisper.init`. The SDK uploads the subscription to the node as part of its handshake; the node fires content-free push wake signals when an inbound message arrives for a hash this device subscribed to.
 - Service worker — `sw.ts`. Receives the push event, calls `clients.matchAll` to decide whether the page is already foregrounded (skip notification) or backgrounded (show one).
+
+### SDK features NOT exercised here
+
+A few SDK surfaces don't appear in Prudence because they don't fit its identity / UX model. They exist in the SDK and have their own reference codebase:
+
+- **Linked-devices multi-device (Model 3)** — `MeshWhisper.createDeviceLinkOffer` / `acceptDeviceLinkOffer` / `onDeviceLinked` + `broadcastDeviceAdded` / `broadcastDeviceRevoked` + sendMessage fan-out. Prudence uses Model 1 (same identity on every device via password derivation); Model 3 needs each device to have its own random key and a QR pairing flow to bootstrap a new device into an account. See [`examples/linked-devices/`](../examples/linked-devices/) for the focused reference and [`docs/multi-device.md`](../docs/multi-device.md) for the design.
+- **Per-namespace username policy + signed username transfer** — `MeshWhisper.setNamespacePolicy` / `createUsernameTransferToken` / `acceptUsernameTransfer`. Prudence registers a username at init and never reassigns it, so the helpers aren't exercised, but they're available in the SDK if your app needs handle migration. See [`docs/identifier-patterns.md`](../docs/identifier-patterns.md).
+- **Identifier change at runtime** — `MeshWhisper.setIdentifier` / `checkIdentifierAvailable`. Prudence binds the username to the password-derived identity at registration and never changes it; apps with a "change handle" UX would use these.
 
 ## Non-obvious patterns
 

@@ -1,6 +1,6 @@
 # Direction
 
-A snapshot of where MeshWhisper is today and where it's going. Last updated: 2026-05-26.
+A snapshot of where MeshWhisper is today and where it's going. Last updated: 2026-06-08.
 
 This is not a roadmap with dates and it is not a manifesto. It is a record of the strategic decisions the project is operating under, with pointers to the artifacts that make those decisions concrete.
 
@@ -10,10 +10,10 @@ A self-hostable, end-to-end encrypted messaging SDK and relay. Concretely:
 
 - **An SDK** (`@meshwhisper/sdk`) — TypeScript, runs in browsers, Node.js, and React Native. Encrypts messages on-device with X3DH + Double Ratchet + PQXDH (ML-KEM-768); the relay never holds a decryption key.
 - **A relay node** (`meshwhisper-node`) — one Docker container that does packet relay, store-and-forward, push-notification forwarding, encrypted media storage, encrypted archive storage, and a username directory. Self-hosted on ~€4/month of VPS or co-located with whatever you already run. The Foundation operates one at `relay.meshwhisper.org` for development and small-scale production use.
-- **Reference codebases** — [Prudence](../prudence/REFERENCE.md) (full PWA), [support-bot](../examples/support-bot/) (LLM agent), [supervised-chat](../examples/supervised-chat/) (compliance pattern), [ticket-lifecycle](../examples/ticket-lifecycle/) (full customer-service pattern with LLM triage and human handoff).
-- **Documentation** — [API reference](api.md), [Identity patterns](identity-patterns.md), [Self-hosting](self-hosting.md), [Architecture decisions](adr/), [Codebase overview](codebase-overview.md), and the [Whitepaper](whitepaper.md).
+- **Reference codebases** — [Prudence](../prudence/REFERENCE.md) (full PWA, Model-1 password-derived identity), [support-bot](../examples/support-bot/) (LLM agent), [supervised-chat](../examples/supervised-chat/) (compliance pattern), [ticket-lifecycle](../examples/ticket-lifecycle/) (full customer-service pattern with LLM triage and human handoff), [linked-devices](../examples/linked-devices/) (Model-3 multi-device pairing via QR / paste).
+- **Documentation** — [API reference](api.md), [Identity patterns](identity-patterns.md), [Identifier patterns](identifier-patterns.md), [Multi-device](multi-device.md), [Self-hosting](self-hosting.md), [Architecture decisions](adr/), [Codebase overview](codebase-overview.md), and the [Whitepaper](whitepaper.md).
 
-What works today, in production, on the Foundation relay: encrypted direct messages and group messages, X3DH-with-PQXDH session establishment, multi-device archive sync, conversation history recovery from a peer, encrypted media, Web Push notifications, presence, typing indicators, read receipts, configurable message retention.
+What works today, in production, on the Foundation relay: encrypted direct messages and group messages, X3DH-with-PQXDH session establishment, multi-device archive sync, conversation history recovery from a peer, encrypted media, Web Push notifications, presence, typing indicators, read receipts, configurable message retention, per-namespace username-ownership policy (`signed-transfer` default with signed username handover, `last-writer-wins` opt-in), and Model-3 linked-devices multi-device (account/device data model, signed `device_added`/`device_revoked` announcements, `sendMessage` fan-out, QR pairing).
 
 ## What MeshWhisper is not (yet)
 
@@ -21,6 +21,7 @@ What works today, in production, on the Foundation relay: encrypted direct messa
 - **Not a SaaS.** The Foundation does not operate a hosted service for end users. Apps that integrate MeshWhisper deploy their own node. The Foundation relay exists for development and as bootstrap infrastructure.
 - **Not a Signal or WhatsApp.** There is no MeshWhisper consumer app sold to end users. Prudence is a reference application that demonstrates how to build one; if you want a chat product, you build it on the SDK.
 - **Not yet a federation.** Each node today is an island. Federation (transport-layer node-to-node packet forwarding) is the next major piece of architectural work. The protocol design is ready; the implementation is not.
+- **Not yet a complete multi-device experience.** The linked-devices protocol (Model 3 in [multi-device.md](multi-device.md)) has shipped end-to-end in v1, but persistent LWW timestamps for device announcements, per-device signing certificates so secondaries can broadcast independently, and self-fan-out (a message I send from device A also showing up on my device B) are deferred. The current shape is fully usable for adopters that want to ship "scan a QR to link your laptop"; the deferred work tightens the edges.
 
 ## Where it's going
 

@@ -63,7 +63,7 @@ interface MeshWhisperConfig {
 |---|---|---|---|
 | `namespace` | Yes | — | Your app bundle ID, e.g. `"com.example.myapp"`. Namespaces identities so users of different apps can't message each other accidentally. |
 | `node` | No | `"mesh"` | Relay URL(s). `"mesh"` uses Foundation-hosted relays. Pass `"wss://relay.myapp.com"` for self-hosted, or an array for redundancy. |
-| `username` | No | — | Human-readable username registered with the relay alongside your pre-key bundle. Other users can add you with `addContactByKey('@alice')` instead of a raw public key. Usernames are scoped to the namespace; first-registered wins. |
+| `username` | No | — | Human-readable username registered with the relay alongside your pre-key bundle. Other users can add you with `addContactByKey('@alice')` instead of a raw public key. Usernames are scoped to the namespace; ownership semantics are governed by the namespace's `usernamePolicy` (default `'signed-transfer'` — username is sticky to whichever key first claimed it; takeover requires a signed transfer token). See [Namespace policy](#namespace-policy) and [Username transfer](#username-transfer). |
 | `developerKey` | No | random | Base64-encoded developer public key. Tie to a stable key in production so sessions survive app updates. |
 | `permissionModel` | No | `"open"` | Who can send messages. `"open"` = anyone. `"mutual"` = only existing contacts. |
 | `push` | No | — | Push notification configuration. Required for offline delivery. See [`PushConfig`](#pushconfig). |
@@ -78,6 +78,7 @@ interface MeshWhisperConfig {
 | `onArchiveDirty` | No | — | Called whenever the SDK writes a tombstone (delete) or revival (re-add) event that must reach the relay before the next reload. The app should push the archive immediately (bypass any debounce). Apps that don't provide this still work, but stale relay state can resurrect deleted peers on the next pull until a normal push fires. |
 | `onHistoryRequest` | No | refuse | Called when a peer asks for their conversation history to be replayed (typically after they accidentally deleted it). Return `true` to authorise the share, `false` to refuse. Default behaviour without this callback is refuse silently. Apps usually prompt the user once per peer and cache the decision. |
 | `onHistoryRestored` | No | — | Called after a peer has replayed history into local storage. `count` is the number of new messages persisted after dedup. Reload the conversation view in response. |
+| `onDeviceLinked` | No | — | Fires on a secondary device after a primary device accepts its link offer (Model-3 multi-device). `accountPeerId` is the X25519 peerId of the account this device has now joined; `contactCount` is how many contact accounts were imported in the bootstrap payload. Apps should leave their "showing QR / waiting" screen on this signal. See [Multi-device](#multi-device). |
 
 ---
 
@@ -447,6 +448,159 @@ Accept a contact from a scanned QR code. Initiates X3DH key exchange.
 ```ts
 await MeshWhisper.acceptContact(scannedQRData: string): Promise<void>
 ```
+
+---
+
+## Identifier management
+
+Helpers for working with the human-readable identifier (the `username` you registered at init). See [identifier-patterns.md](identifier-patterns.md) for the six common patterns (handle / phone / email / opaque / peerId-only / hybrid) and which one fits which kind of app.
+
+### `MeshWhisper.checkIdentifierAvailable(identifier)`
+
+```ts
+const available: boolean = await MeshWhisper.checkIdentifierAvailable('alice');
+```
+
+Returns `true` if no other identity currently holds this identifier in your namespace (or if you already hold it). Point-in-time check — two clients can both observe `available` and race to claim. Treat as a hint; handle the race at the call site (`setIdentifier` will throw if it loses the race under signed-transfer policy).
+
+### `MeshWhisper.setIdentifier(identifier)`
+
+```ts
+await MeshWhisper.setIdentifier('alice2');
+```
+
+Republishes your prekey bundle under a new identifier. Your cryptographic identity (peerId, sessions, contacts) is unchanged — only the directory entry moves. Under the default `signed-transfer` policy, throws if the identifier is held by a different identity in your namespace.
+
+### `MeshWhisper.resolveUsername(peerId)`
+
+```ts
+const username: string | undefined = await MeshWhisper.resolveUsername(peerId);
+```
+
+Looks up a peer's registered identifier from the relay directory. Returns `undefined` if the peer hasn't registered one or the directory lookup fails. Useful for backfilling display names when an app-level handshake message that originally carried the username never arrived.
+
+---
+
+## Namespace policy
+
+A namespace-wide rule for what happens when a *different* key tries to register a username that's already claimed. Set once, early; the first call locks the policy in.
+
+### `MeshWhisper.setNamespacePolicy(usernamePolicy)`
+
+```ts
+await MeshWhisper.setNamespacePolicy('signed-transfer'); // default for new namespaces
+// or
+await MeshWhisper.setNamespacePolicy('last-writer-wins'); // opt-in for password-derived flows
+```
+
+- **`'signed-transfer'`** (default): takeover rejected with HTTP 409 unless the request includes a transfer token signed by the current owner (see [Username transfer](#username-transfer)). Re-publishing from the SAME key always succeeds.
+- **`'last-writer-wins'`**: takeover is permitted and silently displaces the prior owner. Suits apps whose identity model re-derives the same key from credentials (so re-claiming is the recovery story).
+
+Sticky — re-setting with the same value is a no-op; re-setting with a different value throws.
+
+### `MeshWhisper.getNamespacePolicy()`
+
+```ts
+const policy: 'signed-transfer' | 'last-writer-wins' = await MeshWhisper.getNamespacePolicy();
+```
+
+Returns the effective policy. Defaults to `'signed-transfer'` if no policy row has been written for this namespace.
+
+---
+
+## Username transfer
+
+Under the `signed-transfer` policy, a username is sticky to whichever key first claimed it. To move it to a new key (key rotation, device migration, gifting a handle), the current owner mints a signed transfer token bound to the recipient's key + an expiry. See [identifier-patterns.md](identifier-patterns.md#signed-transfer) for the security properties.
+
+### `MeshWhisper.createUsernameTransferToken(opts)`
+
+```ts
+const token: UsernameTransferToken = await MeshWhisper.createUsernameTransferToken({
+  username: 'alice',
+  toPublicKey: '<recipient ed25519 hex>',
+  expiresInMs: 60 * 60 * 1000, // optional; default 24h
+});
+// token is a plain JSON object — share via QR, paste, deep link, message.
+```
+
+Signed with this device's Ed25519 identity key. The relay accepts the resulting handover only if this device is the current owner of `username`.
+
+### `MeshWhisper.acceptUsernameTransfer(token)`
+
+```ts
+await MeshWhisper.acceptUsernameTransfer(token);
+```
+
+Republishes this device's prekey bundle under `token.username` with the signed token attached. Throws if the token is for a different recipient, namespace, has expired, or the relay rejects the signature.
+
+---
+
+## Multi-device
+
+The Model-3 ("linked devices, distributed") flow from [multi-device.md](multi-device.md): each device has its own ratchet identity; the primary device signs membership announcements; sends fan out to all known devices of the recipient's account. See [`examples/linked-devices/`](../examples/linked-devices/) for a working reference app.
+
+### `MeshWhisper.getAccountForDevice(deviceKey)`
+
+```ts
+const accountKey: string | null = MeshWhisper.getAccountForDevice(deviceKey);
+```
+
+Returns the account-level peerId that owns this device, or `null` if the device isn't a known contact. For single-device contacts, `accountKey === deviceKey`.
+
+### `MeshWhisper.getDevicesForAccount(accountKey)`
+
+```ts
+const devices: string[] = MeshWhisper.getDevicesForAccount(accountKey);
+```
+
+Returns every device peerId currently linked to the account. `sendMessage` fans out to all of them automatically; this helper exists for app-level introspection.
+
+### `MeshWhisper.getContactAccounts()`
+
+```ts
+const accounts: string[] = MeshWhisper.getContactAccounts();
+```
+
+Account-level companion to `getContacts()` (which returns the flat device-key view for backwards compatibility). For single-device contacts the two lists have identical contents.
+
+### `MeshWhisper.broadcastDeviceAdded(newDevicePeerId)`
+
+```ts
+await MeshWhisper.broadcastDeviceAdded(newDevicePeerId);
+```
+
+Announce that a new device belongs to this account. Signs a `device_added` control message with our Ed25519 identity key and fans it out to every contact. A session with `newDevicePeerId` must already exist (e.g. from `acceptDeviceLinkOffer` or `addContactByKey`).
+
+### `MeshWhisper.broadcastDeviceRevoked(revokedDevicePeerId)`
+
+Symmetric escape hatch. Recipients strip the device from their local view of this account.
+
+### `MeshWhisper.verifyDeviceAnnouncement(kind, announcement)`
+
+```ts
+const ok: boolean = MeshWhisper.verifyDeviceAnnouncement('device_added', announcement);
+```
+
+Public Ed25519 signature verifier for `device_added` / `device_revoked` announcements. Useful for app-level logging or alternative storage. Trust binding (whether the sender peerId actually represents the account) is performed by the SDK's inbound handler — this helper only checks the cryptographic signature.
+
+### `MeshWhisper.createDeviceLinkOffer(opts?)`
+
+```ts
+const offer: DeviceLinkOffer = await MeshWhisper.createDeviceLinkOffer({
+  ttlMs: 5 * 60 * 1000, // optional; default 5 minutes
+});
+// Render as a QR / deep link / paste — the SDK doesn't pick a transport.
+```
+
+Secondary-device entry point. Mints a one-shot link offer (JSON-serialisable) carrying this device's Ed25519 hex, the namespace, a random challenge, and an expiry. The pending offer lives in-memory; reloading the app invalidates it.
+
+### `MeshWhisper.acceptDeviceLinkOffer(offer)`
+
+```ts
+await MeshWhisper.acceptDeviceLinkOffer(offer);
+```
+
+Primary-device entry point. Looks up the secondary's prekey bundle at the relay, runs X3DH, mints a signed `device_added` announcement, sends a `device_linked` bootstrap payload (announcement + contact list) back over the new ratchet session, and broadcasts `device_added` to every other contact. The secondary's `onDeviceLinked` callback fires once the bootstrap arrives.
 
 ---
 

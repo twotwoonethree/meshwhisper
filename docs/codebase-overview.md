@@ -245,7 +245,7 @@ Some modules exist as designs awaiting the conditions under which they need to b
 - **`src/sybil/`** — EntropyChallenger and ZKRelayReputation. The defence becomes meaningful when many independent relay operators exist; with one bootstrap operator there is nothing to attack and nothing to defend against. Kept; should not be claimed as production-grade sybil resistance until enforcement is wired into a multi-operator network.
 - **`src/compliance/`** — audit-log hooks. Scaffolded interfaces only; not production-hardened. Should be described as a planned interface in external materials, not a shipped feature.
 - **`src/reciprocity/`** — RelayLedger byte-tracking. The current direction is the Tor middle-node model: open forwarding without enforced tit-for-tat. The byte-tracking primitives may become inputs to future adaptive throttling; the BitTorrent-style enforcement scaffolding will not be used.
-- **`src/cluster/`** — DeviceCluster (primary-receiver election for same-identity-on-two-devices). Largely **superseded** by recent work: the encrypted relay archive solves the practical multi-device problem (history available on any device with the same password), and the hand-off model documented in `multi-device.md` solves simultaneous-active-device with much less ceremony. A future linked-devices implementation (per-device keys) would be built fresh, not on this scaffolding. Candidate for removal.
+- **`src/cluster/`** — DeviceCluster (primary-receiver election for same-identity-on-two-devices). **Orthogonal** to the linked-devices multi-device implementation that has since shipped (`src/permissions/`, the `device_*` control messages, `createDeviceLinkOffer` / `acceptDeviceLinkOffer`). Cluster solves "two devices share one key and need to elect a receiver"; linked-devices solves "each device has its own key and the contact registry tracks them." Both can coexist in principle; Prudence uses cluster for its password-derived same-identity flow, and the `examples/linked-devices/` reference uses the linked-devices path. Candidate for clarification or removal in a future cleanup.
 - **`src/permissions/`** — only the `open` and `mutual` permission models are exercised. `introduction`, `transactional`, and `custom` are scaffolded modes that should not be claimed as features until something actually uses them.
 
 The honest framing across the codebase: layers that ship in real deployments are production. Layers that exist for problems emerging at scale are scaffolded, named clearly, and will be hardened in step with the conditions that make them necessary.
@@ -254,17 +254,15 @@ The honest framing across the codebase: layers that ship in real deployments are
 
 ## Known gaps and limitations
 
-### Critical for production
-
-1. **No multi-device support** — the same identity key on two devices is not handled. Device 2 would generate a different identity and appear as a different user.
-
 ### Minor
 
-2. **`ws` is an optional dependency** — moved from `dependencies` to `optionalDependencies`. In some environments this may not install automatically for Node.js users who need `NodeTransport`.
+1. **`ws` is an optional dependency** — moved from `dependencies` to `optionalDependencies`. In some environments this may not install automatically for Node.js users who need `NodeTransport`.
 
-3. **Service worker requires manual copy** — `dist/meshwhisper-sw.js` must be copied to the public directory manually. No automated step.
+2. **Service worker requires manual copy** — `dist/meshwhisper-sw.js` must be copied to the public directory manually. No automated step.
 
-4. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
+3. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
+
+4. **Multi-device persistence gaps** — the linked-devices flow (`createDeviceLinkOffer` / `acceptDeviceLinkOffer`) ships in v1; the per-(account, device) LWW replay-protection map is in-memory only, so a fresh device boot has no historical protection. Per-device signing certificates aren't implemented yet either — only the primary device (whose `peerId === accountKey`) can broadcast `device_added` / `device_revoked` announcements. See [multi-device.md](multi-device.md#whats-not-in-qr-pairing-v1) for the full list of deferred items.
 
 ---
 
