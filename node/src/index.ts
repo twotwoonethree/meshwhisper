@@ -56,10 +56,24 @@ const MAX_MEDIA_SIZE = parseInt(process.env.MAX_MEDIA_SIZE ?? String(50 * 1024 *
 const PRUNE_INTERVAL_MS = 5 * 60 * 1000; // prune expired blobs every 5 minutes
 const PUSH_WEBHOOK_URL = process.env.PUSH_WEBHOOK_URL ?? null;
 const DB_PATH = process.env.DB_PATH ?? './meshwhisper.db';
-// Rate limiting (per IP, sliding window)
-const RATE_WINDOW_MS = 60_000; // 1 minute window
-const RATE_LIMIT_MEDIA = parseInt(process.env.RATE_LIMIT_MEDIA ?? '20', 10);   // uploads/min
-const RATE_LIMIT_DIR   = parseInt(process.env.RATE_LIMIT_DIR   ?? '60', 10);   // registrations/min
+// Rate limiting (per IP, sliding window).
+//
+// Buckets are coarse on purpose — one budget per bucket per IP per minute.
+// Operators tune via env vars; the defaults are deliberately generous so
+// well-behaved clients almost never hit them, while still catching obvious
+// abuse (scripted enumeration, blob spam, etc).
+//
+// TRUST_PROXY controls whether X-Forwarded-For is honoured when computing
+// the per-IP key. Default OFF — a direct-exposed node would otherwise let
+// an attacker spoof the header to evade limits. Set TRUST_PROXY=1 (or any
+// truthy value) when running behind nginx / Caddy / Cloudflare etc., which
+// is the expected production deployment shape.
+const RATE_WINDOW_MS    = 60_000; // 1 minute window
+const RATE_LIMIT_MEDIA  = parseInt(process.env.RATE_LIMIT_MEDIA   ?? '20',  10);  // uploads/min
+const RATE_LIMIT_DIR    = parseInt(process.env.RATE_LIMIT_DIR     ?? '60',  10);  // writes/min on directory/opks/policy
+const RATE_LIMIT_READ   = parseInt(process.env.RATE_LIMIT_READ    ?? '300', 10);  // reads/min (GETs)
+const RATE_LIMIT_ARCHIVE = parseInt(process.env.RATE_LIMIT_ARCHIVE ?? '30', 10);  // archive PUTs/min
+const TRUST_PROXY       = /^(1|true|yes|on)$/i.test(process.env.TRUST_PROXY ?? '');
 /** Canonical external base URL for constructing media download links.
  *  Set this when the Node is behind a reverse proxy (nginx, Caddy, Cloudflare).
  *  Example: BASE_URL=https://msg.myapp.com
@@ -319,25 +333,59 @@ interface RateWindow {
 
 const rateLimitState = new Map<string, RateWindow>();
 
-/** Returns true if the request is within limits, false if it should be rejected. */
-function checkRateLimit(ip: string, bucket: string, maxPerWindow: number): boolean {
+interface RateLimitResult {
+  ok: boolean;
+  /** Seconds until the current window resets (only meaningful when ok=false). */
+  retryAfterSeconds: number;
+}
+
+/**
+ * Returns ok=true if the request is within limits. On rejection, retryAfterSeconds
+ * is the number of whole seconds until the current window rolls over (clamped to ≥1).
+ */
+function checkRateLimit(ip: string, bucket: string, maxPerWindow: number): RateLimitResult {
   const key = `${bucket}:${ip}`;
   const now = Date.now();
   const entry = rateLimitState.get(key);
 
   if (!entry || now - entry.windowStart >= RATE_WINDOW_MS) {
     rateLimitState.set(key, { count: 1, windowStart: now });
-    return true;
+    return { ok: true, retryAfterSeconds: 0 };
   }
-  if (entry.count >= maxPerWindow) return false;
+  if (entry.count >= maxPerWindow) {
+    const remainingMs = RATE_WINDOW_MS - (now - entry.windowStart);
+    return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000)) };
+  }
   entry.count++;
+  return { ok: true, retryAfterSeconds: 0 };
+}
+
+/**
+ * Apply a rate limit at the start of a request handler. On rejection writes
+ * a 429 with a Retry-After header and returns true (caller should `return`).
+ * On accept returns false (caller continues).
+ */
+function rateLimited(
+  req: IncomingMessage,
+  res: ServerResponse,
+  bucket: string,
+  maxPerWindow: number,
+): boolean {
+  const r = checkRateLimit(getClientIp(req), bucket, maxPerWindow);
+  if (r.ok) return false;
+  res.setHeader('Retry-After', String(r.retryAfterSeconds));
+  sendJson(res, 429, { error: 'Too many requests', retryAfter: r.retryAfterSeconds });
   return true;
 }
 
 function getClientIp(req: IncomingMessage): string {
-  // Respect X-Forwarded-For when behind a proxy
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
+  // X-Forwarded-For is only honoured when the operator has set TRUST_PROXY,
+  // otherwise an attacker on a direct-exposed node could spoof the header
+  // to evade per-IP rate limiting.
+  if (TRUST_PROXY) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
+  }
   return req.socket.remoteAddress ?? 'unknown';
 }
 
@@ -929,6 +977,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // that window. Counts only — no destination hashes, no IPs, no per-event
   // metadata. Safe to expose to anyone watching the public site.
   if (url.pathname === '/events' && method === 'GET') {
+    // Per-IP cap on SSE subscriptions. Each subscriber holds a long-lived
+    // connection; cap prevents a single peer from exhausting socket budget.
+    if (rateLimited(req, res, 'read', RATE_LIMIT_READ)) return;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-store',
@@ -966,10 +1017,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Register prekey bundle
   // POST /directory  { namespace, publicKey, bundle, username? }
   if (url.pathname === '/directory' && method === 'POST') {
-    if (!checkRateLimit(getClientIp(req), 'dir', RATE_LIMIT_DIR)) {
-      sendJson(res, 429, { error: 'Too many requests' });
-      return;
-    }
+    if (rateLimited(req, res, 'dir', RATE_LIMIT_DIR)) return;
     let body: {
       namespace?: string;
       publicKey?: string;
@@ -1046,10 +1094,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // GET  /namespace-policy?namespace=
   //   Returns the effective policy. Falls back to defaults when no row.
   if (url.pathname === '/namespace-policy' && method === 'POST') {
-    if (!checkRateLimit(getClientIp(req), 'dir', RATE_LIMIT_DIR)) {
-      sendJson(res, 429, { error: 'Too many requests' });
-      return;
-    }
+    if (rateLimited(req, res, 'dir', RATE_LIMIT_DIR)) return;
     let body: { namespace?: string; usernamePolicy?: string };
     try {
       body = JSON.parse(await parseBody(req));
@@ -1082,6 +1127,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   if (url.pathname === '/namespace-policy' && method === 'GET') {
+    if (rateLimited(req, res, 'read', RATE_LIMIT_READ)) return;
     const namespace = url.searchParams.get('namespace');
     if (!namespace) {
       sendJson(res, 400, { error: 'Missing query param: namespace' });
@@ -1098,6 +1144,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // GET /directory?namespace=&publicKey=
   // GET /directory?namespace=&username=alice
   if (url.pathname === '/directory' && method === 'GET') {
+    // Username/publicKey lookup is the natural endpoint for an enumeration
+    // attempt — bucket separately from writes so a busy lookup workload
+    // doesn't starve registrations and vice versa.
+    if (rateLimited(req, res, 'read', RATE_LIMIT_READ)) return;
     const namespace = url.searchParams.get('namespace');
     const usernameParam = url.searchParams.get('username');
     const publicKeyParam = url.searchParams.get('publicKey');
@@ -1139,10 +1189,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Upload one-time pre-keys for a user
   // POST /opks  { namespace, publicKey, opks: string[] }  (base64 public keys)
   if (url.pathname === '/opks' && method === 'POST') {
-    if (!checkRateLimit(getClientIp(req), 'dir', RATE_LIMIT_DIR)) {
-      sendJson(res, 429, { error: 'Too many requests' });
-      return;
-    }
+    if (rateLimited(req, res, 'dir', RATE_LIMIT_DIR)) return;
     let body: { namespace?: string; publicKey?: string; opks?: unknown };
     try {
       body = JSON.parse(await parseBody(req));
@@ -1193,6 +1240,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // left by the pre-fix bulk re-upload bug. Apps don't need to call this
   // directly — the SDK runs it on first init after the fix.
   if (url.pathname === '/opks' && method === 'DELETE') {
+    if (rateLimited(req, res, 'dir', RATE_LIMIT_DIR)) return;
     const auth = req.headers['authorization'];
     if (!auth || !auth.startsWith('Bearer ')) {
       sendJson(res, 401, { error: 'Missing bearer token' });
@@ -1232,6 +1280,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Claim one one-time pre-key for a user (atomic — removes it from the pool)
   // GET /opks/claim?namespace=&publicKey=
   if (url.pathname === '/opks/claim' && method === 'GET') {
+    // OPK claim is a write-like operation (each call atomically consumes a
+    // one-time prekey from the pool). Bucket with the other write endpoints
+    // so the directory budget gates abuse — an attacker draining a victim's
+    // OPK pool to force fallback to the signed-prekey-only handshake is the
+    // primary risk this addresses.
+    if (rateLimited(req, res, 'dir', RATE_LIMIT_DIR)) return;
     const namespace = url.searchParams.get('namespace');
     const publicKey = url.searchParams.get('publicKey');
 
@@ -1254,10 +1308,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // POST /media  (binary body, Content-Length required)
   // Returns: { id, url, expiresAt }
   if (url.pathname === '/media' && method === 'POST') {
-    if (!checkRateLimit(getClientIp(req), 'media', RATE_LIMIT_MEDIA)) {
-      sendJson(res, 429, { error: 'Too many requests' });
-      return;
-    }
+    if (rateLimited(req, res, 'media', RATE_LIMIT_MEDIA)) return;
     const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
     if (contentLength > MAX_MEDIA_SIZE) {
       sendJson(res, 413, { error: `Payload too large (max ${MAX_MEDIA_SIZE} bytes)` });
@@ -1299,6 +1350,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // GET /media/:id
   const mediaMatch = url.pathname.match(/^\/media\/([0-9a-f]{32})$/);
   if (mediaMatch && method === 'GET') {
+    if (rateLimited(req, res, 'read', RATE_LIMIT_READ)) return;
     const data = fetchMedia(mediaMatch[1]);
     if (!data) {
       sendJson(res, 404, { error: 'Media not found or expired' });
@@ -1318,6 +1370,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // PUT /archive/:peerId  Authorization: Bearer <token>
   const archivePutMatch = url.pathname.match(/^\/archive\/([0-9a-f]{64})$/);
   if (archivePutMatch && method === 'PUT') {
+    if (rateLimited(req, res, 'archive', RATE_LIMIT_ARCHIVE)) return;
     const peerId = archivePutMatch[1];
     const authHeader = req.headers['authorization'] ?? '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -1369,6 +1422,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // GET /archive/:peerId  (no auth — content is client-encrypted)
   const archiveGetMatch = url.pathname.match(/^\/archive\/([0-9a-f]{64})$/);
   if (archiveGetMatch && method === 'GET') {
+    if (rateLimited(req, res, 'read', RATE_LIMIT_READ)) return;
     const row = stmts.getArchiveData.get(archiveGetMatch[1]) as { data: Buffer } | undefined;
     if (!row) {
       sendJson(res, 404, { error: 'Archive not found' });

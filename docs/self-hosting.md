@@ -188,8 +188,11 @@ server {
 | `MAX_BLOBS_PER_HASH` | `500` | Maximum queued blobs per destination hash |
 | `MEDIA_TTL_HOURS` | `168` (7 days) | How long to retain uploaded media blobs (hours) |
 | `MAX_MEDIA_SIZE` | `52428800` (50 MB) | Maximum size of a single media upload (bytes) |
-| `RATE_LIMIT_MEDIA` | `20` | Max media uploads per IP per minute |
-| `RATE_LIMIT_DIR` | `60` | Max prekey directory registrations per IP per minute |
+| `RATE_LIMIT_MEDIA` | `20` | Max media uploads per IP per minute (`POST /media`) |
+| `RATE_LIMIT_DIR` | `60` | Max writes per IP per minute on directory / opks / namespace-policy endpoints (`POST /directory`, `POST /namespace-policy`, `POST /opks`, `DELETE /opks`, `GET /opks/claim`). Note: `GET /opks/claim` is bucketed here because each call atomically consumes a one-time prekey. |
+| `RATE_LIMIT_READ` | `300` | Max reads per IP per minute on GET endpoints (`GET /events`, `GET /directory`, `GET /namespace-policy`, `GET /media/<id>`, `GET /archive/<peerId>`). Reads share a separate bucket from writes so a busy lookup workload can't starve registrations and vice versa. |
+| `RATE_LIMIT_ARCHIVE` | `30` | Max archive uploads per IP per minute (`PUT /archive/<peerId>`) |
+| `TRUST_PROXY` | *(unset)* | Set to `1` / `true` when the node is behind a reverse proxy that sets `X-Forwarded-For`. Default is OFF so a direct-exposed node can't have its rate-limit per-IP key spoofed via the header. **Production deployments behind nginx / Caddy / Cloudflare should set this to `1`.** |
 
 ### Push service (`push-service/`)
 
@@ -211,6 +214,13 @@ server {
 | `FCM_PROJECT_ID` | *(none)* | Firebase project ID |
 
 At least one push provider must be configured for offline delivery. You can configure multiple simultaneously (e.g. VAPID + APNs + FCM for a cross-platform app).
+
+### Rate-limiting notes
+
+- All limits are per-IP per-minute sliding windows, in-memory (don't survive a restart). For a small/single-instance node this is sufficient; for a horizontally-scaled deployment, terminate at a shared rate-limit layer (e.g. nginx `limit_req`, Cloudflare) instead of relying on per-node state.
+- `GET /health` is deliberately NOT rate-limited so Docker/k8s/load-balancer liveness probes can poll freely. If you expose `/health` to the internet and worry about probe-based fingerprinting, gate it at the reverse proxy.
+- 429 responses include both a `Retry-After` header (seconds, RFC 7231) and a `retryAfter` field in the JSON body for clients that don't surface response headers.
+- If you raise `RATE_LIMIT_*` defaults to accommodate a heavy workload, consider also enabling per-IP rate limits at the reverse proxy as a second layer — defense in depth costs little.
 
 ---
 
