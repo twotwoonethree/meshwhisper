@@ -344,6 +344,8 @@ export default function App() {
         senderId: msg.groupSenderId,
         senderName: senderDisplayName(msg.groupSenderId),
       } : {}),
+      ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+      ...(msg.forwardedFrom ? { forwardedFrom: msg.forwardedFrom } : {}),
     };
 
     setState((prev) => {
@@ -605,6 +607,9 @@ export default function App() {
           direction: m.direction,
           status: m.status,
           ...(mediaPtr ? { media: { ...mediaPtr, status: 'ready' as const } } : {}),
+          ...(m.reactions ? { reactions: m.reactions } : {}),
+          ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+          ...(m.forwardedFrom ? { forwardedFrom: m.forwardedFrom } : {}),
         });
       }
       setState((prev) => ({
@@ -710,7 +715,16 @@ export default function App() {
         }));
 
         const appConvs = [...dmConvs, ...groupConvs];
-        setState((prev) => ({ ...prev, conversations: appConvs }));
+        // Hydrate the disappearing-messages policy for each DM from the
+        // SDK's persisted state so the header icon reflects reality on
+        // boot, not just after the user re-opens the picker.
+        const disappearingByConversation: Record<string, number | null> = {};
+        for (const conv of appConvs) {
+          if (conv.group) continue;
+          const ttl = MeshWhisper.getDisappearingMessages(conv.id);
+          if (ttl) disappearingByConversation[conv.id] = ttl;
+        }
+        setState((prev) => ({ ...prev, conversations: appConvs, disappearingByConversation }));
 
         // Backfill display names for any DM whose peer doesn't have a
         // saved contactName. This heals conversations whose original
@@ -762,6 +776,9 @@ export default function App() {
                 senderName: senderDisplayName(m.groupSenderId),
               } : {}),
               ...(mediaPtr ? { media: { ...mediaPtr, status: 'pending' as const } } : {}),
+              ...(m.reactions ? { reactions: m.reactions } : {}),
+              ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+              ...(m.forwardedFrom ? { forwardedFrom: m.forwardedFrom } : {}),
             });
           }
 
