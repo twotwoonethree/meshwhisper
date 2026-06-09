@@ -1,0 +1,19 @@
+{
+  "name": "@meshwhisper/example-verification",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: phone/email verification layered on top of the MeshWhisper SDK",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --enable-source-maps dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../.."
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  }
+}
