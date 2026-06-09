@@ -124,7 +124,8 @@ export interface ControlMessage {
     | 'device_added'
     | 'device_revoked'
     | 'device_linked'
-    | 'reaction';
+    | 'reaction'
+    | 'disappearing_messages';
   /** session_ping / session_pong correlation id. */
   sessionPingId?: string;
   /** history_replay: a chunk of historical messages from the sender's view. */
@@ -209,6 +210,10 @@ export interface ControlMessage {
   reactionEmoji?: string;
   /** reaction: true to add this peer's reaction, false to remove. */
   reactionAdd?: boolean;
+  /** disappearing_messages: per-conversation TTL in milliseconds.
+   *  null or 0 disables the policy. The peer applies the same value to
+   *  their own send-side default so both sides stay in sync. */
+  disappearingTtlMs?: number | null;
   // device_linked — sent by the primary to a freshly-linked secondary
   // immediately after accepting its DeviceLinkOffer. Carries the
   // signed device_added announcement so the secondary can verify its

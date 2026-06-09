@@ -77,6 +77,7 @@ interface MeshWhisperConfig {
 | `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
 | `onGroupRenamed` | No | — | Fires on remaining members when the admin (or any member of an adminless group) renames a group. The local group's `name` field has already been updated by the time this fires — refresh whichever UI surface shows the group title. |
 | `onReactionUpdated` | No | — | Fires on the receiver side after a peer's emoji reaction has been applied to the local stored message. `peerId` is the reactor (NOT the message sender); `added` is true on add, false on remove. Re-render the affected message bubble. |
+| `onDisappearingMessagesChanged` | No | — | Fires when a peer changes the disappearing-messages TTL on a conversation. The local policy has already been updated by the time this fires; subsequent sends auto-apply the new TTL. App should surface a system message ("Disappearing messages set to 7 days" / "off") in the timeline. |
 | `onArchiveDirty` | No | — | Called whenever the SDK writes a tombstone (delete) or revival (re-add) event that must reach the relay before the next reload. The app should push the archive immediately (bypass any debounce). Apps that don't provide this still work, but stale relay state can resurrect deleted peers on the next pull until a normal push fires. |
 | `onHistoryRequest` | No | refuse | Called when a peer asks for their conversation history to be replayed (typically after they accidentally deleted it). Return `true` to authorise the share, `false` to refuse. Default behaviour without this callback is refuse silently. Apps usually prompt the user once per peer and cache the decision. |
 | `onHistoryRestored` | No | — | Called after a peer has replayed history into local storage. `count` is the number of new messages persisted after dedup. Reload the conversation view in response. |
@@ -270,6 +271,43 @@ const outcome: 'added' | 'removed' | 'noop' = await MeshWhisper.toggleReaction(
 - `outcome === 'noop'` means the message wasn't found locally, OR the reaction was already in the requested state.
 
 Persisted shape on `StoredMessage`: `reactions?: Record<string, string[]>` (emoji → peerIds who currently react). The map is normalised on every write — empty arrays are pruned, so a reader can treat an absent emoji and an empty array identically.
+
+### `MeshWhisper.setDisappearingMessages(conversationId, ttlMs)`
+
+Set (or clear) the disappearing-messages policy for a conversation. Every subsequent send in that conversation auto-receives `expiry: ttlMs / 1000` so both the sender's and recipient's stored copies expire at the same time. Pass `null` to disable.
+
+```ts
+await MeshWhisper.setDisappearingMessages(
+  conversationId: string,
+  ttlMs: number | null,
+): Promise<void>
+```
+
+Broadcasts a `__mw_ctrl: 'disappearing_messages'` control to the peer so their side applies the same default on their outbound sends, and `onDisappearingMessagesChanged` fires on their side after the local state updates. Persisted across restarts under the `disappearing_messages` storage key.
+
+An explicit `options.expiry` on a `sendMessage` / `sendMedia` call always wins over the conversation-level policy — apps can still override per-message.
+
+`conversationId` is the peer ID for DMs. Group support is deferred (would need control fan-out to every member).
+
+### `MeshWhisper.getDisappearingMessages(conversationId)`
+
+Returns the current TTL in milliseconds, or `null` if no policy is set.
+
+```ts
+const ttlMs: number | null = MeshWhisper.getDisappearingMessages(conversationId)
+```
+
+### `onDisappearingMessagesChanged` (config callback)
+
+Fires when a peer changes the disappearing-messages policy on a conversation. The local per-conversation policy has already been updated by the time this fires; subsequent sends in that conversation will auto-apply the new TTL. Apps should surface a system message ("Disappearing messages set to 7 days" / "off") in the conversation timeline.
+
+```ts
+onDisappearingMessagesChanged: (
+  conversationId: string,
+  ttlMs: number | null,   // null = peer disabled the policy
+  changedBy: string,       // the peer that issued the change
+) => void
+```
 
 ### `onReactionUpdated` (config callback)
 

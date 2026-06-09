@@ -447,6 +447,18 @@ export class MeshWhisper {
   private onKickedFromGroupHandler: ((groupId: string, kickedBy: string) => void) | null = null;
   private onGroupRenamedHandler: ((groupId: string, newName: string, renamedBy: string) => void) | null = null;
   private onReactionUpdatedHandler: ((conversationId: string, messageId: string, peerId: string, emoji: string, added: boolean) => void) | null = null;
+  private onDisappearingMessagesChangedHandler: ((conversationId: string, ttlMs: number | null, changedBy: string) => void) | null = null;
+
+  /**
+   * Per-conversation disappearing-messages TTL in milliseconds. Empty
+   * means "no policy / messages don't auto-expire." Loaded from storage
+   * key `disappearing_messages` (Record<conversationId, ttlMs>) on
+   * boot; persisted on every change. When a send fires in a
+   * conversation that has a policy, the SDK auto-sets `expiry` on the
+   * outgoing message envelope so both ends apply the same TTL.
+   */
+  private readonly disappearingMessages: Map<string, number> = new Map();
+  private static readonly DISAPPEARING_KEY = 'disappearing_messages';
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -595,6 +607,7 @@ export class MeshWhisper {
     this.onKickedFromGroupHandler = config.onKickedFromGroup ?? null;
     this.onGroupRenamedHandler = config.onGroupRenamed ?? null;
     this.onReactionUpdatedHandler = config.onReactionUpdated ?? null;
+    this.onDisappearingMessagesChangedHandler = config.onDisappearingMessagesChanged ?? null;
   }
 
   // ================================================================
@@ -826,6 +839,14 @@ export class MeshWhisper {
 
   async sendMessage(recipientId: string, payload: Uint8Array, options?: SendOptions): Promise<void> {
     this.assertRunning();
+
+    // Auto-apply the disappearing-messages policy if one is set on the
+    // conversation. An explicit `options.expiry` always wins so callers
+    // can still override per-message.
+    const policyTtlMs = this.disappearingMessages.get(recipientId);
+    if (policyTtlMs && options?.expiry === undefined) {
+      options = { ...(options ?? {}), expiry: Math.floor(policyTtlMs / 1000) };
+    }
 
     if (!this.nodeConnected) {
       this.outboundQueue.push({ recipientId, payload: payload.slice(), options });
@@ -1757,6 +1778,58 @@ export class MeshWhisper {
     return MeshWhisper.instance.toggleReactionInstance(conversationId, messageId, emoji);
   }
 
+  /**
+   * Set (or clear) the disappearing-messages policy for a conversation.
+   * Pass `ttlMs` to enable — every subsequent send in that
+   * conversation will auto-receive `expiry: ttlMs / 1000` so both the
+   * sender's and recipient's stored copies expire at the same time.
+   * Pass `null` to disable the policy.
+   *
+   * Broadcasts a `__mw_ctrl: 'disappearing_messages'` control to the
+   * peer so their side applies the same default on their outbound
+   * sends. The peer's `onDisappearingMessagesChanged` callback fires
+   * once the local state is updated.
+   *
+   * `conversationId` is the peer ID for DMs. Group support is deferred
+   * to a follow-up (would need fan-out of the control to every member).
+   */
+  static async setDisappearingMessages(conversationId: string, ttlMs: number | null): Promise<void> {
+    return MeshWhisper.instance.setDisappearingMessagesInstance(conversationId, ttlMs);
+  }
+
+  async setDisappearingMessagesInstance(conversationId: string, ttlMs: number | null): Promise<void> {
+    this.assertRunning();
+    const normalized = ttlMs && ttlMs > 0 ? Math.floor(ttlMs) : null;
+    const current = this.disappearingMessages.get(conversationId) ?? null;
+    if (current === normalized) return;
+    if (normalized === null) {
+      this.disappearingMessages.delete(conversationId);
+    } else {
+      this.disappearingMessages.set(conversationId, normalized);
+    }
+    await this.persistDisappearingMessages();
+    this.sendControl(conversationId, {
+      __mw_ctrl: 'disappearing_messages',
+      disappearingTtlMs: normalized,
+    });
+  }
+
+  /** Returns the disappearing-messages TTL in ms for a conversation, or null if no policy is set. */
+  static getDisappearingMessages(conversationId: string): number | null {
+    return MeshWhisper.instance.getDisappearingMessagesInstance(conversationId);
+  }
+
+  getDisappearingMessagesInstance(conversationId: string): number | null {
+    return this.disappearingMessages.get(conversationId) ?? null;
+  }
+
+  private async persistDisappearingMessages(): Promise<void> {
+    if (!this.storage) return;
+    const obj: Record<string, number> = {};
+    for (const [k, v] of this.disappearingMessages) obj[k] = v;
+    await this.storage.set(MeshWhisper.DISAPPEARING_KEY, JSON.stringify(obj));
+  }
+
   async toggleReactionInstance(
     conversationId: string,
     messageId: string,
@@ -2656,6 +2729,23 @@ export class MeshWhisper {
             fromPeerId, ctrl.messageId!, fromPeerId, ctrl.reactionEmoji!, ctrl.reactionAdd!,
           );
         }).catch(() => {});
+        break;
+      }
+
+      case 'disappearing_messages': {
+        const ttl = ctrl.disappearingTtlMs;
+        const normalized = typeof ttl === 'number' && ttl > 0 ? Math.floor(ttl) : null;
+        const current = this.disappearingMessages.get(fromPeerId) ?? null;
+        if (current === normalized) break; // no-op
+        if (normalized === null) {
+          this.disappearingMessages.delete(fromPeerId);
+        } else {
+          this.disappearingMessages.set(fromPeerId, normalized);
+        }
+        this.persistDisappearingMessages().catch(() => {});
+        try {
+          this.onDisappearingMessagesChangedHandler?.(fromPeerId, normalized, fromPeerId);
+        } catch { /* swallow handler throws */ }
         break;
       }
 
@@ -3709,6 +3799,19 @@ export class MeshWhisper {
     // post-snapshot re-add.
     const seen = await readDeviceAnnouncementSeen(this.storage);
     for (const [k, v] of Object.entries(seen)) this.deviceAnnouncementSeen.set(k, v);
+
+    // Disappearing-messages policy. Rehydrate per-conversation TTLs so
+    // sends auto-apply the policy after a restart without the app
+    // having to re-set it.
+    const disappearingRaw = await this.storage.get(MeshWhisper.DISAPPEARING_KEY);
+    if (disappearingRaw) {
+      try {
+        const obj = JSON.parse(disappearingRaw) as Record<string, number>;
+        for (const [k, v] of Object.entries(obj)) {
+          if (typeof v === 'number' && v > 0) this.disappearingMessages.set(k, v);
+        }
+      } catch { /* malformed — ignore, falls back to no-policy */ }
+    }
   }
 
   private async persistContacts(): Promise<void> {

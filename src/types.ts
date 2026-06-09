@@ -547,6 +547,22 @@ export interface MeshWhisperConfig {
     emoji: string,
     added: boolean,
   ) => void;
+
+  /**
+   * Fires when a peer changes the disappearing-messages policy on a
+   * conversation. The local per-conversation policy has already been
+   * updated by the time this fires; subsequent `send`s in that
+   * conversation will auto-apply the new TTL. Apps should surface a
+   * system message ("Disappearing messages set to 7 days" / "off") in
+   * the conversation timeline.
+   *
+   * `ttlMs` is null when the peer disabled the policy.
+   */
+  onDisappearingMessagesChanged?: (
+    conversationId: string,
+    ttlMs: number | null,
+    changedBy: string,
+  ) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;
