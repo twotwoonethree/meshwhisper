@@ -963,29 +963,32 @@ const storage = new NodeStorage('./data');
 
 Filesystem key-value store. Files are written atomically (temp → rename) with `mode 0600`. The data directory is created if it doesn't exist.
 
-### React Native
-
-Import from `@meshwhisper/sdk/react-native` and wrap `AsyncStorage` or `SQLCipher`:
+### `AsyncStorageBackend` (React Native)
 
 ```ts
-import { MeshWhisper } from '@meshwhisper/sdk/react-native';
+import { MeshWhisper, AsyncStorageBackend } from '@meshwhisper/sdk/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { StorageBackend } from '@meshwhisper/sdk';
 
-const rnStorage: StorageBackend = {
-  get: (key) => AsyncStorage.getItem(key),
-  set: (key, value) => AsyncStorage.setItem(key, value),
-  delete: (key) => AsyncStorage.removeItem(key),
-  keys: async (prefix) => {
-    const all = await AsyncStorage.getAllKeys();
-    return all.filter((k) => k.startsWith(prefix));
-  },
-};
+const NAMESPACE = 'com.yourapp';
 
-const mw = await MeshWhisper.init({ namespace: 'com.example.app', storage: rnStorage });
+const mw = await MeshWhisper.init({
+  namespace: NAMESPACE,
+  node: 'wss://relay.yourapp.com',
+  storage: new AsyncStorageBackend(AsyncStorage, NAMESPACE),
+});
 ```
 
-The React Native entry point re-exports the full SDK and automatically uses the native WebSocket API rather than the Node.js `ws` package.
+The `@meshwhisper/sdk/react-native` entry re-exports the full SDK plus the `AsyncStorageBackend` adapter and a `ReactNativeTransport` alias (it's the same `BrowserTransport` — RN's WebSocket and fetch primitives are sufficient; no native module is required).
+
+`AsyncStorageBackend` takes the AsyncStorage module as its first constructor argument rather than `import`ing it itself, so the SDK stays platform-agnostic and doesn't pull RN-only modules into other builds. Anything that implements the four methods `getItem`, `setItem`, `removeItem`, `getAllKeys` works — including mocks for testing. The second argument is a namespace prefix; the same string you pass as `MeshWhisper.init({ namespace })` is a sensible choice.
+
+#### React Native gotchas
+
+- **`crypto.getRandomValues`** is missing on older RN versions. Install [`react-native-get-random-values`](https://www.npmjs.com/package/react-native-get-random-values) and import it once at the top of your app's entry file before importing `@meshwhisper/sdk/react-native`. Modern Expo SDKs (≥ 48) and `react-native ≥ 0.72` ship this natively.
+- **`TextEncoder` / `TextDecoder`** are available on Hermes ≥ 0.71. If you target older Hermes or JavaScriptCore, polyfill via [`fast-text-encoding`](https://www.npmjs.com/package/fast-text-encoding) at app startup.
+- **Background WebSocket**. iOS aggressively suspends backgrounded apps; long-running WebSocket connections will drop. Use push notifications for offline delivery (see [`PushConfig`](#pushconfig)). For push on iOS, configure APNs in your push service.
+- **Persistence size**. AsyncStorage stores everything as one blob per key. MeshWhisper's typical key shape is fine, but heavy media-message workloads may benefit from migrating to a SQLite-backed `StorageBackend` (e.g. `op-sqlite`, `expo-sqlite`); the `StorageBackend` interface is small enough that swapping implementations is straightforward.
+- **`indexedDB` is absent**. The SDK won't auto-detect a usable storage backend in RN — passing `storage` explicitly is required.
 
 ---
 

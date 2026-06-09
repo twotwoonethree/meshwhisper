@@ -2,31 +2,32 @@
 // MeshWhisper SDK — React Native entry point
 // @meshwhisper/sdk/react-native
 //
-// Re-exports everything from the main SDK. The init() function
-// auto-detects React Native and uses the native WebSocket API
-// (via BrowserTransport) rather than the Node.js `ws` package.
+// Re-exports everything from the main SDK plus:
 //
-// React Native has no built-in persistent storage, so you must
-// provide a StorageBackend via config.storage. The simplest
-// approach is a thin AsyncStorage wrapper:
+//   - AsyncStorageBackend — a StorageBackend implementation over
+//     @react-native-async-storage/async-storage. The consumer passes
+//     AsyncStorage in (peer-dependency style) so the SDK stays
+//     platform-agnostic and doesn't pull RN-only modules into other
+//     builds.
+//   - ReactNativeTransport — alias for BrowserTransport. RN's
+//     WebSocket / fetch primitives are sufficient; no native module
+//     is required.
+//
+// Minimal setup:
 //
 //   import AsyncStorage from '@react-native-async-storage/async-storage';
-//
-//   class AsyncStorageAdapter {
-//     async get(key: string) { return AsyncStorage.getItem(key); }
-//     async set(key: string, value: string) { AsyncStorage.setItem(key, value); }
-//     async delete(key: string) { AsyncStorage.removeItem(key); }
-//     async keys(prefix: string) {
-//       const all = await AsyncStorage.getAllKeys();
-//       return (all ?? []).filter((k) => k.startsWith(prefix));
-//     }
-//   }
+//   import { MeshWhisper, AsyncStorageBackend } from '@meshwhisper/sdk/react-native';
 //
 //   await MeshWhisper.init({
-//     namespace: 'com.example.app',
-//     storage: new AsyncStorageAdapter(),
+//     namespace: 'com.yourapp',
+//     node: 'wss://relay.yourapp.com',
+//     storage: new AsyncStorageBackend(AsyncStorage, 'com.yourapp'),
 //   });
+//
+// On RN-specific gotchas, see docs/api.md "Storage backends > React Native".
 // ============================================================
 
 export * from '../index.js';
 export { BrowserTransport as ReactNativeTransport } from '../transport/browser/index.js';
+export { AsyncStorageBackend } from '../persistence/async-storage.js';
+export type { AsyncStorageLike } from '../persistence/async-storage.js';
