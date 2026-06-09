@@ -32,6 +32,13 @@ export interface AppMessage {
   senderId?: string;
   senderName?: string;
   media?: AppMessageMedia;
+  /** Per-emoji set of peerIds currently reacting. Mirrors the SDK's
+   *  StoredMessage.reactions shape. */
+  reactions?: Record<string, string[]>;
+  /** Set when this message was sent as a quoted reply. */
+  replyTo?: { messageId: string; snippetText?: string };
+  /** Set when this message was forwarded; peerId of the original author. */
+  forwardedFrom?: string;
 }
 
 export interface Conversation {
@@ -51,4 +58,7 @@ export interface AppState {
   pendingRequests: Array<{ peerId: string; username?: string; introducedBy: string }>;
   pendingGroupInvites: Array<{ groupId: string; groupName: string; invitedBy: string; members: string[] }>;
   connected: boolean;
+  /** Disappearing-messages policy per conversation. Mirrors the SDK's
+   *  in-memory map so the header UI can reflect it without re-querying. */
+  disappearingByConversation?: Record<string, number | null>;
 }

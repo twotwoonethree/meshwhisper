@@ -644,6 +644,8 @@ export default function App() {
         onGroupAdminChanged: handleGroupAdminChanged,
         onGroupMemberKicked: handleGroupMemberKicked,
         onGroupRenamed: handleGroupRenamed,
+        onReactionUpdated: handleReactionUpdated,
+        onDisappearingMessagesChanged: handleDisappearingMessagesChanged,
         onKickedFromGroup: handleKickedFromGroup,
         // Force-push the archive whenever the SDK writes a tombstone or
         // revival. Bypasses the 5s debounce so a delete or re-add can't be
@@ -829,7 +831,142 @@ export default function App() {
 
   // SDK reference: send path. See ../REFERENCE.md "Sending and receiving
   // messages". DMs route through sdk.sendMessage; groups through sdk.sendToGroup.
-  function handleSend(conversationId: string, text: string) {
+  // DM-only reactions. Optimistically toggle locally then send the control.
+  async function handleReact(conversationId: string, messageId: string, emoji: string) {
+    const me = MeshWhisper.getLocalPeerId();
+    setState((prev) => ({
+      ...prev,
+      messages: {
+        ...prev.messages,
+        [conversationId]: (prev.messages[conversationId] ?? []).map((m) => {
+          if (m.id !== messageId) return m;
+          const reactions = { ...(m.reactions ?? {}) };
+          const peers = reactions[emoji] ?? [];
+          if (peers.includes(me)) {
+            const next = peers.filter((p) => p !== me);
+            if (next.length === 0) delete reactions[emoji];
+            else reactions[emoji] = next;
+          } else {
+            reactions[emoji] = [...peers, me];
+          }
+          return { ...m, reactions };
+        }),
+      },
+    }));
+    try {
+      await MeshWhisper.toggleReaction(conversationId, messageId, emoji);
+      scheduleArchiveSync(getSDK());
+    } catch (err) {
+      console.error('[react] failed:', err);
+    }
+  }
+
+  // Forward an existing message to another contact.
+  async function handleForward(fromConversationId: string, messageId: string, toPeerId: string) {
+    try {
+      await MeshWhisper.forwardMessage(fromConversationId, messageId, toPeerId);
+      scheduleArchiveSync(getSDK());
+    } catch (err) {
+      console.error('[forward] failed:', err);
+    }
+  }
+
+  // Set the disappearing-messages policy on a DM. Updates local state +
+  // injects a system message so the change is visible in the timeline.
+  async function handleSetDisappearing(conversationId: string, ttlMs: number | null) {
+    try {
+      await MeshWhisper.setDisappearingMessages(conversationId, ttlMs);
+    } catch (err) {
+      console.error('[setDisappearingMessages] failed:', err);
+      return;
+    }
+    const label = ttlMs === null
+      ? 'off'
+      : ttlMs >= 24 * 60 * 60_000 ? `${Math.round(ttlMs / (24 * 60 * 60_000))} day(s)`
+      : ttlMs >= 60 * 60_000 ? `${Math.round(ttlMs / (60 * 60_000))} hour(s)`
+      : `${Math.round(ttlMs / 60_000)} minute(s)`;
+    const sysMsg: AppMessage = {
+      id: crypto.randomUUID(),
+      conversationId,
+      text: `Disappearing messages set to ${label}`,
+      timestamp: Date.now(),
+      direction: 'outbound',
+      status: 'delivered',
+    };
+    setState((prev) => ({
+      ...prev,
+      disappearingByConversation: { ...(prev.disappearingByConversation ?? {}), [conversationId]: ttlMs },
+      messages: {
+        ...prev.messages,
+        [conversationId]: [...(prev.messages[conversationId] ?? []), sysMsg],
+      },
+    }));
+  }
+
+  // Fires when a peer toggles a reaction on one of their messages OR on
+  // one of mine. peerId is the reactor.
+  const handleReactionUpdated = useCallback(
+    (conversationId: string, messageId: string, peerId: string, emoji: string, added: boolean) => {
+      setState((prev) => ({
+        ...prev,
+        messages: {
+          ...prev.messages,
+          [conversationId]: (prev.messages[conversationId] ?? []).map((m) => {
+            if (m.id !== messageId) return m;
+            const reactions = { ...(m.reactions ?? {}) };
+            const peers = reactions[emoji] ?? [];
+            if (added && !peers.includes(peerId)) {
+              reactions[emoji] = [...peers, peerId];
+            } else if (!added) {
+              const next = peers.filter((p) => p !== peerId);
+              if (next.length === 0) delete reactions[emoji];
+              else reactions[emoji] = next;
+            }
+            return { ...m, reactions };
+          }),
+        },
+      }));
+    },
+    [],
+  );
+
+  // Fires when a peer changes the disappearing-messages policy. Injects a
+  // system message so the change is visible.
+  const handleDisappearingMessagesChanged = useCallback(
+    (conversationId: string, ttlMs: number | null, changedBy: string) => {
+      void (async () => {
+        let name = getContactName(changedBy);
+        if (!name) {
+          name = (await MeshWhisper.resolveUsername(changedBy).catch(() => undefined))
+            ?? (changedBy.slice(0, 8) + '…');
+        }
+        const label = ttlMs === null
+          ? 'off'
+          : ttlMs >= 24 * 60 * 60_000 ? `${Math.round(ttlMs / (24 * 60 * 60_000))} day(s)`
+          : ttlMs >= 60 * 60_000 ? `${Math.round(ttlMs / (60 * 60_000))} hour(s)`
+          : `${Math.round(ttlMs / 60_000)} minute(s)`;
+        const sysMsg: AppMessage = {
+          id: crypto.randomUUID(),
+          conversationId,
+          text: `@${name} set disappearing messages to ${label}`,
+          timestamp: Date.now(),
+          direction: 'inbound',
+          status: 'delivered',
+        };
+        setState((prev) => ({
+          ...prev,
+          disappearingByConversation: { ...(prev.disappearingByConversation ?? {}), [conversationId]: ttlMs },
+          messages: {
+            ...prev.messages,
+            [conversationId]: [...(prev.messages[conversationId] ?? []), sysMsg],
+          },
+        }));
+      })();
+    },
+    [],
+  );
+
+  function handleSend(conversationId: string, text: string, replyTo?: { messageId: string; snippetText?: string }) {
     const sdk = getSDK();
     if (!sdk) return;
 
@@ -841,6 +978,7 @@ export default function App() {
       timestamp: Date.now(),
       direction: 'outbound',
       status: 'sending',
+      ...(replyTo ? { replyTo } : {}),
     };
 
     setState((prev) => {
@@ -863,7 +1001,7 @@ export default function App() {
     const payload = new TextEncoder().encode(text);
     const sendPromise = isGroupConv
       ? sdk.sendToGroup(conversationId, payload as Uint8Array)
-      : sdk.sendMessage(conversationId, payload as Uint8Array);
+      : sdk.sendMessage(conversationId, payload as Uint8Array, replyTo ? { replyTo } : undefined);
     sendPromise.then(() => {
       setState((prev) => ({
         ...prev,
@@ -1657,12 +1795,17 @@ export default function App() {
             messages={state.messages[activeConv.id] ?? []}
             isTyping={activeConv.isTyping}
             onBack={() => setState((prev) => ({ ...prev, activeConversationId: null }))}
-            onSend={(text) => handleSend(activeConv.id, text)}
+            onSend={(text, replyTo) => handleSend(activeConv.id, text, replyTo)}
             onRemove={() => handleRemoveContact(activeConv.id)}
             onAddMember={activeConv.group ? (peerId) => handleAddGroupMember(activeConv.id, peerId) : undefined}
             onTransferAdmin={activeConv.group ? (newAdminId) => handleTransferGroupAdmin(activeConv.id, newAdminId) : undefined}
             onKickMember={activeConv.group ? (peerId) => { void handleKickGroupMember(activeConv.id, peerId); } : undefined}
             onRenameGroup={activeConv.group ? (newName) => handleRenameGroup(activeConv.id, newName) : undefined}
+            onReact={activeConv.group ? undefined : (messageId, emoji) => handleReact(activeConv.id, messageId, emoji)}
+            onForwardMessage={activeConv.group ? undefined : (messageId, toPeerId) => handleForward(activeConv.id, messageId, toPeerId)}
+            onSetDisappearing={activeConv.group ? undefined : (ttlMs) => handleSetDisappearing(activeConv.id, ttlMs)}
+            disappearingTtlMs={activeConv.group ? null : (state.disappearingByConversation?.[activeConv.id] ?? null)}
+            forwardTargets={activeConv.group ? undefined : state.conversations.filter((c) => !c.group && c.id !== activeConv.id).map((c) => c.contact)}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
             onRestoreHistory={activeConv.group ? undefined : () => handleRestoreHistory(activeConv.id)}

@@ -16,7 +16,7 @@ interface Props {
   messages: AppMessage[];
   isTyping: boolean;
   onBack: () => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, replyTo?: { messageId: string; snippetText?: string }) => void;
   onRemove: () => void;
   onAddMember?: (peerId: string) => void;
   /** Transfer admin role to another member, or pass '' to make adminless. */
@@ -25,6 +25,16 @@ interface Props {
   onKickMember?: (peerId: string) => void;
   /** Admin (or any member of an adminless group): rename the group. */
   onRenameGroup?: (newName: string) => Promise<void>;
+  /** DM only: toggle the local user's reaction with `emoji` on a message. */
+  onReact?: (messageId: string, emoji: string) => Promise<void>;
+  /** DM only: forward a message to another contact. */
+  onForwardMessage?: (messageId: string, toPeerId: string) => Promise<void>;
+  /** DM only: set the conversation's disappearing-messages TTL. */
+  onSetDisappearing?: (ttlMs: number | null) => Promise<void>;
+  /** DM only: current disappearing-messages TTL (ms), or null = off. */
+  disappearingTtlMs?: number | null;
+  /** Other contacts available as forward targets (excludes the current convo's peer). */
+  forwardTargets?: Contact[];
   onAttach?: (file: File) => void;
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
   /** DM only: ask the peer to replay their view of the conversation back to us. */
@@ -136,7 +146,7 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onReact, onForwardMessage, onSetDisappearing, disappearingTtlMs, forwardTargets, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -148,6 +158,14 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   const [draftName, setDraftName] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [actionsMenuFor, setActionsMenuFor] = useState<string | null>(null);
+  const [replyContext, setReplyContext] = useState<{ messageId: string; snippetText?: string } | null>(null);
+  const [forwardingMessageId, setForwardingMessageId] = useState<string | null>(null);
+  const [showDisappearingPicker, setShowDisappearingPicker] = useState(false);
+  // The DM case is identified by the absence of a group on the conversation.
+  // Reactions / replies / forwards / disappearing-messages are DM-only in v1
+  // (matching the SDK's deferral of group fan-out for these features).
+  const isDM = !group;
 
   // When the local user is the admin AND there are other members, the
   // leave button takes them through the admin-handoff dialog first.
@@ -190,9 +208,10 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   function submit() {
     const text = inputRef.current?.value.trim();
     if (!text) return;
-    onSend(text);
+    onSend(text, replyContext ?? undefined);
     if (inputRef.current) inputRef.current.value = '';
     autoResize();
+    setReplyContext(null);
   }
 
   function autoResize() {
@@ -263,6 +282,17 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+          </button>
+        )}
+        {!group && onSetDisappearing && (
+          <button
+            onClick={() => setShowDisappearingPicker(true)}
+            className={`w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center transition-colors ${disappearingTtlMs ? 'text-brand-400' : 'text-slate-500 hover:text-white'}`}
+            title={disappearingTtlMs ? `Disappearing messages on (${disappearingTtlMs >= 24 * 60 * 60_000 ? Math.round(disappearingTtlMs / (24 * 60 * 60_000)) + 'd' : Math.round(disappearingTtlMs / (60 * 60_000)) + 'h'})` : 'Disappearing messages'}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
             </svg>
           </button>
         )}
@@ -515,6 +545,151 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
         </div>
       )}
 
+      {/* Message actions (reactions + reply + forward) */}
+      {actionsMenuFor && (() => {
+        const targetMsg = messages.find((m) => m.id === actionsMenuFor);
+        if (!targetMsg) { setActionsMenuFor(null); return null; }
+        const presetReactions = ['👍', '❤️', '😂', '🎉', '😢', '🙏'];
+        return (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setActionsMenuFor(null)} />
+            <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm overflow-hidden">
+              {onReact && (
+                <div className="px-4 py-3 border-b border-slate-800">
+                  <div className="flex gap-2 justify-around">
+                    {presetReactions.map((emoji) => (
+                      <button
+                        key={emoji}
+                        onClick={() => { void onReact(targetMsg.id, emoji); setActionsMenuFor(null); }}
+                        className="w-10 h-10 rounded-full text-xl hover:bg-slate-800 transition-colors flex items-center justify-center"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  const snippet = (targetMsg.text || '').slice(0, 80);
+                  setReplyContext({ messageId: targetMsg.id, snippetText: snippet });
+                  setActionsMenuFor(null);
+                }}
+                className="w-full px-5 py-3 text-left text-white text-sm hover:bg-slate-800 transition-colors flex items-center gap-3"
+              >
+                <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
+                </svg>
+                Reply
+              </button>
+              {onForwardMessage && (
+                <button
+                  onClick={() => { setForwardingMessageId(targetMsg.id); setActionsMenuFor(null); }}
+                  className="w-full px-5 py-3 text-left text-white text-sm hover:bg-slate-800 transition-colors flex items-center gap-3"
+                >
+                  <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061A1.125 1.125 0 0 1 3 16.811V8.69ZM12.75 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061a1.125 1.125 0 0 1-1.683-.977V8.69Z" />
+                  </svg>
+                  Forward
+                </button>
+              )}
+              <button
+                onClick={() => { void navigator.clipboard.writeText(targetMsg.text); setActionsMenuFor(null); }}
+                className="w-full px-5 py-3 text-left text-white text-sm hover:bg-slate-800 transition-colors flex items-center gap-3"
+              >
+                <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" />
+                </svg>
+                Copy text
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Forwarding contact picker */}
+      {forwardingMessageId && onForwardMessage && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setForwardingMessageId(null)} />
+          <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm flex flex-col max-h-[80vh]">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+              <h2 className="text-white font-semibold text-sm">Forward to…</h2>
+              <button onClick={() => setForwardingMessageId(null)} className="text-slate-500 hover:text-white">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2">
+              {!forwardTargets || forwardTargets.length === 0 ? (
+                <p className="text-slate-500 text-sm text-center py-6">No other contacts to forward to.</p>
+              ) : (
+                forwardTargets.map((c) => (
+                  <button
+                    key={c.peerId}
+                    onClick={() => { void onForwardMessage(forwardingMessageId, c.peerId); setForwardingMessageId(null); }}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 transition-colors text-left"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
+                      {c.displayName[0]?.toUpperCase() ?? '?'}
+                    </div>
+                    <span className="text-white text-sm">{c.displayName}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Disappearing-messages picker */}
+      {showDisappearingPicker && onSetDisappearing && (() => {
+        const options: Array<{ label: string; ttlMs: number | null }> = [
+          { label: 'Off', ttlMs: null },
+          { label: '1 hour', ttlMs: 60 * 60_000 },
+          { label: '1 day', ttlMs: 24 * 60 * 60_000 },
+          { label: '7 days', ttlMs: 7 * 24 * 60 * 60_000 },
+          { label: '30 days', ttlMs: 30 * 24 * 60 * 60_000 },
+        ];
+        return (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setShowDisappearingPicker(false)} />
+            <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm flex flex-col">
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+                <div>
+                  <h2 className="text-white font-semibold text-sm">Disappearing messages</h2>
+                  <p className="text-slate-500 text-xs mt-0.5">New messages will auto-delete after the chosen time.</p>
+                </div>
+                <button onClick={() => setShowDisappearingPicker(false)} className="text-slate-500 hover:text-white flex-shrink-0">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="py-2">
+                {options.map((opt) => {
+                  const active = (disappearingTtlMs ?? null) === opt.ttlMs;
+                  return (
+                    <button
+                      key={opt.label}
+                      onClick={() => { void onSetDisappearing(opt.ttlMs); setShowDisappearingPicker(false); }}
+                      className={`w-full px-5 py-2.5 text-left text-sm hover:bg-slate-800 transition-colors flex items-center justify-between ${active ? 'text-brand-400' : 'text-white'}`}
+                    >
+                      <span>{opt.label}</span>
+                      {active && (
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                        </svg>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Lightbox */}
       {lightboxUrl && (
         <div className="fixed inset-0 z-50 bg-slate-950/95 flex items-center justify-center p-4" onClick={() => setLightboxUrl(null)}>
@@ -554,22 +729,86 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           const hasMedia = !!msg.media;
           const isImage = hasMedia && isImageMime(msg.media!.mimeType);
 
+          const reactionEntries = Object.entries(msg.reactions ?? {}).filter(([, peers]) => peers.length > 0);
+          const showActions = isDM && (onReact || onForwardMessage);
+
           return (
-            <div key={msg.id} className={`flex ${isOut ? 'justify-end' : 'justify-start'} ${grouped ? 'mt-0.5' : 'mt-3'}`}>
+            <div key={msg.id} className={`group flex ${isOut ? 'justify-end' : 'justify-start'} ${grouped ? 'mt-0.5' : 'mt-3'}`}>
               <div className={`max-w-[75%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
                 {!isOut && !grouped && msg.senderName && (
                   <span className="text-brand-400 text-[10px] font-medium mb-0.5 px-1">{msg.senderName}</span>
                 )}
 
-                {hasMedia && isImage && (
-                  <ImageBubble msg={msg} isOut={isOut} onDownload={() => { void handleImageTap(msg); }} />
+                {msg.forwardedFrom && (
+                  <span className="text-slate-500 text-[10px] italic px-1 mb-0.5 flex items-center gap-1">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061A1.125 1.125 0 0 1 3 16.811V8.69ZM12.75 8.689c0-.864.933-1.406 1.683-.977l7.108 4.061a1.125 1.125 0 0 1 0 1.954l-7.108 4.061a1.125 1.125 0 0 1-1.683-.977V8.69Z" />
+                    </svg>
+                    Forwarded
+                  </span>
                 )}
-                {hasMedia && !isImage && (
-                  <FileBubble msg={msg} isOut={isOut} onDownload={() => { if (onDownloadMedia) void onDownloadMedia(msg.id); }} />
+
+                {msg.replyTo && (
+                  <div className={`px-2.5 py-1 mb-0.5 rounded-lg max-w-full border-l-2 ${isOut ? 'bg-brand-700/40 border-brand-300' : 'bg-slate-700/50 border-slate-500'}`}>
+                    <p className="text-[10px] uppercase tracking-widest text-slate-400">Reply</p>
+                    <p className={`text-xs truncate ${isOut ? 'text-brand-100' : 'text-slate-300'}`}>{msg.replyTo.snippetText ?? '…'}</p>
+                  </div>
                 )}
-                {!hasMedia && (
-                  <div className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${isOut ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-100 rounded-bl-sm'}`}>
-                    {msg.text}
+
+                <div className="relative flex items-center gap-1.5 group/bubble">
+                  {showActions && isOut && (
+                    <button
+                      onClick={() => setActionsMenuFor(msg.id)}
+                      title="Message actions"
+                      className="opacity-0 group-hover/bubble:opacity-100 transition-opacity w-7 h-7 flex items-center justify-center rounded-full text-slate-500 hover:bg-slate-800 hover:text-slate-200 flex-shrink-0"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 0H5.25m7.5 0a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 0h-1.5m7.5 0a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 0h-1.5" />
+                      </svg>
+                    </button>
+                  )}
+
+                  {hasMedia && isImage && (
+                    <ImageBubble msg={msg} isOut={isOut} onDownload={() => { void handleImageTap(msg); }} />
+                  )}
+                  {hasMedia && !isImage && (
+                    <FileBubble msg={msg} isOut={isOut} onDownload={() => { if (onDownloadMedia) void onDownloadMedia(msg.id); }} />
+                  )}
+                  {!hasMedia && (
+                    <div className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${isOut ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-100 rounded-bl-sm'}`}>
+                      {msg.text}
+                    </div>
+                  )}
+
+                  {showActions && !isOut && (
+                    <button
+                      onClick={() => setActionsMenuFor(msg.id)}
+                      title="Message actions"
+                      className="opacity-0 group-hover/bubble:opacity-100 transition-opacity w-7 h-7 flex items-center justify-center rounded-full text-slate-500 hover:bg-slate-800 hover:text-slate-200 flex-shrink-0"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 0H5.25m7.5 0a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 0h-1.5m7.5 0a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 0h-1.5" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+
+                {reactionEntries.length > 0 && (
+                  <div className={`flex flex-wrap gap-1 mt-1 ${isOut ? 'justify-end' : 'justify-start'}`}>
+                    {reactionEntries.map(([emoji, peers]) => {
+                      const mine = localPeerId ? peers.includes(localPeerId) : false;
+                      return (
+                        <button
+                          key={emoji}
+                          onClick={() => { if (onReact) void onReact(msg.id, emoji); }}
+                          className={`px-1.5 py-0.5 rounded-full text-xs flex items-center gap-1 transition-colors ${mine ? 'bg-brand-600/40 border border-brand-500' : 'bg-slate-800 border border-slate-700 hover:bg-slate-700'}`}
+                          title={mine ? 'Remove your reaction' : 'Add your reaction'}
+                        >
+                          <span>{emoji}</span>
+                          <span className="text-slate-300 text-[10px]">{peers.length}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -595,6 +834,26 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* Reply preview (above composer) */}
+      {replyContext && (
+        <div className="border-t border-slate-800 bg-slate-900 px-4 py-2 flex items-center gap-2">
+          <div className="w-1 h-8 bg-brand-500 rounded-full flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-brand-400 text-[10px] font-medium uppercase tracking-widest">Replying to</p>
+            <p className="text-slate-300 text-xs truncate">{replyContext.snippetText ?? '…'}</p>
+          </div>
+          <button
+            onClick={() => setReplyContext(null)}
+            title="Cancel reply"
+            className="text-slate-500 hover:text-white flex-shrink-0"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Compose */}
       <div className="border-t border-slate-800 bg-slate-900 px-4 py-3 flex items-end gap-2">

@@ -27,6 +27,8 @@ export async function initSDK(
     onGroupMemberKicked?: (groupId: string, peerId: string, kickedBy: string) => void;
     onKickedFromGroup?: (groupId: string, kickedBy: string) => void;
     onGroupRenamed?: (groupId: string, newName: string, renamedBy: string) => void;
+    onReactionUpdated?: (conversationId: string, messageId: string, peerId: string, emoji: string, added: boolean) => void;
+    onDisappearingMessagesChanged?: (conversationId: string, ttlMs: number | null, changedBy: string) => void;
     onArchiveDirty?: (reason: 'tombstone' | 'revival') => void;
     onHistoryRequest?: (peerId: string) => boolean | Promise<boolean>;
     onHistoryRestored?: (peerId: string, count: number) => void;
@@ -51,6 +53,8 @@ export async function initSDK(
     ...(handlers.onGroupMemberKicked ? { onGroupMemberKicked: handlers.onGroupMemberKicked } : {}),
     ...(handlers.onKickedFromGroup ? { onKickedFromGroup: handlers.onKickedFromGroup } : {}),
     ...(handlers.onGroupRenamed ? { onGroupRenamed: handlers.onGroupRenamed } : {}),
+    ...(handlers.onReactionUpdated ? { onReactionUpdated: handlers.onReactionUpdated } : {}),
+    ...(handlers.onDisappearingMessagesChanged ? { onDisappearingMessagesChanged: handlers.onDisappearingMessagesChanged } : {}),
     ...(handlers.onArchiveDirty ? { onArchiveDirty: handlers.onArchiveDirty } : {}),
     ...(handlers.onHistoryRequest ? { onHistoryRequest: handlers.onHistoryRequest } : {}),
     ...(handlers.onHistoryRestored ? { onHistoryRestored: handlers.onHistoryRestored } : {}),
