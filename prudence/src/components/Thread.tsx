@@ -23,6 +23,8 @@ interface Props {
   onTransferAdmin?: (newAdminId: string) => Promise<void>;
   /** Admin-only: kick a member out of the group. */
   onKickMember?: (peerId: string) => void;
+  /** Admin (or any member of an adminless group): rename the group. */
+  onRenameGroup?: (newName: string) => Promise<void>;
   onAttach?: (file: File) => void;
   onDownloadMedia?: (msgId: string) => Promise<string | null>;
   /** DM only: ask the peer to replay their view of the conversation back to us. */
@@ -134,7 +136,7 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -142,6 +144,10 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   const [showAddMember, setShowAddMember] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [adminChoice, setAdminChoice] = useState<'idle' | 'choose'>('idle');
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   // When the local user is the admin AND there are other members, the
   // leave button takes them through the admin-handoff dialog first.
@@ -299,13 +305,74 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setShowMembers(false)} />
           <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm flex flex-col max-h-[80vh]">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
-              <div>
-                <h2 className="text-white font-semibold text-sm">{group.name}</h2>
-                <p className="text-slate-500 text-xs">
+              <div className="flex-1 min-w-0">
+                {editingName && onRenameGroup && (isGroupAdmin || isAdminless) ? (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const next = draftName.trim();
+                      if (!next || next === group.name) {
+                        setEditingName(false);
+                        setRenameError(null);
+                        return;
+                      }
+                      setRenameBusy(true);
+                      setRenameError(null);
+                      onRenameGroup(next)
+                        .then(() => { setEditingName(false); })
+                        .catch((err: unknown) => {
+                          setRenameError(err instanceof Error ? err.message : 'Rename failed');
+                        })
+                        .finally(() => { setRenameBusy(false); });
+                    }}
+                    className="flex items-center gap-2"
+                  >
+                    <input
+                      autoFocus
+                      value={draftName}
+                      onChange={(e) => setDraftName(e.target.value)}
+                      disabled={renameBusy}
+                      maxLength={64}
+                      className="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded-md px-2 py-1 text-white text-sm focus:outline-none focus:border-brand-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={renameBusy || !draftName.trim() || draftName.trim() === group.name}
+                      className="text-xs px-2 py-1 rounded-md bg-brand-600 hover:bg-brand-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setEditingName(false); setRenameError(null); }}
+                      disabled={renameBusy}
+                      className="text-xs px-2 py-1 rounded-md text-slate-400 hover:text-white transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-white font-semibold text-sm truncate">{group.name}</h2>
+                    {onRenameGroup && (isGroupAdmin || isAdminless) && (
+                      <button
+                        onClick={() => { setDraftName(group.name); setEditingName(true); setRenameError(null); }}
+                        title="Rename group"
+                        className="text-slate-500 hover:text-white transition-colors flex-shrink-0"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                )}
+                {renameError && <p className="text-red-400 text-xs mt-1">{renameError}</p>}
+                <p className="text-slate-500 text-xs mt-1">
                   {group.members.length} members · {isAdminless ? 'admin-less' : (isGroupAdmin ? 'you are admin' : 'you are a member')}
                 </p>
               </div>
-              <button onClick={() => setShowMembers(false)} className="text-slate-500 hover:text-white transition-colors">
+              <button onClick={() => setShowMembers(false)} className="text-slate-500 hover:text-white transition-colors ml-3 flex-shrink-0">
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
                 </svg>

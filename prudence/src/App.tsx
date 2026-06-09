@@ -643,6 +643,7 @@ export default function App() {
         onGroupMemberAdded: handleGroupMemberAdded,
         onGroupAdminChanged: handleGroupAdminChanged,
         onGroupMemberKicked: handleGroupMemberKicked,
+        onGroupRenamed: handleGroupRenamed,
         onKickedFromGroup: handleKickedFromGroup,
         // Force-push the archive whenever the SDK writes a tombstone or
         // revival. Bypasses the 5s debounce so a delete or re-add can't be
@@ -1251,6 +1252,82 @@ export default function App() {
     })();
   }, []);
 
+  async function handleRenameGroup(groupId: string, newName: string) {
+    const handle = MeshWhisper.getGroup(groupId);
+    if (!handle) throw new Error('Group not found');
+    const oldName = handle.name;
+    await handle.rename(newName);
+    // Mirror the change in our local conversation state + inject a system
+    // message so the local UI reflects the rename immediately. Other members
+    // get the same via the onGroupRenamed callback below.
+    setState((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) =>
+        c.id === groupId && c.group
+          ? { ...c, contact: { ...c.contact, displayName: newName }, group: { ...c.group, name: newName } }
+          : c,
+      ),
+      messages: {
+        ...prev.messages,
+        [groupId]: [...(prev.messages[groupId] ?? []), {
+          id: crypto.randomUUID(),
+          conversationId: groupId,
+          text: `Group renamed from "${oldName}" to "${newName}"`,
+          timestamp: Date.now(),
+          direction: 'outbound',
+          status: 'delivered',
+        }],
+      },
+    }));
+    // Persist the new name in the locally-stored group roster so it survives reload.
+    const stored = await loadGroups();
+    const existing = stored.find((g) => g.id === groupId);
+    if (existing) await upsertGroup({ ...existing, name: newName }).catch(() => {});
+    scheduleArchiveSync(getSDK());
+  }
+
+  // Fires when another member (the admin, or any member of an adminless
+  // group) renames the group. The SDK has updated the underlying group's
+  // name already; we mirror it into our local conversation state.
+  const handleGroupRenamed = useCallback((groupId: string, newName: string, renamedBy: string) => {
+    void (async () => {
+      let renamedByName = getContactName(renamedBy);
+      if (!renamedByName) {
+        renamedByName = (await MeshWhisper.resolveUsername(renamedBy).catch(() => undefined))
+          ?? (renamedBy.slice(0, 8) + '…');
+      }
+      setState((prev) => {
+        const conv = prev.conversations.find((c) => c.id === groupId);
+        if (!conv?.group) return prev;
+        const oldName = conv.group.name;
+        if (oldName === newName) return prev;
+        const sysMsg: AppMessage = {
+          id: crypto.randomUUID(),
+          conversationId: groupId,
+          text: `@${renamedByName} renamed the group from "${oldName}" to "${newName}"`,
+          timestamp: Date.now(),
+          direction: 'inbound',
+          status: 'delivered',
+        };
+        return {
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === groupId && c.group
+              ? { ...c, contact: { ...c.contact, displayName: newName }, group: { ...c.group, name: newName } }
+              : c,
+          ),
+          messages: {
+            ...prev.messages,
+            [groupId]: [...(prev.messages[groupId] ?? []), sysMsg],
+          },
+        };
+      });
+      const stored = await loadGroups();
+      const existing = stored.find((g) => g.id === groupId);
+      if (existing) await upsertGroup({ ...existing, name: newName }).catch(() => {});
+    })();
+  }, []);
+
   async function handleTransferGroupAdmin(groupId: string, newAdminId: string) {
     const handle = MeshWhisper.getGroup(groupId);
     if (!handle) return;
@@ -1585,6 +1662,7 @@ export default function App() {
             onAddMember={activeConv.group ? (peerId) => handleAddGroupMember(activeConv.id, peerId) : undefined}
             onTransferAdmin={activeConv.group ? (newAdminId) => handleTransferGroupAdmin(activeConv.id, newAdminId) : undefined}
             onKickMember={activeConv.group ? (peerId) => { void handleKickGroupMember(activeConv.id, peerId); } : undefined}
+            onRenameGroup={activeConv.group ? (newName) => handleRenameGroup(activeConv.id, newName) : undefined}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
             onRestoreHistory={activeConv.group ? undefined : () => handleRestoreHistory(activeConv.id)}
