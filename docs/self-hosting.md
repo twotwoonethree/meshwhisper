@@ -238,9 +238,26 @@ Typical setup (host running docker compose):
 # Run once to test
 sudo /opt/meshwhisper/repo/scripts/relay-backup.sh
 
-# Schedule via cron (3 am daily)
-echo "0 3 * * * /opt/meshwhisper/repo/scripts/relay-backup.sh >> /var/log/relay-backup.log 2>&1" \
-  | sudo tee -a /etc/crontab
+# Schedule via a /etc/cron.d/ drop-in (cleaner than editing /etc/crontab —
+# easy to remove, doesn't conflict with other operators):
+sudo tee /etc/cron.d/meshwhisper-backup > /dev/null <<'EOF'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 3 * * * root /opt/meshwhisper/repo/scripts/relay-backup.sh >> /var/log/meshwhisper-backup.log 2>&1
+EOF
+
+# And rotate the backup log so it doesn't grow unbounded:
+sudo tee /etc/logrotate.d/meshwhisper-backup > /dev/null <<'EOF'
+/var/log/meshwhisper-backup.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}
+EOF
 ```
 
 Knobs (set as environment variables before invoking the script):
