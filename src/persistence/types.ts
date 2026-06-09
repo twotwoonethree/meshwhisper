@@ -35,6 +35,13 @@ export interface StoredMessage {
   groupSenderId?: string;
   /** Unix ms after which this message should be considered expired and purged. */
   expiresAt?: number;
+  /**
+   * Per-emoji set of peerIds that have currently reacted to this message.
+   * Toggle semantics: a peer's emoji is present iff they're currently
+   * reacting. Empty arrays MAY be stored or pruned — both are valid;
+   * UIs should treat an absent emoji and an empty array identically.
+   */
+  reactions?: Record<string, string[]>;
 }
 
 export interface Conversation {

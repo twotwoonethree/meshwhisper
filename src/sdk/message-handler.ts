@@ -399,6 +399,54 @@ export class MessageHandler {
     });
   }
 
+  /**
+   * Toggle a single peer's reaction on a stored message. Returns the
+   * effective change ('added', 'removed', or 'noop' if the message
+   * wasn't found / the requested state already held). The persisted
+   * reactions map is normalised on every write: empty arrays are
+   * pruned, so a reader can treat an absent emoji and an empty array
+   * identically.
+   */
+  async applyReaction(
+    conversationId: string,
+    messageId: string,
+    peerId: string,
+    emoji: string,
+    add: boolean,
+  ): Promise<'added' | 'removed' | 'noop'> {
+    if (!this.storage) return 'noop';
+    const storage = this.storage;
+    const key = `messages/${conversationId}`;
+    let outcome: 'added' | 'removed' | 'noop' = 'noop';
+    await this.storageMutex.run(key, async () => {
+      const raw = await storage.get(key);
+      if (!raw) return;
+      const messages: StoredMessage[] = JSON.parse(raw);
+      const msg = messages.find((m) => m.id === messageId);
+      if (!msg) return;
+      const reactions = msg.reactions ?? {};
+      const reactors = reactions[emoji] ?? [];
+      const has = reactors.includes(peerId);
+      if (add && !has) {
+        reactions[emoji] = [...reactors, peerId];
+        outcome = 'added';
+      } else if (!add && has) {
+        const next = reactors.filter((p) => p !== peerId);
+        if (next.length === 0) {
+          delete reactions[emoji];
+        } else {
+          reactions[emoji] = next;
+        }
+        outcome = 'removed';
+      } else {
+        return; // already in the requested state
+      }
+      msg.reactions = reactions;
+      await storage.set(key, JSON.stringify(messages));
+    });
+    return outcome;
+  }
+
   async updateMessageStatus(
     messageId: string,
     conversationId: string,

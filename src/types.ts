@@ -531,6 +531,22 @@ export interface MeshWhisperConfig {
    * displays the group title.
    */
   onGroupRenamed?: (groupId: string, newName: string, renamedBy: string) => void;
+
+  /**
+   * Fires when a peer adds or removes a reaction on a message. The
+   * stored message has already been updated with the new reactions
+   * map by the time this fires; the application should re-render the
+   * affected message bubble. `added` is true on add, false on
+   * remove. `peerId` is the reactor (NOT necessarily the message's
+   * sender).
+   */
+  onReactionUpdated?: (
+    conversationId: string,
+    messageId: string,
+    peerId: string,
+    emoji: string,
+    added: boolean,
+  ) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

@@ -123,7 +123,8 @@ export interface ControlMessage {
     | 'session_pong'
     | 'device_added'
     | 'device_revoked'
-    | 'device_linked';
+    | 'device_linked'
+    | 'reaction';
   /** session_ping / session_pong correlation id. */
   sessionPingId?: string;
   /** history_replay: a chunk of historical messages from the sender's view. */
@@ -203,6 +204,11 @@ export interface ControlMessage {
     eventAt: number;             // unix ms; addedAt or revokedAt
     signature: string;           // base64; 64 raw bytes
   };
+  /** reaction: the emoji being toggled. Caller's choice; the SDK treats
+   *  it as an opaque string and does no validation. */
+  reactionEmoji?: string;
+  /** reaction: true to add this peer's reaction, false to remove. */
+  reactionAdd?: boolean;
   // device_linked — sent by the primary to a freshly-linked secondary
   // immediately after accepting its DeviceLinkOffer. Carries the
   // signed device_added announcement so the secondary can verify its

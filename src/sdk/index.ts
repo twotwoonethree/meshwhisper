@@ -446,6 +446,7 @@ export class MeshWhisper {
   private onGroupMemberKickedHandler: ((groupId: string, peerId: string, kickedBy: string) => void) | null = null;
   private onKickedFromGroupHandler: ((groupId: string, kickedBy: string) => void) | null = null;
   private onGroupRenamedHandler: ((groupId: string, newName: string, renamedBy: string) => void) | null = null;
+  private onReactionUpdatedHandler: ((conversationId: string, messageId: string, peerId: string, emoji: string, added: boolean) => void) | null = null;
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -593,6 +594,7 @@ export class MeshWhisper {
     this.onGroupMemberKickedHandler = config.onGroupMemberKicked ?? null;
     this.onKickedFromGroupHandler = config.onKickedFromGroup ?? null;
     this.onGroupRenamedHandler = config.onGroupRenamed ?? null;
+    this.onReactionUpdatedHandler = config.onReactionUpdated ?? null;
   }
 
   // ================================================================
@@ -1735,6 +1737,56 @@ export class MeshWhisper {
   }
 
   /**
+   * Toggle the local user's reaction with `emoji` on a message. If they
+   * already reacted with this emoji, the reaction is removed; otherwise
+   * it's added. Updates local storage first, then sends a
+   * `__mw_ctrl: 'reaction'` control to the peer so their stored message
+   * gets the same change. `onReactionUpdated` fires on the receiver
+   * side after the persisted message is updated.
+   *
+   * `conversationId` is the peer ID for DMs. Group reactions follow the
+   * same shape (each member would receive the control) but aren't
+   * implemented in v1 — callers should restrict UI to DM conversations
+   * until the group fan-out path lands.
+   */
+  static async toggleReaction(
+    conversationId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<'added' | 'removed' | 'noop'> {
+    return MeshWhisper.instance.toggleReactionInstance(conversationId, messageId, emoji);
+  }
+
+  async toggleReactionInstance(
+    conversationId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<'added' | 'removed' | 'noop'> {
+    this.assertRunning();
+    if (!emoji) throw new Error('emoji required');
+    const me = this.getLocalPeerId();
+    // Read current state to decide add vs remove. The applyReaction call
+    // itself is idempotent, but we need to know the resulting side so the
+    // outgoing control message carries the correct `reactionAdd` flag.
+    const existing = await this.messageHandler.getMessages(conversationId);
+    const msg = existing.find((m) => m.id === messageId);
+    if (!msg) return 'noop';
+    const haveReacted = (msg.reactions?.[emoji] ?? []).includes(me);
+    const add = !haveReacted;
+    const outcome = await this.messageHandler.applyReaction(
+      conversationId, messageId, me, emoji, add,
+    );
+    if (outcome === 'noop') return 'noop';
+    this.sendControl(conversationId, {
+      __mw_ctrl: 'reaction',
+      messageId,
+      reactionEmoji: emoji,
+      reactionAdd: add,
+    });
+    return outcome;
+  }
+
+  /**
    * Deletes a message locally and sends a delete request to the other party.
    * `conversationId` is the peer ID for DMs or the group ID for group messages.
    */
@@ -2589,6 +2641,21 @@ export class MeshWhisper {
           this.groupManager.removeMember(ctrl.groupId, ctrl.kickedPeerId);
           this.onGroupMemberKickedHandler?.(ctrl.groupId, ctrl.kickedPeerId, fromPeerId);
         }
+        break;
+      }
+
+      case 'reaction': {
+        if (!ctrl.messageId || typeof ctrl.reactionEmoji !== 'string' || typeof ctrl.reactionAdd !== 'boolean') break;
+        // The receiver applies the change to their own stored copy of
+        // the message (the conversation key is the inbound peer for DMs).
+        void this.messageHandler.applyReaction(
+          fromPeerId, ctrl.messageId, fromPeerId, ctrl.reactionEmoji, ctrl.reactionAdd,
+        ).then((outcome) => {
+          if (outcome === 'noop') return;
+          this.onReactionUpdatedHandler?.(
+            fromPeerId, ctrl.messageId!, fromPeerId, ctrl.reactionEmoji!, ctrl.reactionAdd!,
+          );
+        }).catch(() => {});
         break;
       }
 

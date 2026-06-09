@@ -76,6 +76,7 @@ interface MeshWhisperConfig {
 | `onContactRequest` | No | — | Called when a new peer wants to talk to you. Fires in two cases: (1) a mutual contact introduces a new peer (`introducedBy` is the introducer's peer ID, `username` may be set); (2) a stranger initiates a direct handshake (`introducedBy === peerId`, `username` may be undefined until the peer's app sends a follow-up identifying themselves). Call `addContactByKey(peerId)` from this handler to confirm the contact, or ignore it to decline. |
 | `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
 | `onGroupRenamed` | No | — | Fires on remaining members when the admin (or any member of an adminless group) renames a group. The local group's `name` field has already been updated by the time this fires — refresh whichever UI surface shows the group title. |
+| `onReactionUpdated` | No | — | Fires on the receiver side after a peer's emoji reaction has been applied to the local stored message. `peerId` is the reactor (NOT the message sender); `added` is true on add, false on remove. Re-render the affected message bubble. |
 | `onArchiveDirty` | No | — | Called whenever the SDK writes a tombstone (delete) or revival (re-add) event that must reach the relay before the next reload. The app should push the archive immediately (bypass any debounce). Apps that don't provide this still work, but stale relay state can resurrect deleted peers on the next pull until a normal push fires. |
 | `onHistoryRequest` | No | refuse | Called when a peer asks for their conversation history to be replayed (typically after they accidentally deleted it). Return `true` to authorise the share, `false` to refuse. Default behaviour without this callback is refuse silently. Apps usually prompt the user once per peer and cache the decision. |
 | `onHistoryRestored` | No | — | Called after a peer has replayed history into local storage. `count` is the number of new messages persisted after dedup. Reload the conversation view in response. |
@@ -251,6 +252,40 @@ onMessageStatus: (messageId: string, status: 'sent' | 'delivered' | 'read' | 'fa
 ```
 
 Status flow: `sending` → `sent` → `delivered` (automatic on decrypt by recipient) → `read` (on `markRead()` call).
+
+### `MeshWhisper.toggleReaction(conversationId, messageId, emoji)`
+
+Toggle the local user's reaction on a message. If they already reacted with this emoji, the reaction is removed; otherwise it's added. Updates local storage first, then sends a `__mw_ctrl: 'reaction'` control message to the peer so their stored copy gets the same change.
+
+```ts
+const outcome: 'added' | 'removed' | 'noop' = await MeshWhisper.toggleReaction(
+  conversationId: string,
+  messageId: string,
+  emoji: string,
+)
+```
+
+- `conversationId` is the peer ID for DMs. Group reactions follow the same shape (each member would receive the control) but aren't implemented in v1 — restrict UI to DM conversations until the group fan-out path lands.
+- `emoji` is the caller's choice. The SDK treats it as an opaque string and does no validation; UIs typically constrain to a small picker.
+- `outcome === 'noop'` means the message wasn't found locally, OR the reaction was already in the requested state.
+
+Persisted shape on `StoredMessage`: `reactions?: Record<string, string[]>` (emoji → peerIds who currently react). The map is normalised on every write — empty arrays are pruned, so a reader can treat an absent emoji and an empty array identically.
+
+### `onReactionUpdated` (config callback)
+
+Fires on the receiver side after a peer's reaction has been applied to the local stored message.
+
+```ts
+onReactionUpdated: (
+  conversationId: string,
+  messageId: string,
+  peerId: string,
+  emoji: string,
+  added: boolean,
+) => void
+```
+
+`peerId` is the reactor — NOT necessarily the message's sender. `added` is true on add, false on remove. The application should re-render the affected message bubble.
 
 ---
 
