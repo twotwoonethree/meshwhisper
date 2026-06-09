@@ -224,6 +224,133 @@ At least one push provider must be configured for offline delivery. You can conf
 
 ---
 
+## Backup and recovery
+
+The relay's SQLite database (`/data/meshwhisper.db` inside the container, by default backed by a Docker named volume) holds all server-side state that isn't reproducible from client devices: store-and-forward blob queue, push registrations, prekey directory, OPK pool, archive blobs, namespace policy. Losing it means users miss queued messages, push wake stops working until devices reconnect, and freshly-installed devices can't restore from archive until their owner re-pushes one. Worth backing up.
+
+### Hot backup (no downtime)
+
+The repository ships a script at [`scripts/relay-backup.sh`](../scripts/relay-backup.sh) that runs `sqlite3 .backup` inside the live container. SQLite's `.backup` command is atomic and online — the relay keeps serving traffic while it runs.
+
+Typical setup (host running docker compose):
+
+```sh
+# Run once to test
+sudo /opt/meshwhisper/repo/scripts/relay-backup.sh
+
+# Schedule via cron (3 am daily)
+echo "0 3 * * * /opt/meshwhisper/repo/scripts/relay-backup.sh >> /var/log/relay-backup.log 2>&1" \
+  | sudo tee -a /etc/crontab
+```
+
+Knobs (set as environment variables before invoking the script):
+
+| Variable | Default | Description |
+|---|---|---|
+| `COMPOSE_DIR` | `/opt/meshwhisper` | Directory containing your `docker-compose.yml` |
+| `SERVICE` | `node` | Compose service name running the relay |
+| `DB_PATH` | `/data/meshwhisper.db` | DB path inside the container |
+| `BACKUP_DIR` | `/opt/meshwhisper/backups` | Host directory to write backups to |
+| `RETAIN` | `14` | Number of most-recent backups to keep; older deleted |
+| `COMPRESS` | `1` | Gzip backups after creation |
+
+Backups land as `meshwhisper-<UTC-timestamp>.db.gz`. For a 24-hour-RPO setup, daily cron + 14-day retention is a reasonable starting point; tighten on both axes if your data is more valuable.
+
+For off-host backups (highly recommended for any non-toy deployment), pipe the latest file to `rclone`, `restic`, S3, or whichever object store you trust. The relay backup file is encrypted-at-the-application-layer only for archive contents (`archives` table); the rest is plaintext SQLite, so encrypt the file at rest if you're shipping it to cloud storage.
+
+### Recovery
+
+Recovery is offline — stop the relay, restore the file, start it again:
+
+```sh
+cd /opt/meshwhisper
+
+# Stop the relay
+docker compose stop node
+
+# Find the backup volume mount point on the host (depends on Docker storage driver)
+VOLUME=$(docker volume inspect meshwhisper_node_data -f '{{.Mountpoint}}')
+
+# Restore (replace the path with your chosen backup file)
+gunzip -c /opt/meshwhisper/backups/meshwhisper-20260609T030000Z.db.gz \
+  > "${VOLUME}/meshwhisper.db"
+
+# Remove WAL/SHM if present (they'd be stale relative to the restored .db)
+sudo rm -f "${VOLUME}/meshwhisper.db-wal" "${VOLUME}/meshwhisper.db-shm"
+
+# Restart
+docker compose start node
+docker compose logs -f node   # watch for the "Listening on..." line
+```
+
+What survives a restore:
+
+- All prekey directory entries (so users remain discoverable)
+- Push registrations (so push wake keeps working)
+- Stored blobs younger than the restored snapshot (recipients pull them when they reconnect)
+- Archive contents up to the backup time
+- Namespace policy
+- OPK pool
+
+What's lost:
+
+- Anything between the backup time and the restore moment (typical "you lost N hours" RPO)
+- The in-memory rate-limit state — irrelevant, it resets on every restart anyway
+- The in-memory `/metrics` counters — same
+
+A device that pulls right after recovery sees the relay as it was at backup time, which it transparently handles — the SDK's reconnect logic doesn't notice anything unusual.
+
+---
+
+## Observability
+
+The relay exposes Prometheus-format metrics at `/metrics`. Scrape it on your normal Prometheus / VictoriaMetrics / managed-monitoring cadence (15-60s is fine; the endpoint is cheap).
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: meshwhisper-relay
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['relay.myapp.com:443']
+    scheme: https
+```
+
+### Metrics surface
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `meshwhisper_uptime_seconds` | gauge | — | Seconds since the node started |
+| `meshwhisper_clients_connected` | gauge | — | Currently-connected WebSocket clients |
+| `meshwhisper_stored_blobs` | gauge | — | Encrypted blobs queued for offline delivery |
+| `meshwhisper_prekey_entries` | gauge | — | Prekey-bundle entries in the directory |
+| `meshwhisper_push_registrations` | gauge | — | Active push registrations |
+| `meshwhisper_media_entries` | gauge | — | Encrypted media blobs stored |
+| `meshwhisper_opk_entries` | gauge | — | One-time prekeys in the pool |
+| `meshwhisper_archive_entries` | gauge | — | Per-identity encrypted archives stored |
+| `meshwhisper_http_requests_total` | counter | — | Total HTTP requests served since startup |
+| `meshwhisper_http_responses_total` | counter | `status` (`2xx` / `3xx` / `4xx` / `5xx` / `429`) | HTTP responses broken down by status family (429 broken out separately because operators alert on it) |
+| `meshwhisper_rate_limit_rejections_total` | counter | `bucket` (`dir` / `media` / `read` / `archive`) | Per-bucket 429 rejections |
+| `meshwhisper_websocket_connections_total` | counter | — | Total WebSocket connections accepted since startup |
+
+Counters reset to zero on every restart (which is what Prometheus expects). Pair with Prometheus' `rate()` / `increase()` functions for meaningful queries.
+
+### Suggested alerts
+
+A starting set worth wiring up:
+
+- **Sustained 5xx**: `rate(meshwhisper_http_responses_total{status="5xx"}[5m]) > 0.1` for 10 minutes. Real server bug.
+- **Persistent 429 spike**: `rate(meshwhisper_rate_limit_rejections_total[5m]) > 5` for 30 minutes. Either a real attack or your limits are too tight.
+- **Stored-blob growth**: `meshwhisper_stored_blobs` rising monotonically. Indicates recipients aren't draining their queues — possibly a push pipeline failure.
+- **Node restart**: `meshwhisper_uptime_seconds < 300` after being healthy. The node restarted; check why.
+
+### Privacy of /metrics
+
+The endpoint returns aggregate counts only — no peerIds, no destination hashes, no message content, no IPs. It's safe to expose to a scraper without further auth, but operators who'd rather keep their traffic shape private should restrict it at the reverse proxy (e.g. nginx `allow 10.0.0.0/8; deny all;` in a `location /metrics` block).
+
+---
+
 ## Health checks
 
 Both services expose a `/health` endpoint:

@@ -48,8 +48,12 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY package.json ./
 
-# Create data directory for SQLite database and set ownership
-RUN mkdir -p /data && \
+# Create data directory for SQLite database and set ownership.
+# sqlite (CLI) is added so operators can run the documented hot-backup
+# procedure via `docker compose exec node sqlite3 /data/meshwhisper.db
+# ".backup /data/backup-DATE.db"` without spawning a sidecar container.
+RUN apk add --no-cache sqlite && \
+    mkdir -p /data && \
     addgroup -S meshwhisper && \
     adduser -S meshwhisper -G meshwhisper && \
     chown meshwhisper:meshwhisper /data

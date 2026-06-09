@@ -373,6 +373,9 @@ function rateLimited(
 ): boolean {
   const r = checkRateLimit(getClientIp(req), bucket, maxPerWindow);
   if (r.ok) return false;
+  if (metrics.rateLimitRejections[bucket] !== undefined) {
+    metrics.rateLimitRejections[bucket]++;
+  }
   res.setHeader('Retry-After', String(r.retryAfterSeconds));
   sendJson(res, 429, { error: 'Too many requests', retryAfter: r.retryAfterSeconds });
   return true;
@@ -394,6 +397,30 @@ function pruneRateLimitState(): void {
   for (const [key, entry] of rateLimitState.entries()) {
     if (entry.windowStart < cutoff) rateLimitState.delete(key);
   }
+}
+
+// ============================================================
+// Observability counters — surfaced via the /metrics endpoint in
+// Prometheus text exposition format. Cheap, in-process, reset on
+// every restart (which is what Prometheus expects from counters).
+// ============================================================
+
+const NODE_STARTED_AT_MS = Date.now();
+
+const metrics = {
+  httpRequestsTotal: 0,
+  // Indexed by Prometheus-style status family label ("2xx", "3xx", etc.)
+  // plus exact "429" because that's the one operators alert on most.
+  httpStatus: { '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, '429': 0 } as Record<string, number>,
+  rateLimitRejections: { dir: 0, media: 0, read: 0, archive: 0 } as Record<string, number>,
+  websocketConnectionsTotal: 0,
+};
+
+function recordHttpStatus(status: number): void {
+  metrics.httpRequestsTotal++;
+  if (status === 429) metrics.httpStatus['429']++;
+  const family = `${Math.floor(status / 100)}xx`;
+  if (metrics.httpStatus[family] !== undefined) metrics.httpStatus[family]++;
 }
 
 // ============================================================
@@ -955,6 +982,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
     'Access-Control-Allow-Origin': '*',
   });
   res.end(payload);
+  recordHttpStatus(status);
 }
 
 async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1011,6 +1039,68 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       opkEntries: (stmts.countOpks.get() as { cnt: number }).cnt,
       archiveEntries: (stmts.countArchives.get() as { cnt: number }).cnt,
     });
+    return;
+  }
+
+  // Prometheus-format metrics. Includes gauges (current state) and
+  // counters (cumulative since boot). Not rate-limited so a scraper
+  // can poll on its own schedule. Operators wanting to keep this
+  // private should gate it at the reverse proxy.
+  if (url.pathname === '/metrics' && method === 'GET') {
+    const lines: string[] = [];
+    const emit = (name: string, help: string, type: 'counter' | 'gauge', value: number, labels?: Record<string, string>): void => {
+      lines.push(`# HELP ${name} ${help}`);
+      lines.push(`# TYPE ${name} ${type}`);
+      const labelStr = labels
+        ? `{${Object.entries(labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
+        : '';
+      lines.push(`${name}${labelStr} ${value}`);
+    };
+    const emitLabeled = (name: string, help: string, type: 'counter' | 'gauge', labelName: string, values: Record<string, number>): void => {
+      lines.push(`# HELP ${name} ${help}`);
+      lines.push(`# TYPE ${name} ${type}`);
+      for (const [label, value] of Object.entries(values)) {
+        lines.push(`${name}{${labelName}="${label}"} ${value}`);
+      }
+    };
+
+    // Uptime
+    emit('meshwhisper_uptime_seconds', 'Seconds since this node started', 'gauge',
+      Math.floor((Date.now() - NODE_STARTED_AT_MS) / 1000));
+
+    // Live counts (gauges)
+    emit('meshwhisper_clients_connected', 'Currently connected WebSocket clients', 'gauge', clientsByHash.size);
+    emit('meshwhisper_stored_blobs', 'Encrypted blobs currently queued for offline delivery', 'gauge',
+      (stmts.countBlobs.get() as { cnt: number }).cnt);
+    emit('meshwhisper_prekey_entries', 'Registered prekey-bundle entries in the directory', 'gauge',
+      (stmts.countPrekeys.get() as { cnt: number }).cnt);
+    emit('meshwhisper_push_registrations', 'Active push-notification registrations', 'gauge',
+      (stmts.countPush.get() as { cnt: number }).cnt);
+    emit('meshwhisper_media_entries', 'Encrypted media blobs currently stored', 'gauge',
+      (stmts.countMedia.get() as { cnt: number }).cnt);
+    emit('meshwhisper_opk_entries', 'Unused one-time prekeys in the pool', 'gauge',
+      (stmts.countOpks.get() as { cnt: number }).cnt);
+    emit('meshwhisper_archive_entries', 'Stored per-identity encrypted archives', 'gauge',
+      (stmts.countArchives.get() as { cnt: number }).cnt);
+
+    // Counters
+    emit('meshwhisper_http_requests_total', 'Total HTTP requests served since startup', 'counter',
+      metrics.httpRequestsTotal);
+    emitLabeled('meshwhisper_http_responses_total', 'HTTP responses by status family (plus 429 broken out)',
+      'counter', 'status', metrics.httpStatus);
+    emitLabeled('meshwhisper_rate_limit_rejections_total', 'Rate-limit (429) rejections by bucket',
+      'counter', 'bucket', metrics.rateLimitRejections);
+    emit('meshwhisper_websocket_connections_total', 'Total WebSocket connections accepted since startup',
+      'counter', metrics.websocketConnectionsTotal);
+
+    const body = lines.join('\n') + '\n';
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(body);
+    recordHttpStatus(200);
     return;
   }
 
@@ -1455,6 +1545,7 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (ws: WebSocket) => {
+  metrics.websocketConnectionsTotal++;
   handleWebSocketConnection(ws);
 });
 
