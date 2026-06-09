@@ -75,6 +75,7 @@ interface MeshWhisperConfig {
 | `onTyping` | No | — | Called when a peer starts or stops typing. `isTyping` is `true` for start, `false` for stop. Ephemeral — not stored or reliable. |
 | `onContactRequest` | No | — | Called when a new peer wants to talk to you. Fires in two cases: (1) a mutual contact introduces a new peer (`introducedBy` is the introducer's peer ID, `username` may be set); (2) a stranger initiates a direct handshake (`introducedBy === peerId`, `username` may be undefined until the peer's app sends a follow-up identifying themselves). Call `addContactByKey(peerId)` from this handler to confirm the contact, or ignore it to decline. |
 | `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
+| `onGroupRenamed` | No | — | Fires on remaining members when the admin (or any member of an adminless group) renames a group. The local group's `name` field has already been updated by the time this fires — refresh whichever UI surface shows the group title. |
 | `onArchiveDirty` | No | — | Called whenever the SDK writes a tombstone (delete) or revival (re-add) event that must reach the relay before the next reload. The app should push the archive immediately (bypass any debounce). Apps that don't provide this still work, but stale relay state can resurrect deleted peers on the next pull until a normal push fires. |
 | `onHistoryRequest` | No | refuse | Called when a peer asks for their conversation history to be replayed (typically after they accidentally deleted it). Return `true` to authorise the share, `false` to refuse. Default behaviour without this callback is refuse silently. Apps usually prompt the user once per peer and cache the decision. |
 | `onHistoryRestored` | No | — | Called after a peer has replayed history into local storage. `count` is the number of new messages persisted after dedup. Reload the conversation view in response. |
@@ -667,11 +668,23 @@ const invites = MeshWhisper.getPendingGroupInvites(): Array<{
 group.id: string
 group.name: string
 group.members: string[]
+
+// Membership + admin
+group.isAdmin(): boolean
+group.isAdminless(): boolean
+await group.addMember(peerId: string): Promise<void>     // admin or adminless
+await group.kickMember(peerId: string): Promise<void>    // admin only
+await group.transferAdmin(newAdminId: string): Promise<void>  // admin only; pass '' for adminless
+await group.becomeAdminless(): Promise<void>              // sugar for transferAdmin('')
+await group.rename(newName: string): Promise<void>        // admin only (or any member if adminless)
+group.removeMember(peerId: string): void                  // local-only; no broadcast
+
+// Lifecycle
 await group.send(payload: Uint8Array): Promise<void>
-group.addMember(peerId: string): void
-group.removeMember(peerId: string): void
-group.leave(): void
+await group.leave(): Promise<void>
 ```
+
+Rename broadcasts a `group_rename` control message to every other current member; recipients fire `onGroupRenamed(groupId, newName, renamedBy)` after the local state is updated. Receivers silently drop a `group_rename` that doesn't come from the admin (or from a member of an adminless group), so a stray rename from a non-admin can't confuse your UI.
 
 ---
 

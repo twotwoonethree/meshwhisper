@@ -443,6 +443,20 @@ export class GroupManager {
   }
 
   /**
+   * Rename a group. Returns true if the rename took effect (group exists
+   * and the new name differs from the current), false otherwise. The
+   * caller is responsible for permission checks and for broadcasting the
+   * change to other members.
+   */
+  setName(groupId: string, newName: string): boolean {
+    const state = this.groups.get(groupId);
+    if (!state) return false;
+    if (state.group.name === newName) return false;
+    state.group.name = newName;
+    return true;
+  }
+
+  /**
    * Returns the sender key for a specific member in a group, or null if unknown.
    */
   getSenderKey(groupId: string, memberId: string): Uint8Array | null {

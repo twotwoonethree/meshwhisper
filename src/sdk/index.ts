@@ -351,6 +351,16 @@ export class GroupHandle {
     await this.sdk['leaveGroupBroadcast'](this.group.id);
     this.sdk['groupManager'].leaveGroup(this.group.id);
   }
+
+  /**
+   * Rename the group. Only the current admin can call this; if the group
+   * is adminless, any current member can. Broadcasts a group_rename
+   * control message to every other current member. The new name is
+   * trimmed; empty strings throw. No-op if the name is unchanged.
+   */
+  async rename(newName: string): Promise<void> {
+    await this.sdk['renameGroupBroadcast'](this.group.id, newName);
+  }
 }
 
 // ============================================================
@@ -433,6 +443,7 @@ export class MeshWhisper {
   private onGroupAdminChangedHandler: ((groupId: string, newAdminId: string, changedBy: string) => void) | null = null;
   private onGroupMemberKickedHandler: ((groupId: string, peerId: string, kickedBy: string) => void) | null = null;
   private onKickedFromGroupHandler: ((groupId: string, kickedBy: string) => void) | null = null;
+  private onGroupRenamedHandler: ((groupId: string, newName: string, renamedBy: string) => void) | null = null;
   private readonly pendingGroupInvites: Map<string, import('../group/index.js').GroupInvite> = new Map();
   private readonly transportChangedHandlers: Set<(event: TransportChangedEvent) => void> = new Set();
 
@@ -579,6 +590,7 @@ export class MeshWhisper {
     this.onGroupAdminChangedHandler = config.onGroupAdminChanged ?? null;
     this.onGroupMemberKickedHandler = config.onGroupMemberKicked ?? null;
     this.onKickedFromGroupHandler = config.onKickedFromGroup ?? null;
+    this.onGroupRenamedHandler = config.onGroupRenamed ?? null;
   }
 
   // ================================================================
@@ -2578,6 +2590,25 @@ export class MeshWhisper {
         break;
       }
 
+      case 'group_rename': {
+        if (!ctrl.groupId || typeof ctrl.newGroupName !== 'string') break;
+        const group = this.groupManager.getGroup(ctrl.groupId);
+        if (!group) break;
+        // Authorisation: the rename must come from the current admin, or
+        // from any current member if the group is adminless. Anything else
+        // is silently dropped — a stray rename from a non-admin shouldn't
+        // be able to confuse our local UI.
+        const isFromAdmin = group.treeRoot === fromPeerId;
+        const isAdminless = group.treeRoot === '';
+        const isFromMember = group.members.has(fromPeerId);
+        if (!isFromAdmin && !(isAdminless && isFromMember)) break;
+        const applied = this.groupManager.setName(ctrl.groupId, ctrl.newGroupName.trim());
+        if (applied) {
+          this.onGroupRenamedHandler?.(ctrl.groupId, ctrl.newGroupName.trim(), fromPeerId);
+        }
+        break;
+      }
+
       case 'request_history':
         this.handleHistoryRequest(fromPeerId, ctrl.historySince).catch(() => {});
         break;
@@ -2898,6 +2929,35 @@ export class MeshWhisper {
         __mw_ctrl: 'group_admin_change',
         groupId,
         newAdminId,
+      });
+    }
+  }
+
+  /**
+   * Rename a group and broadcast the change to every other current
+   * member. Only the current admin (or any member of an adminless group)
+   * can call this. Updates local state first so a partial broadcast
+   * still leaves the initiating device with the new name.
+   */
+  private async renameGroupBroadcast(groupId: string, newName: string): Promise<void> {
+    const group = this.groupManager.getGroup(groupId);
+    if (!group) throw new Error(`Unknown group ${groupId}`);
+    const trimmed = newName.trim();
+    if (!trimmed) throw new Error('Group name cannot be empty');
+    const me = this.getLocalPeerId();
+    const isAdmin = group.treeRoot === me;
+    const isAdminless = group.treeRoot === '';
+    if (!isAdmin && !isAdminless) {
+      throw new Error('Only the current admin can rename the group (or any member if adminless)');
+    }
+    if (group.name === trimmed) return; // no-op
+    this.groupManager.setName(groupId, trimmed);
+    for (const memberId of group.members.keys()) {
+      if (memberId === me) continue;
+      this.sendControl(memberId, {
+        __mw_ctrl: 'group_rename',
+        groupId,
+        newGroupName: trimmed,
       });
     }
   }

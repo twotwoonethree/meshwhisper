@@ -523,6 +523,14 @@ export interface MeshWhisperConfig {
    * remove the conversation from its UI and surface a notification.
    */
   onKickedFromGroup?: (groupId: string, kickedBy: string) => void;
+
+  /**
+   * Fires on remaining members when the admin renames a group. The
+   * local group's `name` field has already been updated by the time
+   * this fires; the application should refresh whichever UI surface
+   * displays the group title.
+   */
+  onGroupRenamed?: (groupId: string, newName: string, renamedBy: string) => void;
   config?: {
     relayWillingness?: 'auto' | RelayWillingness;
     chaffRate?: ChaffRate;

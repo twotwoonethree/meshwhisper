@@ -114,6 +114,7 @@ export interface ControlMessage {
     | 'group_member_added'
     | 'group_member_kicked'
     | 'group_admin_change'
+    | 'group_rename'
     | 'delete'
     | 'handshake_activate'
     | 'request_history'
@@ -157,6 +158,8 @@ export interface ControlMessage {
   newAdminId?: string;
   /** group_member_kicked: peerId of the kicked member. Only the current admin may issue this. */
   kickedPeerId?: string;
+  /** group_rename: the new group name. Only the current admin may issue this. */
+  newGroupName?: string;
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];
