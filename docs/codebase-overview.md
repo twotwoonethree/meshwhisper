@@ -262,7 +262,7 @@ The honest framing across the codebase: layers that ship in real deployments are
 
 3. **No developer key validation on the Node** — the `developerKey` field exists in the SDK config but the Node does not validate it. Rate limiting is IP-based only.
 
-4. **Multi-device persistence gaps** — the linked-devices flow (`createDeviceLinkOffer` / `acceptDeviceLinkOffer`) ships in v1; the per-(account, device) LWW replay-protection map is in-memory only, so a fresh device boot has no historical protection. Per-device signing certificates aren't implemented yet either — only the primary device (whose `peerId === accountKey`) can broadcast `device_added` / `device_revoked` announcements. See [multi-device.md](multi-device.md#whats-not-in-qr-pairing-v1) for the full list of deferred items.
+4. **Multi-device hardening gap** — the linked-devices flow (`createDeviceLinkOffer` / `acceptDeviceLinkOffer`) ships in v1 with persistent LWW replay-protection (`device_announcement_seen` in storage). Per-device signing certificates aren't yet implemented — only the primary device (whose `peerId === accountKey`) can broadcast `device_added` / `device_revoked` announcements. See [multi-device.md](multi-device.md#whats-not-in-qr-pairing-v1) for the full list of deferred items.
 
 ---
 

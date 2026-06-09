@@ -97,6 +97,8 @@ import {
   downloadArchive,
   MAX_ARCHIVE_BYTES,
   readTombstones,
+  readDeviceAnnouncementSeen,
+  writeDeviceAnnouncementSeen,
   readRevivals,
   addTombstone,
 } from './archive.js';
@@ -3296,11 +3298,14 @@ export class MeshWhisper {
 
   /**
    * Per-(account, device) latest applied event timestamp, for replay
-   * protection. Without it, an attacker capturing a revocation could
-   * replay it after the device was re-added and silently undo the
-   * re-add. In phase B v1 this is in-memory; phase B v2 will persist
-   * it alongside tombstones so a fresh device boot has the same
-   * protection.
+   * protection against `device_added` / `device_revoked` announcements.
+   * Without this, an attacker capturing a revocation could replay it
+   * after the device was re-added and silently undo the re-add.
+   *
+   * Loaded from storage on init via `loadDeviceAnnouncementSeen`;
+   * persisted on every successful apply via the same path that fires
+   * `persistContacts`. The persisted shape is a plain object keyed by
+   * `${accountX25519}:${deviceX25519}` → unix-ms eventAt.
    */
   private readonly deviceAnnouncementSeen: Map<string, number> = new Map();
 
@@ -3529,6 +3534,16 @@ export class MeshWhisper {
       this.permissionManager.removeDeviceFromContact(accountX25519, deviceX25519);
     }
     this.persistContacts().catch(() => {});
+    // Persist the replay-guard map alongside the contacts write so a
+    // fresh device boot inherits the same protection.
+    this.persistDeviceAnnouncementSeen().catch(() => {});
+  }
+
+  private async persistDeviceAnnouncementSeen(): Promise<void> {
+    if (!this.storage) return;
+    const obj: Record<string, number> = {};
+    for (const [k, v] of this.deviceAnnouncementSeen) obj[k] = v;
+    await writeDeviceAnnouncementSeen(this.storage, obj);
   }
 
   /**
@@ -3620,6 +3635,13 @@ export class MeshWhisper {
         this.permissionManager.blockPeer(peerId);
       }
     }
+
+    // Device-announcement replay-protection timestamps. Without
+    // rehydrating this, a fresh boot would have an empty Map and a
+    // replayed revocation would be accepted — silently undoing a
+    // post-snapshot re-add.
+    const seen = await readDeviceAnnouncementSeen(this.storage);
+    for (const [k, v] of Object.entries(seen)) this.deviceAnnouncementSeen.set(k, v);
   }
 
   private async persistContacts(): Promise<void> {

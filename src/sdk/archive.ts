@@ -363,6 +363,33 @@ export async function writeRevivals(
   await storage.set(REVIVAL_KEY, JSON.stringify(revivals));
 }
 
+// Per-(account, device) LWW replay-protection timestamps for
+// `device_added` / `device_revoked` announcements. Without persistence,
+// a fresh device boot has no historical protection: a captured
+// revocation could be replayed after a re-add to silently undo it.
+// Key shape: `${accountX25519}:${deviceX25519}` (matches the SDK's
+// in-memory Map). Values are unix ms of the latest applied eventAt.
+const DEVICE_ANNOUNCEMENT_SEEN_KEY = 'device_announcement_seen';
+
+export async function readDeviceAnnouncementSeen(
+  storage: StorageBackend,
+): Promise<Record<string, number>> {
+  const raw = await storage.get(DEVICE_ANNOUNCEMENT_SEEN_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+export async function writeDeviceAnnouncementSeen(
+  storage: StorageBackend,
+  seen: Record<string, number>,
+): Promise<void> {
+  await storage.set(DEVICE_ANNOUNCEMENT_SEEN_KEY, JSON.stringify(seen));
+}
+
 export async function addTombstone(storage: StorageBackend, peerId: string): Promise<void> {
   const cur = await readTombstones(storage);
   cur[peerId] = Date.now();

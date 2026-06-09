@@ -212,7 +212,7 @@ The protocol's signed wire format and trust binding:
 
 ### What's NOT in QR pairing v1
 
-- **Persistent LWW timestamps for device announcements** — the replay-protection map is in-memory, so a fresh device boot has no historical protection. A small follow-up.
+- ~~Persistent LWW timestamps for device announcements~~ — **shipped**. The replay-protection map (`deviceAnnouncementSeen`) is now persisted to `device_announcement_seen` in storage on every apply, and rehydrated on `loadPersistedState`. A fresh device boot inherits the same historical protection as the prior session.
 - **Per-device signing certificates** — only the primary (the device whose `peerId === accountKey`) can broadcast announcements today. Secondary devices can't independently revoke. Phase B v2.
 - **A reference Prudence UI** — Prudence uses Option 1 (same identity everywhere via password-derived keys) and isn't a good demonstration of Option 3. See [`examples/linked-devices/`](../examples/linked-devices/) for a focused tiny app.
 
