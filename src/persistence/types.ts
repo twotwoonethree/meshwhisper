@@ -50,6 +50,14 @@ export interface StoredMessage {
    * source. Round-trips through the envelope on send.
    */
   replyTo?: { messageId: string; snippetText?: string };
+  /**
+   * Set when this message was sent via `MeshWhisper.forwardMessage` or
+   * with `SendOptions.forwardedFrom`. Holds the peerId of the message's
+   * original sender (NOT the forwarder — that's `senderId`). UIs
+   * typically render a small "Forwarded" label with the original
+   * sender's display name.
+   */
+  forwardedFrom?: string;
 }
 
 export interface Conversation {

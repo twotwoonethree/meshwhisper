@@ -211,6 +211,9 @@ export interface Message {
   /** Set when the sender used `SendOptions.replyTo` — the original message this
    *  is replying to, plus an optional preview snippet for UI rendering. */
   replyTo?: { messageId: string; snippetText?: string };
+  /** Set when the message was sent via `MeshWhisper.forwardMessage` — peerId
+   *  of the message's original sender (NOT the forwarder, which is `senderId`). */
+  forwardedFrom?: string;
 }
 
 // --- Group Types ---

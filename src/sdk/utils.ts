@@ -279,6 +279,10 @@ export interface MessageEnvelope {
    *  message ID + an optional preview snippet so the receiver can render
    *  the quote without looking up the source. */
   replyTo?: { messageId: string; snippetText?: string };
+  /** Set when the sender used SendOptions.forwardedFrom or
+   *  MeshWhisper.forwardMessage. The peerId of the message's original
+   *  sender (NOT the forwarder — that's `senderId`). */
+  forwardedFrom?: string;
 }
 
 // ============================================================

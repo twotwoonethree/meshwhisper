@@ -205,6 +205,16 @@ export interface SendOptions {
    * `StoredMessage.replyTo`.
    */
   replyTo?: { messageId: string; snippetText?: string };
+  /**
+   * Mark this message as forwarded from another peer. The receiver
+   * stores it under `StoredMessage.forwardedFrom` and UIs typically
+   * render a small "Forwarded" label with the original sender. The
+   * primitive is purely cosmetic — the SDK doesn't verify the
+   * forwardedFrom claim cryptographically, since the forwarder is the
+   * party with the plaintext anyway. App-level provenance (chain of
+   * custody, signed forwards) is layered on top if needed.
+   */
+  forwardedFrom?: string;
 }
 
 export interface MediaSendOptions extends SendOptions {
@@ -910,6 +920,7 @@ export class MeshWhisper {
         status: 'sent',
         expiresAt,
         ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
+        ...(options?.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       });
     }
   }
@@ -953,6 +964,7 @@ export class MeshWhisper {
       urgency: options?.urgency ?? 'normal',
       expiry: options?.expiry,
       ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
+      ...(options?.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
     };
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));
@@ -1788,6 +1800,52 @@ export class MeshWhisper {
     emoji: string,
   ): Promise<'added' | 'removed' | 'noop'> {
     return MeshWhisper.instance.toggleReactionInstance(conversationId, messageId, emoji);
+  }
+
+  /**
+   * Forward an existing message to another recipient. Looks up the
+   * message in `fromConversationId`, sends its payload to
+   * `toRecipientId` with `forwardedFrom` set to the original sender's
+   * peerId. The receiver sees the message as if from you (`senderId`
+   * is the local peer) but with `forwardedFrom` indicating the
+   * original author — UIs typically render a small "Forwarded" label
+   * with that peer's display name.
+   *
+   * No-op + returns null if the source message can't be found locally.
+   * The forwarder is the party with plaintext, so the SDK doesn't
+   * verify the forwardedFrom claim cryptographically — app-level
+   * provenance (signed forwards, chain of custody) is layered on top
+   * if needed.
+   */
+  static async forwardMessage(
+    fromConversationId: string,
+    messageId: string,
+    toRecipientId: string,
+    options?: SendOptions,
+  ): Promise<string | null> {
+    return MeshWhisper.instance.forwardMessageInstance(fromConversationId, messageId, toRecipientId, options);
+  }
+
+  async forwardMessageInstance(
+    fromConversationId: string,
+    messageId: string,
+    toRecipientId: string,
+    options?: SendOptions,
+  ): Promise<string | null> {
+    this.assertRunning();
+    const existing = await this.messageHandler.getMessages(fromConversationId);
+    const source = existing.find((m) => m.id === messageId);
+    if (!source) return null;
+    // Preserve the forwarding chain: if the source was itself forwarded,
+    // carry the original author forward rather than the most recent
+    // forwarder. Matches the WhatsApp/Signal convention.
+    const originalAuthor = source.forwardedFrom ?? source.senderId;
+    await this.sendMessage(
+      toRecipientId,
+      new Uint8Array(source.payload),
+      { ...(options ?? {}), forwardedFrom: originalAuthor },
+    );
+    return originalAuthor;
   }
 
   /**

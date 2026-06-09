@@ -128,6 +128,25 @@ await MeshWhisper.send(
 );
 ```
 
+### `MeshWhisper.forwardMessage(fromConversationId, messageId, toRecipientId, options?)`
+
+Forward an existing message to another recipient. Looks up the message in `fromConversationId`, sends its payload to `toRecipientId` with `forwardedFrom` set to the original sender's peerId. The receiver sees the message as if from you (`senderId` is your local peer) but with `forwardedFrom` indicating the original author — UIs typically render a small "Forwarded" label.
+
+```ts
+const originalAuthor: string | null = await MeshWhisper.forwardMessage(
+  fromConversationId: string,
+  messageId: string,
+  toRecipientId: string,
+  options?: SendOptions,
+)
+```
+
+Returns the original author's peerId on success, or `null` if the source message can't be found locally.
+
+**Chain preservation:** if the source message was itself forwarded, the new copy's `forwardedFrom` points at the ORIGINAL author, not the prior forwarder. Matches WhatsApp/Signal conventions and prevents misleading attribution.
+
+**Provenance:** the SDK does NOT verify the `forwardedFrom` claim cryptographically — the forwarder has the plaintext anyway, so anything stronger has to come from app-level signing. If you need cryptographic chain-of-custody, build a signing layer on top.
+
 ### `MeshWhisper.sendTypingIndicator(peerId, isTyping)`
 
 Send an ephemeral typing indicator to a peer. Not stored, not reliable.
