@@ -91,6 +91,19 @@ interface MeshWhisperConfig {
 
 Send an encrypted message. Initiates X3DH key exchange automatically on first contact.
 
+`SendOptions.replyTo` lets a send be marked as a quoted reply to an earlier message:
+
+```ts
+await MeshWhisper.send(peerId, encoder.encode('thanks!'), {
+  replyTo: {
+    messageId: 'original-message-id',
+    snippetText: 'Did you see the doc I sent?',   // preview the receiver can render
+  },
+});
+```
+
+The `replyTo` is carried in the envelope and persisted on `StoredMessage.replyTo` on both sender and receiver. UIs render the snippet inline (typically as a small grey block above the reply body) and use `messageId` to scroll to the original on tap. The original doesn't need to still be visible — the snippet is the cached preview.
+
 ```ts
 await MeshWhisper.send(
   recipientId: string,      // peer ID (hex Ed25519 public key)

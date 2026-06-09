@@ -225,6 +225,7 @@ export class MessageHandler {
         timestamp: envelope.timestamp,
         urgency: envelope.urgency as Message['urgency'],
         expiry: envelope.expiry,
+        ...(envelope.replyTo ? { replyTo: envelope.replyTo } : {}),
       };
 
       this.saveMessage({
@@ -237,6 +238,7 @@ export class MessageHandler {
         direction: 'inbound',
         status: 'delivered',
         expiresAt,
+        ...(envelope.replyTo ? { replyTo: envelope.replyTo } : {}),
       }).catch(() => {});
 
       if (this.onMessage) {

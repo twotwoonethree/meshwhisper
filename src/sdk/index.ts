@@ -195,6 +195,16 @@ export function verifyDeviceAnnouncementSignature(
 export interface SendOptions {
   urgency?: MessageUrgency;
   expiry?: number;
+  /**
+   * Mark this message as a reply to an earlier one. `messageId` is the
+   * ID of the message being replied to (must be in the same
+   * conversation); `snippetText` is a short preview the receiver can
+   * render above the reply without having to look up the original
+   * (typically the first ~80 chars of the original text). Both fields
+   * round-trip through the envelope and are persisted on
+   * `StoredMessage.replyTo`.
+   */
+  replyTo?: { messageId: string; snippetText?: string };
 }
 
 export interface MediaSendOptions extends SendOptions {
@@ -899,6 +909,7 @@ export class MeshWhisper {
         direction: 'outbound',
         status: 'sent',
         expiresAt,
+        ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
       });
     }
   }
@@ -941,6 +952,7 @@ export class MeshWhisper {
       timestamp,
       urgency: options?.urgency ?? 'normal',
       expiry: options?.expiry,
+      ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
     };
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(envelope));

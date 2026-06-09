@@ -275,6 +275,10 @@ export interface MessageEnvelope {
     previousChainLength: number;
     messageNumber: number;
   };
+  /** Set when the sender used SendOptions.replyTo. Carries the original
+   *  message ID + an optional preview snippet so the receiver can render
+   *  the quote without looking up the source. */
+  replyTo?: { messageId: string; snippetText?: string };
 }
 
 // ============================================================

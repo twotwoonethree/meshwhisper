@@ -42,6 +42,14 @@ export interface StoredMessage {
    * UIs should treat an absent emoji and an empty array identically.
    */
   reactions?: Record<string, string[]>;
+  /**
+   * Set when this message was sent as a reply to an earlier one (via
+   * `SendOptions.replyTo`). `messageId` references the original in the
+   * same conversation; `snippetText` is a short preview the sender
+   * included so UIs can render the quote inline without looking up the
+   * source. Round-trips through the envelope on send.
+   */
+  replyTo?: { messageId: string; snippetText?: string };
 }
 
 export interface Conversation {

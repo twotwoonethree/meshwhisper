@@ -208,6 +208,9 @@ export interface Message {
   groupId?: string;
   /** The original sender within the group (may differ from senderId when relayed). */
   groupSenderId?: string;
+  /** Set when the sender used `SendOptions.replyTo` — the original message this
+   *  is replying to, plus an optional preview snippet for UI rendering. */
+  replyTo?: { messageId: string; snippetText?: string };
 }
 
 // --- Group Types ---
