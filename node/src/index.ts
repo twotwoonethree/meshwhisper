@@ -33,9 +33,16 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as nodeCrypto from 'node:crypto';
+import * as path from 'node:path';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import Database from 'better-sqlite3';
+import {
+  FederationManager,
+  FEDERATION_SUBPROTOCOL,
+  loadOrCreateFederationKey,
+  loadPeersConfig,
+} from './federation.js';
 
 // ============================================================
 // Configuration
@@ -889,6 +896,12 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
     if (pushReg) {
       notifyPush(destHash, pushReg);
       bumpActivity('wake');
+    } else if (federation) {
+      // No connected client and no push registration — this destHash may
+      // be homed on a federated peer. Forward best-effort. The local
+      // store (above) is kept as a harmless safety net; it expires per
+      // BLOB_TTL like everything else.
+      federation.forwardFromLocal(data);
     }
   }
 }
@@ -1038,6 +1051,8 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       mediaEntries: (stmts.countMedia.get() as { cnt: number }).cnt,
       opkEntries: (stmts.countOpks.get() as { cnt: number }).cnt,
       archiveEntries: (stmts.countArchives.get() as { cnt: number }).cnt,
+      federationPeersConfigured: federation?.stats.peersConfigured ?? 0,
+      federationPeersConnected: federation?.connectedPeerCount() ?? 0,
     });
     return;
   }
@@ -1092,6 +1107,28 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       'counter', 'bucket', metrics.rateLimitRejections);
     emit('meshwhisper_websocket_connections_total', 'Total WebSocket connections accepted since startup',
       'counter', metrics.websocketConnectionsTotal);
+
+    // Federation (zeroes when federation is dormant)
+    emit('meshwhisper_federation_peers_configured', 'Federation peers in the allow-list', 'gauge',
+      federation?.stats.peersConfigured ?? 0);
+    emit('meshwhisper_federation_peers_connected', 'Federation peers with an established handshake', 'gauge',
+      federation?.connectedPeerCount() ?? 0);
+    emit('meshwhisper_federation_forwards_sent_total', 'PacketForward frames sent to peers', 'counter',
+      federation?.stats.forwardsSentTotal ?? 0);
+    emit('meshwhisper_federation_forwards_received_total', 'PacketForward frames received from peers', 'counter',
+      federation?.stats.forwardsReceivedTotal ?? 0);
+    emit('meshwhisper_federation_delivered_locally_total', 'Federation packets delivered to a connected local client', 'counter',
+      federation?.stats.deliveredLocallyTotal ?? 0);
+    emit('meshwhisper_federation_stored_locally_total', 'Federation packets stored for a local offline device', 'counter',
+      federation?.stats.storedLocallyTotal ?? 0);
+    emit('meshwhisper_federation_forwarded_onward_total', 'Federation packets forwarded to further peers', 'counter',
+      federation?.stats.forwardedOnwardTotal ?? 0);
+    emit('meshwhisper_federation_drops_duplicate_total', 'Federation packets dropped by the packet-id cache', 'counter',
+      federation?.stats.dropsDuplicateTotal ?? 0);
+    emit('meshwhisper_federation_drops_ttl_total', 'Federation packets dropped by hop-count exhaustion', 'counter',
+      federation?.stats.dropsTtlTotal ?? 0);
+    emit('meshwhisper_federation_handshake_failures_total', 'Failed federation handshakes', 'counter',
+      federation?.stats.handshakeFailuresTotal ?? 0);
 
     const body = lines.join('\n') + '\n';
     res.writeHead(200, {
@@ -1542,6 +1579,57 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
+// ============================================================
+// Federation (docs/federation.md v1)
+//
+// Dormant unless a peers file with at least one entry exists. The
+// classifyLocal callback answers "can this packet be handled here?":
+//   - a connected client holds the destHash       → deliver  ('delivered')
+//   - a push registration exists for the destHash → store+wake ('stored';
+//     the device is homed here, currently offline)
+//   - neither                                     → 'unknown' (forward onward)
+// ============================================================
+
+const FEDERATION_KEY_FILE = process.env.FEDERATION_KEY_FILE
+  ?? path.join(path.dirname(DB_PATH), 'federation-key.json');
+const FEDERATION_PEERS_FILE = process.env.FEDERATION_PEERS_FILE
+  ?? path.join(path.dirname(DB_PATH), 'federation-peers.json');
+
+const federationPeersConfig = loadPeersConfig(FEDERATION_PEERS_FILE);
+const federation: FederationManager | null = federationPeersConfig.length > 0
+  ? new FederationManager({
+      key: loadOrCreateFederationKey(FEDERATION_KEY_FILE),
+      peers: federationPeersConfig,
+      classifyLocal: (packet: Uint8Array) => {
+        const destHash = readDestHash(packet);
+        if (!destHash) return 'delivered'; // malformed — swallow, don't propagate
+        const recipient = clientsByHash.get(destHash);
+        if (recipient && recipient.readyState === WebSocket.OPEN) {
+          // Same store-then-deliver race protection as the client path.
+          const blobId = storeBlob(destHash, packet);
+          recipient.send(packet, { binary: true }, (err) => {
+            if (!err) stmts.deleteBlob.run(blobId);
+          });
+          bumpActivity('fwd');
+          return 'delivered';
+        }
+        const pushReg = getPushRegistration(destHash);
+        if (pushReg) {
+          storeBlob(destHash, packet);
+          notifyPush(destHash, pushReg);
+          bumpActivity('wake');
+          return 'stored';
+        }
+        return 'unknown';
+      },
+    })
+  : null;
+
+if (federation) {
+  federation.start();
+  console.log(`[federation] enabled with ${federationPeersConfig.length} configured peer(s)`);
+}
+
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (ws: WebSocket) => {
@@ -1550,6 +1638,14 @@ wss.on('connection', (ws: WebSocket) => {
 });
 
 httpServer.on('upgrade', (req: IncomingMessage, socket, head) => {
+  // Federation peers negotiate the meshwhisper-federation.v1 subprotocol;
+  // everything else is a regular client-relay connection.
+  const offered = (req.headers['sec-websocket-protocol'] ?? '')
+    .split(',').map((s) => s.trim());
+  if (federation && offered.includes(FEDERATION_SUBPROTOCOL)) {
+    federation.handleUpgrade(req, socket, head);
+    return;
+  }
   wss.handleUpgrade(req, socket as any, head, (ws) => {
     wss.emit('connection', ws, req);
   });

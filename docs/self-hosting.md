@@ -224,6 +224,47 @@ At least one push provider must be configured for offline delivery. You can conf
 
 ---
 
+## Federation (peering with other relay operators)
+
+Two or more `meshwhisper-node` instances can peer so packets route across operators — the protocol is specified in [federation.md](federation.md). Federation is **opt-in and dormant by default**: a node with no peers file behaves exactly as before.
+
+### Setup
+
+1. **Get your federation pubkey.** On first start with a peers file present, the node auto-generates an Ed25519 federation keypair at `federation-key.json` next to your database (override with `FEDERATION_KEY_FILE`). The `publicKeyHex` field inside is what you share with the other operator — treat it like an SSH public key, share over any authenticated channel.
+
+2. **Exchange pubkeys with the other operator out-of-band**, then each side writes a peers file (`federation-peers.json` next to the database, or `FEDERATION_PEERS_FILE`):
+
+   ```json
+   {
+     "peers": [
+       { "pubkey": "<their-64-char-hex>", "url": "wss://their-relay.example.org" }
+     ]
+   }
+   ```
+
+   If `url` is present your node initiates the connection; omit it to only accept inbound from that pubkey. Either side may dial — the handshake is symmetric. **Both sides must allow-list each other** before the connection establishes.
+
+3. **Restart the node.** Logs show `[federation] enabled with N configured peer(s)` and `[federation] peer xxxxxxxxxxxx… connected` once the handshake completes.
+
+4. **Verify**: `federationPeersConnected` in `/health`, or the `meshwhisper_federation_*` series in `/metrics`.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `FEDERATION_KEY_FILE` | `<db-dir>/federation-key.json` | Ed25519 keypair; auto-generated (mode 0600) if missing |
+| `FEDERATION_PEERS_FILE` | `<db-dir>/federation-peers.json` | Allow-list of peers. Missing/empty = federation dormant |
+| `FEDERATION_MAX_HOPS` | `3` | Hop-count cap on forwarded packets |
+
+### Behaviour notes
+
+- Federation shares the client-relay port — peers connect with the `meshwhisper-federation.v1` WebSocket subprotocol; no extra port to open.
+- A packet from one of your clients whose destination is unknown locally (no connected client, no push registration) is forwarded best-effort to every peer. Packets arriving FROM peers are delivered to your connected clients, stored + push-woken for your registered-but-offline devices, or forwarded onward (TTL-limited, loop-protected) — never stored for devices that aren't yours.
+- If a federation link is down at the moment of forwarding, that copy is dropped — there's no cross-node retry queue in v1. The sender's own relay still stores everything per its normal TTL.
+- Docker note: persist the federation key by keeping it in the mounted data volume (the default location does this automatically).
+
+---
+
 ## Backup and recovery
 
 The relay's SQLite database (`/data/meshwhisper.db` inside the container, by default backed by a Docker named volume) holds all server-side state that isn't reproducible from client devices: store-and-forward blob queue, push registrations, prekey directory, OPK pool, archive blobs, namespace policy. Losing it means users miss queued messages, push wake stops working until devices reconnect, and freshly-installed devices can't restore from archive until their owner re-pushes one. Worth backing up.

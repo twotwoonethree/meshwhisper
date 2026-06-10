@@ -1,6 +1,6 @@
 # Federation
 
-**Status:** v1 draft, 2026-06-08. Implementation lands when a second relay operator commits to peering. Per [direction.md](direction.md)'s ordering, this specification is the precondition for that work, not a description of it.
+**Status:** v1 — **implemented** (2026-06-10, `node/src/federation.ts`). The reference implementation ships in `meshwhisper-node` and is verified by a two-relay integration suite (`tests/federation.test.ts`): mutual handshake, cross-relay packet delivery, loop prevention, unknown-peer rejection. Federation is dormant unless an operator writes a peers file — see [self-hosting.md](self-hosting.md#federation-peering-with-other-relay-operators) for the operator guide. This document remains the authoritative wire-format specification.
 
 Federation is the node-to-node forwarding protocol that turns isolated `meshwhisper-node` deployments into a single mesh. Without it, every node is an island; every app that deploys a node operates a private silo, and the whitepaper's central claim — that privacy strengthens with adoption density because no single operator sees both ends of a conversation — is aspirational rather than operational. Federation is the piece that makes the claim true.
 
