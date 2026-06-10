@@ -1126,7 +1126,7 @@ export class MeshWhisper {
     const nodeConfig = this.config.node ?? 'mesh';
     const nodeUrl = Array.isArray(nodeConfig) ? nodeConfig[0] : nodeConfig;
     const httpUrl = nodeUrl === 'mesh'
-      ? 'https://relay.meshwhisper.io/media'
+      ? 'https://relay.meshwhisper.org/media'
       : nodeUrl!.replace(/^wss?:\/\//, (m) => m === 'wss://' ? 'https://' : 'http://') + '/media';
 
     const response = await fetch(httpUrl, {

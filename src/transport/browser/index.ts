@@ -16,7 +16,7 @@ import {
 
 /** Foundation-hosted relay nodes. Used when node config is "mesh". */
 export const FOUNDATION_RELAY_NODES = [
-  'wss://relay.meshwhisper.io',
+  'wss://relay.meshwhisper.org',
 ];
 
 const RECONNECT_BASE_MS = 1_000;

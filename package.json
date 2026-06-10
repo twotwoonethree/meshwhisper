@@ -31,12 +31,8 @@
       "default": "./dist/react-native/index.js"
     }
   },
-  "bin": {
-    "meshwhisper": "./bin/init.ts"
-  },
   "files": [
     "dist",
-    "bin",
     "src"
   ],
   "publishConfig": {

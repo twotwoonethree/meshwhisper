@@ -35,7 +35,7 @@ This determines what we work on, in this order:
 
 The single biggest lever on whether the mesh materialises is the friction of bringing a new node online. Concretely:
 
-- A `meshwhisper init` CLI that takes a developer from `npm install` to "I have a running node and an SDK skeleton" in under 30 minutes
+- ~~A `meshwhisper init` CLI that takes a developer from `npm install` to "I have a running node and an SDK skeleton" in under 30 minutes~~ — shipped: `npx @meshwhisper/cli init` scaffolds the node deployment (compose + standalone Dockerfiles + VAPID keys + federation bootstrap) and a working SDK skeleton; `doctor` and `vapid` round it out
 - A self-hosting story (Docker image, environment variables, observability, TLS, push setup) that a competent backend developer can run without a DevOps team
 - A library of reference codebases (a few exist; more shapes worth covering)
 - Documentation that explains what's in the box and what isn't, with no surprises

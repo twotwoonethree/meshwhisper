@@ -27,25 +27,22 @@ npm init -y
 npx @meshwhisper/cli init
 ```
 
-The CLI asks two questions:
+The CLI asks a few questions:
 
-1. **App bundle ID** — reverse-domain format, e.g. `com.example.mychatapp`
-2. **Node** — type `self-hosted`, then enter `wss://relay.myapp.com` (your subdomain)
+1. **App namespace / bundle ID** — reverse-domain format, e.g. `com.example.mychatapp`
+2. **Node** — choose `2` (self-hosted), then enter `wss://relay.myapp.com` (your subdomain).
+   (Choosing `1` connects you to the Foundation relay with zero setup — fine for development; come back to self-hosting when you go to production.)
+3. **Web Push** — say yes; the CLI generates your VAPID keys for you
+4. **Join the relay mesh** — say yes to participate in [open federation](federation.md); your node will forward packets for other relays and they for you
+5. **App platform** — Browser/PWA or Node.js
 
-It outputs three things:
+It writes everything it needs:
 
-**A `.env` block** — copy this into a `.env` file in your project:
-```bash
-MESHWHISPER_DEVELOPER_KEY=<generated>
-MESHWHISPER_SALT=<generated>
-MESHWHISPER_NODE_URL=wss://relay.myapp.com
-```
+- **`meshwhisper-node/`** — your complete server deployment: `docker-compose.yml`, standalone Dockerfiles (they install the published `@meshwhisper/node` package — no repo checkout needed), a `.env` with your generated VAPID keys and `BASE_URL`, and `federation-peers.json` bootstrapped against the Foundation relay
+- **`src/meshwhisper.ts`** (browser) or **`meshwhisper-chat.mts`** (Node.js) — a working SDK skeleton with your namespace and node URL already threaded in
+- **`.gitignore`** entries for the `.env` and local identity stores
 
-**An SDK snippet** — the init code for your app (you'll use this in Step 4).
-
-**A `docker-compose.yml`** — your server configuration (you'll use this in Step 2).
-
-> Do not commit `.env` to git.
+> `meshwhisper-node/.env` contains your VAPID private key. The CLI gitignores it for you — keep it that way.
 
 ---
 
@@ -53,46 +50,13 @@ MESHWHISPER_NODE_URL=wss://relay.myapp.com
 
 Your Node is your messaging backend. It runs on your server, serves only your app, and cannot read any messages that pass through it.
 
-### 2a — Generate VAPID keys
+### 2a — Copy and review
 
-VAPID keys allow your Node to send Web Push notifications to browsers. Generate them once and keep them:
-
-```bash
-npx web-push generate-vapid-keys
-```
-
-Save both keys. You will need:
-- The **private key** on your server (secret)
-- The **public key** in your server config AND in your PWA code
-
-### 2b — Configure your server
-
-Copy `docker-compose.yml` to your server. Create a `.env` file alongside it:
-
-```bash
-VAPID_PUBLIC_KEY=your_public_key_here
-VAPID_PRIVATE_KEY=your_private_key_here
-VAPID_SUBJECT=mailto:you@example.com
-```
-
-Open `docker-compose.yml` and confirm `BASE_URL` matches your domain exactly:
-
-```yaml
-services:
-  node:
-    environment:
-      BASE_URL: "https://relay.myapp.com"    # ← no trailing slash
-      PUSH_WEBHOOK_URL: "http://push:4000/notify"
-  push:
-    environment:
-      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY}"
-      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY}"
-      VAPID_SUBJECT: "${VAPID_SUBJECT}"
-```
+Copy the `meshwhisper-node/` directory to your server. Open `.env` and confirm `BASE_URL` matches your domain exactly (no trailing slash) — the CLI derived it from your `wss://` URL, so it usually already does. The VAPID keys are already in there; if you ever need fresh ones: `npx @meshwhisper/cli vapid`.
 
 > `BASE_URL` is required. Without it, media download URLs will use the internal container address and be unreachable from the internet.
 
-### 2c — Set up your reverse proxy
+### 2b — Set up your reverse proxy
 
 Your Node listens on port 8080. Your reverse proxy handles TLS.
 
@@ -110,7 +74,7 @@ sudo systemctl reload caddy
 
 **nginx** — see [docs/self-hosting.md](self-hosting.md) for the full config block.
 
-### 2d — Start it
+### 2c — Start it
 
 ```bash
 docker compose up -d
@@ -150,7 +114,7 @@ The service worker must be served from the **root** of your domain (`https://mya
 
 ## Step 4 — Add messaging to your app
 
-Create `src/messaging.ts`:
+The CLI already generated a starter module at `src/meshwhisper.ts` with your namespace and node URL threaded in — wire that into your app and paste in your VAPID public key. The expanded version below shows the full surface (media, history, delivery status) if you want to build it out by hand:
 
 ```ts
 import { MeshWhisper } from '@meshwhisper/sdk';

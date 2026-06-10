@@ -1,13 +1,17 @@
 {
   "name": "@meshwhisper/cli",
-  "version": "0.1.0",
-  "description": "MeshWhisper CLI — developer tooling for MeshWhisper projects",
+  "version": "0.2.0",
+  "description": "MeshWhisper CLI \u2014 developer tooling for MeshWhisper projects",
   "type": "module",
   "bin": {
     "meshwhisper": "dist/index.js"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prepublishOnly": "npm run build",
     "build": "tsc",
