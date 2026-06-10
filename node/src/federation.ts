@@ -39,6 +39,11 @@ const PACKET_ID_CACHE_SIZE = 1024;
 const PACKET_ID_TTL_MS = 60_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000];
 
+/** Admission policy. 'open' accepts any peer that completes the handshake
+ *  (Tor-middle-node posture — the project's recommended setting once a
+ *  mesh exists); 'allowlist' requires the pubkey to be pre-approved. */
+export type FederationMode = 'allowlist' | 'open';
+
 // DER wrappers so node:crypto can ingest raw Ed25519 key bytes.
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
@@ -101,6 +106,22 @@ export function loadPeersConfig(peersPath: string): PeerConfig[] {
   } catch {
     console.error(`[federation] malformed peers file at ${peersPath} — federation dormant`);
     return [];
+  }
+}
+
+/**
+ * Load the reactive blocklist: { "blocked": ["<pubkeyhex>", ...] }.
+ * Checked at handshake time — a blocked pubkey is rejected regardless of
+ * mode. Evicting an already-connected peer requires a restart in v1.
+ */
+export function loadBlocklist(blocklistPath: string): Set<string> {
+  if (!fs.existsSync(blocklistPath)) return new Set();
+  try {
+    const raw = JSON.parse(fs.readFileSync(blocklistPath, 'utf8')) as { blocked?: string[] };
+    return new Set((raw.blocked ?? []).filter((p) => /^[0-9a-f]{64}$/.test(p)));
+  } catch {
+    console.error(`[federation] malformed blocklist at ${blocklistPath} — ignoring`);
+    return new Set();
   }
 }
 
@@ -226,6 +247,12 @@ interface PeerState {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   lastFrameAt: number;
+  /** True for peers admitted dynamically in open mode (not in the config
+   *  file). Removed from the peer map on disconnect so the open-mode cap
+   *  frees up; we hold no reconnect responsibility for them. */
+  dynamic: boolean;
+  /** Per-peer PacketForward rate limiting (sliding 60s window). */
+  frameWindow: { count: number; windowStart: number };
 }
 
 export interface FederationStats {
@@ -238,14 +265,20 @@ export interface FederationStats {
   forwardedOnwardTotal: number;
   dropsDuplicateTotal: number;
   dropsTtlTotal: number;
+  dropsRateLimitedTotal: number;
   handshakeFailuresTotal: number;
+  handshakeRejectionsBlockedTotal: number;
 }
 
 // ---- Manager ----
 
 export class FederationManager {
   private readonly key: FederationKey;
+  private readonly mode: FederationMode;
   private readonly allowedPubkeys: Set<string>;
+  private readonly blockedPubkeys: Set<string>;
+  private readonly maxPeers: number;
+  private readonly rateLimitPerMin: number;
   private readonly peers: Map<string, PeerState> = new Map(); // pubkeyHex → state
   private readonly cache = new PacketIdCache();
   private readonly classifyLocal: (packet: Uint8Array) => LocalOutcome;
@@ -262,27 +295,34 @@ export class FederationManager {
     forwardedOnwardTotal: 0,
     dropsDuplicateTotal: 0,
     dropsTtlTotal: 0,
+    dropsRateLimitedTotal: 0,
     handshakeFailuresTotal: 0,
+    handshakeRejectionsBlockedTotal: 0,
   };
 
   constructor(opts: {
     key: FederationKey;
     peers: PeerConfig[];
     classifyLocal: (packet: Uint8Array) => LocalOutcome;
+    /** Admission policy. Default 'allowlist' (v1 behavior). */
+    mode?: FederationMode;
+    /** Pubkeys rejected at handshake regardless of mode. */
+    blockedPubkeys?: Set<string>;
+    /** Open-mode cap on total simultaneously-tracked peers (configured +
+     *  dynamically admitted). Handshakes beyond the cap are rejected. */
+    maxPeers?: number;
+    /** Per-peer PacketForward frames accepted per minute; excess dropped. */
+    rateLimitPerMin?: number;
   }) {
     this.key = opts.key;
     this.classifyLocal = opts.classifyLocal;
+    this.mode = opts.mode ?? 'allowlist';
+    this.blockedPubkeys = opts.blockedPubkeys ?? new Set();
+    this.maxPeers = opts.maxPeers ?? 64;
+    this.rateLimitPerMin = opts.rateLimitPerMin ?? 6000; // ≈100 frames/sec
     this.allowedPubkeys = new Set(opts.peers.map((p) => p.pubkey));
     for (const p of opts.peers) {
-      this.peers.set(p.pubkey, {
-        config: p,
-        ws: null,
-        established: false,
-        reconnectAttempt: 0,
-        reconnectTimer: null,
-        heartbeatTimer: null,
-        lastFrameAt: 0,
-      });
+      this.peers.set(p.pubkey, this.newPeerState(p, false));
     }
     this.stats.peersConfigured = opts.peers.length;
     this.wss = new WebSocketServer({
@@ -290,6 +330,20 @@ export class FederationManager {
       handleProtocols: (protocols) =>
         protocols.has(FEDERATION_SUBPROTOCOL) ? FEDERATION_SUBPROTOCOL : false,
     });
+  }
+
+  private newPeerState(config: PeerConfig, dynamic: boolean): PeerState {
+    return {
+      config,
+      ws: null,
+      established: false,
+      reconnectAttempt: 0,
+      reconnectTimer: null,
+      heartbeatTimer: null,
+      lastFrameAt: 0,
+      dynamic,
+      frameWindow: { count: 0, windowStart: 0 },
+    };
   }
 
   /** Dial every peer that has a url. Inbound peers connect to us instead. */
@@ -389,6 +443,12 @@ export class FederationManager {
       clearInterval(state.heartbeatTimer);
       state.heartbeatTimer = null;
     }
+    // Dynamically-admitted peers leave the map entirely on disconnect so
+    // the open-mode cap frees up. We hold no reconnect duty for them —
+    // they dial us again whenever they want back in.
+    if (state.dynamic) {
+      this.peers.delete(state.config.pubkey);
+    }
     this.stats.peersConnected = this.connectedPeerCount();
   }
 
@@ -461,7 +521,16 @@ export class FederationManager {
     };
 
     if (clientHello.version !== WIRE_VERSION) reject();
-    if (!this.allowedPubkeys.has(clientHello.pubkeyHex)) reject();
+    if (this.blockedPubkeys.has(clientHello.pubkeyHex)) {
+      this.stats.handshakeRejectionsBlockedTotal++;
+      reject();
+    }
+    if (this.mode === 'allowlist' && !this.allowedPubkeys.has(clientHello.pubkeyHex)) reject();
+    if (
+      this.mode === 'open' &&
+      !this.peers.has(clientHello.pubkeyHex) &&
+      this.peers.size >= this.maxPeers
+    ) reject();
 
     const myNonce = nodeCrypto.randomBytes(16);
     ws.send(encodeHello({
@@ -482,8 +551,13 @@ export class FederationManager {
     }
     ws.send(nodeCrypto.sign(null, canonical, this.key.privateKey), { binary: true });
 
-    const state = this.peers.get(clientHello.pubkeyHex);
-    if (!state) throw new Error('peer state missing'); // unreachable given allow-list check
+    let state = this.peers.get(clientHello.pubkeyHex);
+    if (!state) {
+      // Open mode: dynamically admit. (Unreachable under allowlist —
+      // the admission check above would have rejected.)
+      state = this.newPeerState({ pubkey: clientHello.pubkeyHex }, true);
+      this.peers.set(clientHello.pubkeyHex, state);
+    }
     // If a stale connection exists (e.g. both sides dialed), prefer the new one.
     if (state.ws && state.ws !== ws) { try { state.ws.close(); } catch { /* ignore */ } }
     this.establishPeer(state, ws);
@@ -529,6 +603,19 @@ export class FederationManager {
 
     if (frame.frameType !== FRAME_PACKET_FORWARD) return; // unknown type — ignore (forward-compat)
     if (frame.body.length < 17 + 31) return; // packetId + forwardCount + minimum packet header
+
+    // Per-peer rate limiting — the abuse boundary in open mode. Sliding
+    // 60s window; excess frames are silently dropped (not a disconnect:
+    // legitimate bursts shouldn't sever the link).
+    const now = Date.now();
+    if (now - fromState.frameWindow.windowStart >= 60_000) {
+      fromState.frameWindow = { count: 0, windowStart: now };
+    }
+    fromState.frameWindow.count++;
+    if (fromState.frameWindow.count > this.rateLimitPerMin) {
+      this.stats.dropsRateLimitedTotal++;
+      return;
+    }
 
     const packetIdHex = frame.body.subarray(0, 16).toString('hex');
     const forwardCount = frame.body.readUInt8(16);

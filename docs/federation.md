@@ -1,6 +1,13 @@
 # Federation
 
-**Status:** v1 — **implemented** (2026-06-10, `node/src/federation.ts`). The reference implementation ships in `meshwhisper-node` and is verified by a two-relay integration suite (`tests/federation.test.ts`): mutual handshake, cross-relay packet delivery, loop prevention, unknown-peer rejection. Federation is dormant unless an operator writes a peers file — see [self-hosting.md](self-hosting.md#federation-peering-with-other-relay-operators) for the operator guide. This document remains the authoritative wire-format specification.
+**Status:** v1 — **implemented** (2026-06-10, `node/src/federation.ts`). The reference implementation ships in `meshwhisper-node` and is verified by a two-relay integration suite (`tests/federation.test.ts`): mutual handshake, cross-relay packet delivery, loop prevention, unknown-peer rejection, open-mode dynamic admission, blocklist rejection, per-peer rate limiting. See [self-hosting.md](self-hosting.md#federation-peering-with-other-relay-operators) for the operator guide. This document remains the authoritative wire-format specification.
+
+**v1.1 amendment — admission modes.** The original v1 draft specified allow-list-only admission. Implementation experience immediately surfaced the tension with the protocol's own "relay promiscuously" principle: bilateral pubkey ceremonies scale O(n²) and make the mesh a product of negotiation rather than adoption. v1.1 adds `FEDERATION_MODE`:
+
+- **`open`** (recommended): any peer completing the handshake is admitted dynamically, up to a configurable cap. The handshake still proves key possession, so peers have stable identities — admission control just moves from *pre-approval* to *reactive blocklisting*. The security boundary becomes the protections that were already mandatory: per-peer rate limiting (now implemented, default 6000 frames/min/peer), hop-count TTL, packet-id dedup, and the home-relay-only storage rule. A malicious peer can burn its rate-limit budget and be blocklisted; it cannot read content, cannot flood storage, and cannot amplify beyond MAX_HOPS.
+- **`allowlist`**: the original v1 posture, retained for operators who want explicit control.
+
+The threat-model line "the security model assumes you peer with operators you have some reason to trust" applies to allowlist mode only. In open mode, peers are assumed untrusted and the protocol-level protections are load-bearing.
 
 Federation is the node-to-node forwarding protocol that turns isolated `meshwhisper-node` deployments into a single mesh. Without it, every node is an island; every app that deploys a node operates a private silo, and the whitepaper's central claim — that privacy strengthens with adoption density because no single operator sees both ends of a conversation — is aspirational rather than operational. Federation is the piece that makes the claim true.
 

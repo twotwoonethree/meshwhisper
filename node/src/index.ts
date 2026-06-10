@@ -42,6 +42,8 @@ import {
   FEDERATION_SUBPROTOCOL,
   loadOrCreateFederationKey,
   loadPeersConfig,
+  loadBlocklist,
+  type FederationMode,
 } from './federation.js';
 
 // ============================================================
@@ -1129,6 +1131,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       federation?.stats.dropsTtlTotal ?? 0);
     emit('meshwhisper_federation_handshake_failures_total', 'Failed federation handshakes', 'counter',
       federation?.stats.handshakeFailuresTotal ?? 0);
+    emit('meshwhisper_federation_drops_rate_limited_total', 'Federation frames dropped by per-peer rate limiting', 'counter',
+      federation?.stats.dropsRateLimitedTotal ?? 0);
+    emit('meshwhisper_federation_handshake_rejections_blocked_total', 'Handshakes rejected by the blocklist', 'counter',
+      federation?.stats.handshakeRejectionsBlockedTotal ?? 0);
 
     const body = lines.join('\n') + '\n';
     res.writeHead(200, {
@@ -1594,12 +1600,34 @@ const FEDERATION_KEY_FILE = process.env.FEDERATION_KEY_FILE
   ?? path.join(path.dirname(DB_PATH), 'federation-key.json');
 const FEDERATION_PEERS_FILE = process.env.FEDERATION_PEERS_FILE
   ?? path.join(path.dirname(DB_PATH), 'federation-peers.json');
+const FEDERATION_BLOCKLIST_FILE = process.env.FEDERATION_BLOCKLIST_FILE
+  ?? path.join(path.dirname(DB_PATH), 'federation-blocklist.json');
 
+// FEDERATION_MODE: 'off' | 'allowlist' | 'open'.
+//   off       — dormant regardless of peers file
+//   allowlist — only pre-approved pubkeys; v1 behavior
+//   open      — accept any peer completing the handshake (recommended once
+//               you're comfortable; per-peer rate limiting is the abuse
+//               boundary). Peers file becomes the outbound bootstrap list.
+// Unset (back-compat): allowlist when the peers file has entries, else off.
 const federationPeersConfig = loadPeersConfig(FEDERATION_PEERS_FILE);
-const federation: FederationManager | null = federationPeersConfig.length > 0
+const FEDERATION_MODE_RAW = (process.env.FEDERATION_MODE ?? '').toLowerCase();
+const federationMode: FederationMode | 'off' =
+  FEDERATION_MODE_RAW === 'open' ? 'open'
+  : FEDERATION_MODE_RAW === 'allowlist' ? 'allowlist'
+  : FEDERATION_MODE_RAW === 'off' ? 'off'
+  : (federationPeersConfig.length > 0 ? 'allowlist' : 'off');
+const FEDERATION_MAX_PEERS = parseInt(process.env.FEDERATION_MAX_PEERS ?? '64', 10);
+const FEDERATION_RATE_LIMIT = parseInt(process.env.FEDERATION_RATE_LIMIT ?? '6000', 10); // frames/min/peer
+
+const federation: FederationManager | null = federationMode !== 'off'
   ? new FederationManager({
       key: loadOrCreateFederationKey(FEDERATION_KEY_FILE),
       peers: federationPeersConfig,
+      mode: federationMode,
+      blockedPubkeys: loadBlocklist(FEDERATION_BLOCKLIST_FILE),
+      maxPeers: FEDERATION_MAX_PEERS,
+      rateLimitPerMin: FEDERATION_RATE_LIMIT,
       classifyLocal: (packet: Uint8Array) => {
         const destHash = readDestHash(packet);
         if (!destHash) return 'delivered'; // malformed — swallow, don't propagate
@@ -1627,7 +1655,7 @@ const federation: FederationManager | null = federationPeersConfig.length > 0
 
 if (federation) {
   federation.start();
-  console.log(`[federation] enabled with ${federationPeersConfig.length} configured peer(s)`);
+  console.log(`[federation] mode=${federationMode}, ${federationPeersConfig.length} configured peer(s), max ${FEDERATION_MAX_PEERS}`);
 }
 
 const wss = new WebSocketServer({ noServer: true });

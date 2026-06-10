@@ -226,34 +226,54 @@ At least one push provider must be configured for offline delivery. You can conf
 
 ## Federation (peering with other relay operators)
 
-Two or more `meshwhisper-node` instances can peer so packets route across operators — the protocol is specified in [federation.md](federation.md). Federation is **opt-in and dormant by default**: a node with no peers file behaves exactly as before.
+Two or more `meshwhisper-node` instances can peer so packets route across operators — the protocol is specified in [federation.md](federation.md). Federation is **off by default** and has two active modes:
 
-### Setup
+- **`open`** (recommended) — accept any peer that completes the cryptographic handshake. This is the "relay promiscuously" posture from the whitepaper: joining the mesh requires no bilateral agreement. Per-peer rate limiting is the abuse boundary; a pubkey blocklist handles bad actors reactively.
+- **`allowlist`** — only pre-approved pubkeys may connect. For operators who want explicit control (corporate deployments, cautious first steps).
 
-1. **Get your federation pubkey.** On first start with a peers file present, the node auto-generates an Ed25519 federation keypair at `federation-key.json` next to your database (override with `FEDERATION_KEY_FILE`). The `publicKeyHex` field inside is what you share with the other operator — treat it like an SSH public key, share over any authenticated channel.
+### Joining the mesh (open mode — the two-minute version)
 
-2. **Exchange pubkeys with the other operator out-of-band**, then each side writes a peers file (`federation-peers.json` next to the database, or `FEDERATION_PEERS_FILE`):
+```sh
+# In your compose environment:
+FEDERATION_MODE: "open"
+```
 
-   ```json
-   {
-     "peers": [
-       { "pubkey": "<their-64-char-hex>", "url": "wss://their-relay.example.org" }
-     ]
-   }
-   ```
+Then add one bootstrap peer to `federation-peers.json` next to your database (the Foundation relay, or any operator you know):
 
-   If `url` is present your node initiates the connection; omit it to only accept inbound from that pubkey. Either side may dial — the handshake is symmetric. **Both sides must allow-list each other** before the connection establishes.
+```json
+{
+  "peers": [
+    { "pubkey": "<bootstrap-operator-pubkey>", "url": "wss://relay.meshwhisper.org" }
+  ]
+}
+```
 
-3. **Restart the node.** Logs show `[federation] enabled with N configured peer(s)` and `[federation] peer xxxxxxxxxxxx… connected` once the handshake completes.
+Restart. Your node dials the bootstrap peer, the handshake proves key possession on both sides, and you're forwarding. Other open-mode operators can dial *you* without any pre-arrangement — your node admits them dynamically up to `FEDERATION_MAX_PEERS`.
 
-4. **Verify**: `federationPeersConnected` in `/health`, or the `meshwhisper_federation_*` series in `/metrics`.
+### Allowlist mode (explicit control)
+
+Same peers-file shape, but set `FEDERATION_MODE=allowlist` (or leave `FEDERATION_MODE` unset — a non-empty peers file implies allowlist for backwards compatibility). Only pubkeys in the file may connect; **both sides must list each other**. Exchange pubkeys out-of-band like SSH keys — the `publicKeyHex` field of your auto-generated `federation-key.json`.
+
+### Blocking a misbehaving peer
+
+Write `federation-blocklist.json` next to your database:
+
+```json
+{ "blocked": ["<their-64-char-hex>"] }
+```
+
+Blocked pubkeys are rejected at handshake regardless of mode. Evicting an already-connected peer requires a restart in v1.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
+| `FEDERATION_MODE` | *(unset)* | `open` / `allowlist` / `off`. Unset = allowlist if the peers file has entries, else off |
 | `FEDERATION_KEY_FILE` | `<db-dir>/federation-key.json` | Ed25519 keypair; auto-generated (mode 0600) if missing |
-| `FEDERATION_PEERS_FILE` | `<db-dir>/federation-peers.json` | Allow-list of peers. Missing/empty = federation dormant |
+| `FEDERATION_PEERS_FILE` | `<db-dir>/federation-peers.json` | Outbound bootstrap list (open mode) / allow-list (allowlist mode) |
+| `FEDERATION_BLOCKLIST_FILE` | `<db-dir>/federation-blocklist.json` | Pubkeys rejected at handshake regardless of mode |
+| `FEDERATION_MAX_PEERS` | `64` | Open mode: cap on simultaneously-tracked peers; handshakes beyond it are rejected |
+| `FEDERATION_RATE_LIMIT` | `6000` | PacketForward frames accepted per peer per minute (~100/sec); excess silently dropped |
 | `FEDERATION_MAX_HOPS` | `3` | Hop-count cap on forwarded packets |
 
 ### Behaviour notes

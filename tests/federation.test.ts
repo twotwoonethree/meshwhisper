@@ -276,3 +276,129 @@ describe('Federation v1 — two-relay integration', () => {
     expect(body).toMatch(/meshwhisper_federation_forwards_sent_total \d+/);
   });
 });
+
+describe('Federation modes — open admission, blocklist, rate limiting', () => {
+  const PORT_OPEN = 19902;   // open-mode relay, accepts anyone not blocked
+  const PORT_DIAL = 19903;   // dialing relay, NOT in the open relay's config
+  let relayOpen: RelayHandle;
+  let relayDial: RelayHandle;
+  let pubBlocked: string;
+
+  beforeAll(async () => {
+    const dirOpen = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-fed-open-'));
+    const dirDial = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-fed-dial-'));
+
+    generateFederationKeyFile(path.join(dirOpen, 'fed-key.json'));
+    generateFederationKeyFile(path.join(dirDial, 'fed-key.json'));
+
+    // Mint a third keypair purely to put on the open relay's blocklist.
+    const blockedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-fed-blocked-'));
+    pubBlocked = generateFederationKeyFile(path.join(blockedDir, 'fed-key.json'));
+    fs.rmSync(blockedDir, { recursive: true, force: true });
+
+    // Open relay: NO peers configured, but mode=open + a blocklist. A tight
+    // per-peer rate limit so the rate-limiting test can trip it quickly.
+    fs.writeFileSync(path.join(dirOpen, 'fed-blocklist.json'), JSON.stringify({
+      blocked: [pubBlocked],
+    }));
+    relayOpen = spawnRelay(PORT_OPEN, dirOpen, {
+      FEDERATION_MODE: 'open',
+      FEDERATION_KEY_FILE: path.join(dirOpen, 'fed-key.json'),
+      FEDERATION_PEERS_FILE: path.join(dirOpen, 'fed-peers.json'), // doesn't exist
+      FEDERATION_BLOCKLIST_FILE: path.join(dirOpen, 'fed-blocklist.json'),
+      FEDERATION_RATE_LIMIT: '10', // 10 PacketForward frames/min/peer
+    });
+
+    // Dialing relay: open mode too, with the open relay as its only
+    // (bootstrap) peer. Note the open relay has never heard of this pubkey.
+    const openKeyRaw = JSON.parse(fs.readFileSync(path.join(dirOpen, 'fed-key.json'), 'utf8')) as { publicKeyHex: string };
+    fs.writeFileSync(path.join(dirDial, 'fed-peers.json'), JSON.stringify({
+      peers: [{ pubkey: openKeyRaw.publicKeyHex, url: `ws://127.0.0.1:${PORT_OPEN}` }],
+    }));
+    relayDial = spawnRelay(PORT_DIAL, dirDial, {
+      FEDERATION_MODE: 'open',
+      FEDERATION_KEY_FILE: path.join(dirDial, 'fed-key.json'),
+      FEDERATION_PEERS_FILE: path.join(dirDial, 'fed-peers.json'),
+    });
+
+    await Promise.all([
+      waitForHealth(PORT_OPEN, relayOpen.proc),
+      waitForHealth(PORT_DIAL, relayDial.proc),
+    ]);
+  }, 30000);
+
+  afterAll(() => {
+    stopRelay(relayOpen);
+    stopRelay(relayDial);
+  });
+
+  it('open mode admits a peer that is NOT in the config (bootstrap-style join)', async () => {
+    await waitForFederation(PORT_DIAL, 1);
+    await waitForFederation(PORT_OPEN, 1);
+    const h = await getHealth(PORT_OPEN);
+    // Configured count stays 0 — the peer was admitted dynamically.
+    expect(h.federationPeersConfigured).toBe(0);
+    expect(h.federationPeersConnected).toBe(1);
+  });
+
+  it('open-mode delivery: packet from the dialing relay reaches a client on the open relay', async () => {
+    const destHash = nodeCrypto.randomBytes(8).toString('hex');
+    const bob = await connectClient(PORT_OPEN, [destHash]);
+    const gotPacket = new Promise<void>((resolve) => {
+      bob.on('message', (_raw: Buffer, isBinary: boolean) => { if (isBinary) resolve(); });
+    });
+    const alice = await connectClient(PORT_DIAL, []);
+    alice.send(buildPacket(destHash, new Uint8Array([7])), { binary: true });
+    await Promise.race([
+      gotPacket,
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('no delivery in open mode')), 8000)),
+    ]);
+    alice.close();
+    bob.close();
+  });
+
+  it('blocklist rejects a handshake even in open mode', async () => {
+    // Handshake with the blocked pubkey's identity. We don't have its
+    // private key anymore but rejection happens at the ClientHello stage,
+    // before any signature exchange.
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT_OPEN}`, 'meshwhisper-federation.v1');
+    const outcome = await new Promise<'rejected' | 'accepted'>((resolve) => {
+      ws.on('open', () => {
+        const hello = Buffer.alloc(53);
+        hello.writeUInt8(0x01, 0);
+        Buffer.from(pubBlocked, 'hex').copy(hello, 1);
+        nodeCrypto.randomBytes(16).copy(hello, 33);
+        hello.writeUInt32BE(0, 49);
+        ws.send(hello, { binary: true });
+      });
+      ws.on('message', (raw: Buffer) => {
+        if (raw.length === 53 && raw.readUInt8(0) === 0x00) resolve('rejected');
+        else resolve('accepted');
+      });
+      ws.on('close', () => resolve('rejected'));
+      setTimeout(() => resolve('rejected'), 5000);
+    });
+    expect(outcome).toBe('rejected');
+    try { ws.close(); } catch { /* closed */ }
+
+    const metricsBody = await (await fetch(`http://127.0.0.1:${PORT_OPEN}/metrics`)).text();
+    expect(metricsBody).toMatch(/meshwhisper_federation_handshake_rejections_blocked_total [1-9]/);
+  });
+
+  it('per-peer rate limiting drops excess PacketForward frames', async () => {
+    // The open relay accepts only 10 frames/min/peer. Blast 30 packets to
+    // unregistered hashes from the dialing side; the open relay should
+    // record rate-limited drops.
+    const alice = await connectClient(PORT_DIAL, []);
+    for (let i = 0; i < 30; i++) {
+      alice.send(buildPacket(nodeCrypto.randomBytes(8).toString('hex'), new Uint8Array([i])), { binary: true });
+    }
+    // Give frames time to traverse.
+    await new Promise((r) => setTimeout(r, 2000));
+    const metricsBody = await (await fetch(`http://127.0.0.1:${PORT_OPEN}/metrics`)).text();
+    const m = metricsBody.match(/meshwhisper_federation_drops_rate_limited_total (\d+)/);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBeGreaterThan(0);
+    alice.close();
+  });
+});
