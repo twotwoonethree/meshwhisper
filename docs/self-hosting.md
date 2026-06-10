@@ -238,12 +238,15 @@ Two or more `meshwhisper-node` instances can peer so packets route across operat
 FEDERATION_MODE: "open"
 ```
 
-Then add one bootstrap peer to `federation-peers.json` next to your database (the Foundation relay, or any operator you know):
+Then add one bootstrap peer to `federation-peers.json` next to your database. The Foundation relay runs in open mode and accepts peers — or use any operator you know:
 
 ```json
 {
   "peers": [
-    { "pubkey": "<bootstrap-operator-pubkey>", "url": "wss://relay.meshwhisper.org" }
+    {
+      "pubkey": "34904664a3b5b0b35a8eb41bd3b1d493b79981af2a47069e246db28854d6ce23",
+      "url": "wss://relay.meshwhisper.org"
+    }
   ]
 }
 ```
