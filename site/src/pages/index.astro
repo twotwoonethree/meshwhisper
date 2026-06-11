@@ -164,10 +164,16 @@ import Nav from '../components/Nav.astro';
 
         <div class="space-y-6">
           <div>
-            <div class="text-slate-500 text-xs font-medium mb-2 font-mono">1. Install</div>
-            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 font-mono text-sm">
+            <div class="text-slate-500 text-xs font-medium mb-2 font-mono">1. Scaffold</div>
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 font-mono text-sm leading-relaxed">
+              <span class="text-slate-500">$</span> <span class="text-white">npx @meshwhisper/cli init</span><br />
               <span class="text-slate-500">$</span> <span class="text-white">npm install @meshwhisper/sdk</span>
             </div>
+            <p class="text-slate-500 text-xs mt-2">
+              The CLI writes a working SDK skeleton and — if you choose self-hosted — a complete node
+              deployment: Docker Compose, generated Web Push keys, and a federation bootstrap so your
+              relay joins the mesh.
+            </p>
           </div>
 
           <div>
@@ -187,15 +193,16 @@ import Nav from '../components/Nav.astro';
           <div>
             <div class="text-slate-500 text-xs font-medium mb-2 font-mono">3. Deploy your node</div>
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 font-mono text-sm leading-relaxed">
-              <span class="text-slate-500">$</span> <span class="text-white">docker run -d \</span><br />
-              <span class="text-white">&nbsp;&nbsp;-v meshwhisper_data:/data \</span><br />
-              <span class="text-white">&nbsp;&nbsp;-e BASE_URL=https://relay.myapp.com \</span><br />
-              <span class="text-white">&nbsp;&nbsp;ghcr.io/meshwhisper/node:latest</span>
+              <span class="text-slate-500"># on your server, from the generated meshwhisper-node/ directory</span><br />
+              <span class="text-slate-500">$</span> <span class="text-white">docker compose up -d</span><br />
+              <span class="text-slate-500">$</span> <span class="text-white">npx @meshwhisper/cli doctor wss://relay.myapp.com</span>
             </div>
           </div>
         </div>
 
         <div class="mt-8 text-center text-sm text-slate-500">
+          <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/getting-started.md" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Getting started →</a>
+          <span class="mx-3">·</span>
           <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/api.md" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Full API reference →</a>
           <span class="mx-3">·</span>
           <a href="https://github.com/twotwoonethree/meshwhisper/blob/main/docs/identity-patterns.md" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">Identity patterns →</a>
@@ -210,7 +217,7 @@ import Nav from '../components/Nav.astro';
       <div class="max-w-6xl mx-auto px-6 py-24">
         <h2 class="text-3xl font-bold text-white text-center mb-4">Learn by reading real code</h2>
         <p class="text-slate-400 text-center mb-12 max-w-2xl mx-auto">
-          Four working integrations, each maintained as a living reference for SDK adopters. None are slides;
+          Six working integrations, each maintained as a living reference for SDK adopters. None are slides;
           all are <code class="text-brand-300">git clone</code> away.
         </p>
 
