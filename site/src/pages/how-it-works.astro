@@ -65,10 +65,12 @@ import Nav from '../components/Nav.astro';
       </p>
       <div class="grid sm:grid-cols-2 gap-6">
         {[
-          ['Packet relay and store-and-forward', 'Routes encrypted packets to connected clients. Queues blobs for offline recipients with a configurable TTL (default 72 hours).'],
+          ['Packet relay and store-and-forward', 'Routes encrypted packets to connected clients. Queues blobs for offline recipients with a configurable TTL (default 30 days).'],
           ['Push notification forwarding', 'When a message arrives for an offline device, fires a silent content-free wake signal via APNs, FCM, or Web Push. The signal contains no message content.'],
           ['Encrypted media storage', 'Accepts and serves opaque encrypted blobs. Never holds a decryption key. The decryption key travels through the message channel, never through the Node API.'],
           ['Prekey directory', 'Stores public pre-key bundles for PQXDH first contact. Allows strangers to initiate an encrypted session without prior communication.'],
+          ['Relay federation', 'Nodes peer over a mutual cryptographic handshake and forward packets for each other. Open mode admits any relay that proves key possession — rate limits, hop caps, and deduplication are the abuse boundary. One bootstrap entry joins the mesh.'],
+          ['Username directory', 'Optional per-namespace handles (@alice) with a configurable ownership policy: signed-transfer by default — a username is yours until you cryptographically sign it over — or last-writer-wins for apps that want loose handles.'],
         ].map(([title, body]) => (
           <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
             <h3 class="text-white font-semibold mb-2">{title}</h3>

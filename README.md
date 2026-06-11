@@ -146,7 +146,7 @@ For server-side integrations — AI agents, customer-service bots, IoT gateways 
 npx @meshwhisper/cli init
 ```
 
-Asks for your app bundle ID and server URL. Outputs your `.env` block, SDK init snippet, and a ready-to-use `docker-compose.yml`.
+Asks for your namespace, where your app should connect (Foundation relay for development, your own server for production), and what kind of app you're building. Writes a working SDK skeleton — and for self-hosted deployments, a complete `meshwhisper-node/` directory: Docker Compose, standalone Dockerfiles, generated Web Push keys, and a federation bootstrap so your relay joins the mesh. `npx @meshwhisper/cli doctor` health-checks any node.
 
 ---
 
@@ -180,7 +180,7 @@ MeshWhisper is the right choice when **privacy is a feature**, not an afterthoug
 
 Every MeshWhisper deployment is self-contained. Your node serves your app's namespace. Your users connect to your node. Messages between your users flow through your node. Nothing depends on shared infrastructure, third-party availability, or anyone else's decisions.
 
-In the future, node operators can choose to **peer** with other nodes for redundancy — if your node goes offline, messages route through a peered node temporarily. But peering is optional. Your app works in complete isolation from day one.
+Node operators can also choose to **peer**: relay-to-relay [federation](docs/federation.md) is live, and `FEDERATION_MODE=open` joins the mesh with one bootstrap entry — your node forwards packets for other relays and they for yours. But federation is optional. Your app works in complete isolation from day one.
 
 ---
 

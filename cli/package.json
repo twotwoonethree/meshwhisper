@@ -1,7 +1,7 @@
 {
   "name": "@meshwhisper/cli",
-  "version": "0.2.0",
-  "description": "MeshWhisper CLI \u2014 developer tooling for MeshWhisper projects",
+  "version": "0.2.1",
+  "description": "MeshWhisper CLI — developer tooling for MeshWhisper projects",
   "type": "module",
   "bin": {
     "meshwhisper": "dist/index.js"

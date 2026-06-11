@@ -1,14 +1,18 @@
 {
   "name": "@meshwhisper/push-service",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MeshWhisper push notification service — dispatches APNs and FCM wake signals",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "meshwhisper-push": "dist/index.js"
   },
-  "files": ["dist"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prepublishOnly": "npm run build",
     "build": "tsc",
