@@ -10,8 +10,19 @@ preserved in git history but not enumerated here.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-11
+
+First coordinated release of `@meshwhisper/sdk`, `@meshwhisper/node`, and `@meshwhisper/cli` since 0.1.1 (2026-04-11). Everything below ships in this release.
+
 ### Added
 
+- **Relay federation (v1.1).** Relays peer over a mutual-Ed25519 WebSocket handshake and forward packets for each other ([docs/federation.md](docs/federation.md)). `FEDERATION_MODE=open` (recommended) admits any relay that completes the handshake — per-peer rate limiting, hop caps, packet dedup, and a reactive blocklist are the abuse boundary; `allowlist` mode for operators who want explicit control. The Foundation relay runs open mode as the published bootstrap peer.
+- **Multi-device, Model 3 (linked devices).** Account/device data model, signed `device_added`/`device_revoked` announcements with persistent LWW replay protection, `sendMessage` fan-out to all linked devices, and QR/paste pairing (`createDeviceLinkOffer`/`acceptDeviceLinkOffer`). Reference app: `examples/linked-devices/`.
+- **Messenger-grade conversation features:** reactions (`toggleReaction`), quoted replies (`replyTo`), message forwarding with original-author chain preservation (`forwardMessage`), per-conversation disappearing messages (`setDisappearingMessages`), and group rename — all with control-message wire formats and Prudence UI.
+- **Per-namespace username-ownership policy.** `signed-transfer` (default): a username is yours until you sign it over (`createUsernameTransferToken`); `last-writer-wins` opt-in per namespace for apps that want loose handles.
+- **React Native storage backend** — `@meshwhisper/sdk/react-native` `AsyncStorageBackend`.
+- **Relay production hardening:** per-IP rate limiting on all endpoints (with `TRUST_PROXY` support), Prometheus `/metrics`, documented sqlite hot-backup procedure, `SECURITY.md` vulnerability-reporting policy.
+- **`@meshwhisper/cli` rebuilt as a real scaffold.** `init` writes a deployable node directory (compose + standalone Dockerfiles installing the published packages + generated VAPID keys + open-federation bootstrap) and a working SDK skeleton; new `doctor` (node health check) and `vapid` (dependency-free RFC 8292 keygen) subcommands.
 - **Encrypted relay archive** — opaque AES-GCM blob colocated with the relay the user has already chosen to trust. The archive key and write-authentication token are HKDF-derived from the user's identity key (itself derived from username + password via PBKDF2), so no separate recovery code or third-party cloud account is required. Sessions are excluded from the archive to preserve forward secrecy at rest.
 - **Multi-device archive sync via merge** — `pushArchive` performs a merge-based update through `mergeKv` instead of last-writer-wins, so two devices that mutate state concurrently no longer overwrite each other.
 - **New SDK methods** for the archive: `pushArchive`, `pullArchive`, `exportArchive`, `importArchive`, and `deriveBackupKey`.
@@ -44,5 +55,6 @@ preserved in git history but not enumerated here.
 - **Decrypt-failure path now logs** a `[meshwhisper] decrypt failed for inbound packet` warning instead of silently dropping. The next regression in this code path will surface in browser consoles and e2e tests immediately.
 - **`docker-compose.yml` `BLOB_TTL_HOURS` default 72 → 720** to match the relay code's new 30-day default. The Compose default was a stale leftover from before the listen-window change; deployments using the bundled Compose were silently still on 72h until they overrode the env var explicitly.
 - **Archive push reliability — flush on hide/unload + max-debounce cap.** `scheduleArchiveSync` previously used a 5s debounce that was reset on every state change, so a brisk conversation followed by closing the tab could mean the push never fired at all and the relay's archive stayed frozen at the previous (often near-empty) snapshot. Investigation of one user's account showed exactly this — a 328-byte archive containing only their identity, with no messages despite a real conversation having taken place. Fix: keep the 5s "no activity" debounce, add a 30s max-cap so the timer can't be reset forever, and flush synchronously on `visibilitychange→hidden` and `pagehide`. Unload-flushes use `fetch(..., { keepalive: true })` so the request completes even after the tab navigates away. The keepalive path is skipped for archives over ~60 KB (browser spec limit) and falls back to the next-session push.
+- **`node: 'mesh'` (the SDK default) resolved to `relay.meshwhisper.io` — a domain that does not exist** — in both transports and the media uploader. Now `relay.meshwhisper.org`.
 
 [Unreleased]: https://github.com/twotwoonethree/meshwhisper/compare/main...HEAD
