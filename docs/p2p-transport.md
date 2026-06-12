@@ -37,6 +37,8 @@ The SDK was built transport-agnostic from the start; much of this layer is wirin
 
 What does not exist: WebRTC (any environment), any native proximity bridge (Swift/Kotlin), contact-recognizable beacons (§5), delivery-confirmed relay suppression (§6), and tests/examples for the LAN bearer.
 
+**One precise gap in the LAN bearer, found by tracing the send path:** discovery, TCP connection, and the receive path all work — and chaff is genuinely broadcast across LAN links today — but *real messages never traverse them*. `routeAndSend` addresses the negotiator by peerId, while LAN connections are keyed by the anonymous per-session device ID, with (correctly) no mapping between the two. The send always misses and falls through to the relay. The fix is the §6 dual-send model: also broadcast outbound packets to connected LAN peers and let receiver-side destHash matching deliver them — identical to how chaff already flows. Phase 1 is this wiring plus tests, not just verification.
+
 ## 3. Transport tiers and the privacy rule
 
 Direct connections have different privacy costs depending on what they reveal and to whom. The tiering rule:
@@ -114,7 +116,7 @@ await MeshWhisper.init({
 
 | Phase | Scope | Effort | Trigger |
 |---|---|---|---|
-| 1 | Verify + test + document the existing LAN bearer; `examples/local-first/` proving two devices messaging with the relay down; `onTransportUpgrade` | small | writing this spec surfaced that it's mostly built — finish it when an offline/local-first adopter use case appears |
+| 1 | Wire real-message delivery over the LAN bearer (dual-send broadcast — today only chaff traverses LAN links, see §2) + tests; `examples/local-first/` proving two devices messaging with the relay down; `onTransportUpgrade` | small | mostly built — finish it when an offline/local-first adopter use case appears |
 | 2 | WebRTC direct paths (relay signaling, contacts-only, opt-in) | ~3–4 weeks | adopter pain on media bandwidth/latency, or a privacy-marketing need for "your messages can bypass even the relay" |
 | 3 | Native proximity bridges (Multipeer, Nearby; Swift/Kotlin) | months | an adopter shipping a native app that needs offline proximity messaging — do not build speculatively; carries App Store review risk (see ADR-001 §risks) |
 | 4 | Multi-hop device routing (activate `SocialGraphRouter` across direct links) | large | meaningful density of Phase 1–3 devices in real deployments |
