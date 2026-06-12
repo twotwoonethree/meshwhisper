@@ -10,6 +10,16 @@ preserved in git history but not enumerated here.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-12
+
+### Added
+
+- **LAN peer-to-peer delivery (dual-send).** Peers on the same subnet discover each other (UDP broadcast, anonymous per-session device IDs) and exchange real messages directly over TCP. Every outbound message is offered to connected LAN peers alongside the guaranteed relay path; receivers deduplicate at the packet level. Established conversations survive losing the relay — or the entire internet. On-site and air-gapped deployments (human and machine-to-machine) are a supported configuration: see [docs/local-networks.md](docs/local-networks.md) and the [local-first example](examples/local-first/). New `transports.lan` config knob (`true` default / `false` / `{ udpPort, tcpPort }`). Spec: [docs/p2p-transport.md](docs/p2p-transport.md) (Phase 1 of the opportunistic transport-upgrade model, [ADR-004](docs/adr/004-opportunistic-transport-upgrade.md)).
+
+### Fixed
+
+- Packet-level inbound dedup releases its mark when a copy proves undecryptable, so a direct-path copy racing ahead of a not-yet-ready session can't suppress the relay copy (would have turned a transient decrypt failure into message loss).
+
 ## [0.2.0] — 2026-06-11
 
 First coordinated release of `@meshwhisper/sdk`, `@meshwhisper/node`, and `@meshwhisper/cli` since 0.1.1 (2026-04-11). Everything below ships in this release.
