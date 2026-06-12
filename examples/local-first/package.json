@@ -1,0 +1,19 @@
+{
+  "name": "@meshwhisper/example-local-first",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: on-site messaging that keeps working when the relay (or the internet) is gone",
+  "type": "module",
+  "scripts": {
+    "chat": "tsx src/chat.ts",
+    "sensor": "tsx src/sensor.ts",
+    "monitor": "tsx src/monitor.ts"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../.."
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
