@@ -1,68 +1,42 @@
 ---
-title: "MeshWhisper 0.3: E2EE messaging that survives losing its own infrastructure"
-description: "Open relay federation, full multi-device, and peer-to-peer LAN delivery that keeps conversations alive when the relay — or the internet — is gone. Self-hostable, MIT-licensed, one Docker container."
-pubDate: 2026-06-12
+title: "MeshWhisper 0.3: messaging that survives losing its own infrastructure"
+description: "Two devices on the same network now deliver messages peer-to-peer. Kill the relay, pull the internet — the conversation carries on, encrypted, like nothing happened. Plus open federation and the rest of a busy two months."
+pubDate: 2026-06-12T13:00:00Z
 ---
 
-MeshWhisper is an MIT-licensed SDK and relay for adding end-to-end encrypted messaging to any app. The pitch has always been structural rather than promissory: the relay routes opaque blobs by unlinkable destination hashes, so the operator *cannot* read messages — not as a policy, by design. You self-host the relay (one Docker container, ~€4/month of VPS), or use the Foundation's public-good node while you're developing.
+*New to MeshWhisper? [Start here](/blog/what-is-meshwhisper/) — short version: E2EE messaging for any app, through a relay that can't read a word of it. This post is about what's new.*
 
-The last two releases turned that from a single-relay story into something more interesting. Three things shipped that we think are worth your attention.
+The most satisfying test we've ever written does the following: starts a relay, lets two peers find each other and exchange a message, then **kills the relay with `SIGKILL`** — no shutdown, no goodbye — and sends another message. It arrives. The test suite is 368 tests deep at this point, and that one's our favourite child. We don't care that you're not supposed to have one.
 
-## 1. Conversations that survive losing the relay
+## Conversations that outlive the infrastructure
 
-As of 0.3.0, two devices on the same network exchange messages **peer-to-peer**. The SDK's LAN bearer discovers peers on the subnet, connects them directly, and dual-sends every outbound message — offered to connected LAN peers *and* sent via the relay, deduplicated at the receiver. The consequence falls out of the design:
+As of 0.3.0, devices on the same network discover each other and deliver messages **peer-to-peer**. Every outbound message is dual-sent — offered to connected LAN peers *and* sent via the relay — and receivers deduplicate. The arithmetic falls out beautifully:
 
-> Once two peers have established a session, their conversation no longer depends on any infrastructure. Kill the relay, unplug the router from the internet — messages keep flowing, end-to-end encrypted.
+> Once two peers have a session, their conversation no longer depends on any infrastructure. Kill the relay, unplug the router — messages keep flowing, end-to-end encrypted.
 
-There is no offline mode and no mode switch. Application code just calls `send()`; degradation and recovery are silent. The [local-first example](https://github.com/twotwoonethree/meshwhisper/tree/main/examples/local-first) demonstrates it two ways: a human chat, and a sensor fleet emitting encrypted telemetry that keeps arriving at its monitor after the relay is killed mid-run.
+There's no offline mode, because there's no mode. Application code calls `send()`; degradation and recovery are silent. The funny part of building this was discovering our LAN layer had been faithfully discovering peers, opening connections, and then carrying *nothing but cover traffic* for months — the plumbing was all there, hooked up to a tap nobody had turned. Turning it required exactly one genuinely subtle fix (deduplication must forgive a copy that arrives before the session is ready, or a fast LAN packet can murder its own relay twin — the test for that one earned its keep).
 
-This makes isolated networks a supported deployment, not a hack: factory floors, ships, clinics, air-gapped offices. Run a relay on a Raspberry Pi on the LAN for bootstrap and offline queueing — nothing ever touches the internet — and live conversations don't even depend on the Pi. The deployment guide is [docs/local-networks.md](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/local-networks.md). Cloud messaging products structurally can't follow you here; they are clients for someone else's servers.
+What this unlocks is bigger than a party trick: **isolated networks are now a supported deployment.** A node on a Raspberry Pi serves a factory floor, a ship, a clinic, an air-gapped office — nothing touches the internet, and live conversations don't even depend on the Pi. Works for machines too: the [local-first example](https://github.com/twotwoonethree/meshwhisper/tree/main/examples/local-first) has a sensor fleet whose encrypted telemetry keeps arriving after the relay dies mid-demo. Deployment guide: [docs/local-networks.md](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/local-networks.md).
 
-Privacy on the LAN keeps the same shape as everywhere else in the protocol: packets are offered promiscuously to every local peer, but only the addressee can recognize theirs (unlinkable destination hashes, ratchet-encrypted payloads), and discovery beacons are random per-session — a device on your network learns that MeshWhisper devices exist, not who is talking to whom.
+Privacy keeps its shape on the LAN: packets are offered to every local peer, but only the addressee can recognize theirs, and discovery beacons are random per-session. A device on your network learns that MeshWhisper devices exist — not who's talking to whom.
 
-## 2. Open relay federation
+## Federation went from ceremony to switch
 
-Relays now peer with each other and forward packets across operators. We initially specified allowlist-only peering — both operators exchange pubkeys before connecting — and discarded it almost immediately: bilateral ceremonies scale O(n²) and make the mesh a product of negotiation instead of a side effect of adoption.
+Relays now forward packets for each other. Our first draft of the peering protocol required both operators to exchange public keys before connecting — very dignified, very secure, and we binned it within forty-eight hours, because bilateral ceremonies scale O(n²) and produce a mesh by *negotiation* when the entire point of the protocol is a mesh by *adoption*. The relay can't read anything; what exactly were we gatekeeping?
 
-So federation is **open by default posture**: any relay that completes the mutual Ed25519 handshake is admitted. The security boundary is per-peer rate limiting, hop caps, packet deduplication, and a reactive blocklist — not pre-approval. Peers have stable cryptographic identities; a misbehaving one gets blocklisted, and it never could read content in the first place.
+So: `FEDERATION_MODE: "open"`. Any relay that completes the cryptographic handshake is in. Rate limits, hop caps, dedup, and a blocklist are the bouncer; pre-approval is not. One bootstrap entry pointed at `wss://relay.meshwhisper.org` joins the mesh — the Foundation relay runs open mode and accepts peers today.
 
-Joining the mesh is one environment variable and one bootstrap entry:
+And the quiet part, said loudly: the mechanism is live, the mesh has **one node**. A one-node mesh is called a server with notions. The milestone we actually care about is the second independent operator. If you run one, you're not joining the network — you briefly *are* the network, and we'd be delighted to meet you.
 
-```
-FEDERATION_MODE: "open"
-```
+## The rest of a busy two months
 
-```json
-{ "peers": [{ "pubkey": "34904664…ce23", "url": "wss://relay.meshwhisper.org" }] }
-```
-
-The Foundation relay runs open mode and accepts peers today. The wire protocol is specified in [docs/federation.md](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/federation.md). And in the spirit of saying the quiet part: the *mechanism* is live, but the mesh currently has one node. The honest milestone we're working toward is a second independent operator. If you run one, you are it.
-
-## 3. The boring-but-load-bearing rest
-
-Since the last published release (April), the SDK and relay also gained:
-
-- **Multi-device** — Signal-style linked devices: QR pairing, signed device announcements, message fan-out to all of an account's devices
-- **Messenger-grade features** — reactions, quoted replies, forwarding, disappearing messages, group management (rename, add/kick members, admin transfer)
-- **Post-quantum session establishment** — PQXDH with ML-KEM-768 alongside X3DH and the Double Ratchet
-- **Relay hardening** — per-IP and per-federation-peer rate limiting, Prometheus `/metrics`, hot backups, a [security policy](https://github.com/twotwoonethree/meshwhisper/blob/main/SECURITY.md)
-- **A real scaffold** — `npx @meshwhisper/cli init` writes a working SDK skeleton plus a complete node deployment (Compose, generated Web Push keys, federation bootstrap). The generated terminal chat exchanges an E2EE message through the live relay in under two minutes from an empty directory.
-
-## What this is, and isn't
-
-It's worth being precise, because "P2P E2EE messaging" is a phrase that overpromises by default.
-
-The **E2EE is unconditional**: PQXDH + Double Ratchet, encryption on-device, no transport — relay, LAN peer, federation peer — is ever trusted with anything but ciphertext and timing. The **peer-to-peer part is tiered and honest**: LAN delivery is shipped; proximity radio (Multipeer/Nearby) and direct internet paths (WebRTC) are [specified](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/p2p-transport.md) with the same opportunistic-upgrade semantics, and gated on demand rather than built speculatively. The relay remains the reliability floor everywhere — a direct path can make delivery faster or cheaper, never less reliable.
-
-There is no token, no company between your users and their messages, and no hosted tier to upsell you to. The model is: you run a node, your node serves your app, and — if you choose — it forwards packets for everyone else's, the way the internet was supposed to work.
-
-## Try it
+Since the April-era packages: full **multi-device** (QR pairing, signed device announcements, fan-out), **reactions, replies, forwarding, disappearing messages**, group admin tools, **PQXDH with ML-KEM-768**, relay hardening (rate limits, `/metrics`, hot backups, [security policy](https://github.com/twotwoonethree/meshwhisper/blob/main/SECURITY.md)), and a CLI that takes you from empty directory to encrypted messages through the live relay in under ten minutes:
 
 ```bash
 mkdir my-app && cd my-app && npm init -y
 npx @meshwhisper/cli init
 ```
 
-[GitHub](https://github.com/twotwoonethree/meshwhisper) · [Getting started](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/getting-started.md) · [Whitepaper](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/whitepaper.md) · Live demo PWA: [prudence.meshwhisper.org](https://prudence.meshwhisper.org)
+Full ledger in the [changelog](https://github.com/twotwoonethree/meshwhisper/blob/main/CHANGELOG.md). Honest labelling of what's production versus promised lives in [the capability tour](/blog/what-it-does/).
 
-If you're evaluating MeshWhisper for production, [open an issue tagged `adoption`](https://github.com/twotwoonethree/meshwhisper/issues) — adoption reports directly shape what gets built next. No sales call follows; there is no sales team to call you.
+[GitHub](https://github.com/twotwoonethree/meshwhisper) · [Getting started](https://github.com/twotwoonethree/meshwhisper/blob/main/docs/getting-started.md) · Live demo: [prudence.meshwhisper.org](https://prudence.meshwhisper.org) · Evaluating for production? [Open an issue tagged `adoption`](https://github.com/twotwoonethree/meshwhisper/issues) — it steers the roadmap, and no sales call follows, there being nobody here to make one.
