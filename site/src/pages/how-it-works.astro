@@ -84,16 +84,19 @@ import Nav from '../components/Nav.astro';
     <section class="border-t border-slate-800 bg-slate-900/40">
       <div class="max-w-6xl mx-auto px-6 py-20 grid sm:grid-cols-2 gap-8">
         <div>
-          <div class="text-slate-500 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Device layer — roadmap</div>
+          <div class="text-slate-500 font-mono text-xs font-medium mb-3 uppercase tracking-widest">Device layer — first tier shipped</div>
           <h2 class="text-xl font-bold text-white mb-3">The mesh</h2>
           <p class="text-slate-400 text-sm leading-relaxed mb-4">
-            Every device running any SDK-embedded app is a potential relay for every other.
-            Platform-native P2P when nearby (Apple Multipeer, Google Nearby), local subnet
-            when on the same network, direct connection over the internet for connectable devices.
+            Devices on the same network already message each other peer-to-peer: the LAN bearer
+            discovers peers on the subnet and delivers directly, so established conversations
+            survive losing the relay — or the entire internet. On-site and air-gapped deployments
+            (human or machine-to-machine) work today.
           </p>
           <p class="text-slate-400 text-sm leading-relaxed">
-            A fitness app's users are part of the relay backbone for a marketplace app's users.
-            The infrastructure is built by participation, not by investment.
+            The further tiers — platform-native proximity P2P (Apple Multipeer, Google Nearby),
+            direct internet paths — are specified and demand-gated. Every device running any
+            SDK-embedded app is a potential relay for every other; the infrastructure is built
+            by participation, not by investment.
           </p>
         </div>
         <div>

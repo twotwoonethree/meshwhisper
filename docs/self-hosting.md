@@ -224,6 +224,12 @@ At least one push provider must be configured for offline delivery. You can conf
 
 ---
 
+## Isolated networks (no internet at all)
+
+Everything above also works on a network that never touches the internet — the node is just a process, and it doesn't need a domain, a public IP, or a certificate authority. On top of that, the SDK's LAN bearer lets established conversations continue peer-to-peer even when the node is down. See **[local-networks.md](local-networks.md)** for the on-site / air-gapped deployment guide (including machine-to-machine use).
+
+---
+
 ## Federation (peering with other relay operators)
 
 Two or more `meshwhisper-node` instances can peer so packets route across operators — the protocol is specified in [federation.md](federation.md). Federation is **off by default** and has two active modes:

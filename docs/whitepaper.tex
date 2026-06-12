@@ -244,6 +244,8 @@ Developers who prefer not to self-host can use a public-good relay --- currently
 
 Every device running any SDK-embedded application is simultaneously a potential relay for every other such device. When two devices are nearby, they relay for each other directly using platform-native P2P (Apple Multipeer Connectivity on iOS, Google Nearby Connections on Android). Over the internet, devices that can accept inbound connections — laptops on broadband, desktops, home relay hardware — act as connectable peers. Phones on cellular maintain outbound connections to their deployed node.
 
+The first tier of the device layer is implemented today: peers on the same subnet discover each other and deliver messages directly, with every outbound message opportunistically dual-sent — offered to connected local peers alongside the guaranteed relay path — and deduplicated at the receiver. Established conversations therefore survive the loss of the relay, or of internet connectivity entirely, with no mode switch and no application code: on-site and air-gapped deployments are a supported configuration, not a special case. The proximity-radio and direct-internet tiers follow the same opportunistic-upgrade model and are specified, demand-gated, in the project's transport specification.
+
 Figure~\ref{fig:layers} shows the relationship between the two layers. The node layer forms the backbone — reliable, always-connectable bridging infrastructure. The device layer forms the mesh — organic, distributed relay capacity that grows with adoption.
 
 \subsection{Namespace Isolation}
