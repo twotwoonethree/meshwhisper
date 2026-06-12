@@ -340,6 +340,19 @@ export interface MeshWhisperConfig {
   /** Optional developer key (base64 public key). If omitted a random key is used,
    *  which is fine for development and single-tenant deployments. */
   developerKey?: string;
+  /**
+   * Direct-transport configuration (docs/p2p-transport.md). All direct
+   * bearers are opportunistic upgrades: the relay path stays permanently
+   * eligible and direct failures are silent.
+   *
+   * - `lan` — LAN bearer (Node.js): UDP-broadcast discovery + TCP transfer
+   *   on the local subnet. Enabled by default (needs no permissions).
+   *   Pass `false` to disable, or `{ udpPort, tcpPort }` to override the
+   *   default ports (19205/19206) — e.g. to run several instances on one host.
+   */
+  transports?: {
+    lan?: boolean | { udpPort?: number; tcpPort?: number };
+  };
   /** Default: "open". */
   permissionModel?: PermissionModel;
   /** Push notification token. When set the Node stores the token alongside

@@ -219,22 +219,53 @@ export class LocalTransport implements Transport {
   // --------------------------------------------------------
 
   async send(packet: Packet, destination: string): Promise<void> {
+    // Broadcast contract: empty destination fans out to every identified
+    // LAN peer. Receivers match on destHash, so offering the (encrypted)
+    // packet to everyone is how directed delivery works on this bearer —
+    // device IDs are anonymous and deliberately unmapped to peer identities.
+    if (destination === '') {
+      const frame = this.framePacket(packet);
+      const writes: Promise<void>[] = [];
+      for (const conn of this.connections.values()) {
+        if (!conn.peerId) continue; // not yet identified
+        writes.push(this.writeFrame(conn, frame));
+      }
+      // Zero LAN peers is a quiet no-op, not an error.
+      await Promise.allSettled(writes);
+      return;
+    }
+
     const conn = this.connections.get(destination);
     if (!conn) {
       throw new Error(`No active connection to peer ${destination}`);
     }
+    await this.writeFrame(conn, this.framePacket(packet));
+  }
 
+  private framePacket(packet: Packet): Buffer {
     const payload = serializePacket(packet);
     const frame = Buffer.alloc(LENGTH_PREFIX_SIZE + payload.length);
     frame.writeUInt32BE(payload.length, 0);
     payload.copy(frame, LENGTH_PREFIX_SIZE);
+    return frame;
+  }
 
-    await new Promise<void>((resolve, reject) => {
+  private writeFrame(conn: PeerConnection, frame: Buffer): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       conn.socket.write(frame, (err) => {
         if (err) reject(err);
         else resolve();
       });
     });
+  }
+
+  /** Number of identified, live LAN peer connections. */
+  connectedPeerCount(): number {
+    let count = 0;
+    for (const conn of this.connections.values()) {
+      if (conn.peerId) count++;
+    }
+    return count;
   }
 
   onReceive(callback: (packet: Packet, source: string) => void): void {

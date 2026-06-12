@@ -131,7 +131,7 @@ export class MessageHandler {
   // Incoming data packets
   // ----------------------------------------------------------------
 
-  handleDataPacket(packet: Packet): void {
+  handleDataPacket(packet: Packet, onUndecryptable?: () => void): void {
     try {
       const { header, ciphertextBody } = deserializeRatchetHeader(packet.encryptedPayload);
 
@@ -174,6 +174,10 @@ export class MessageHandler {
       }
 
       if (!decrypted || !matchedPeerId) {
+        // Undecryptable: release the packet-level dedup slot so a copy
+        // arriving on another bearer (dual-send) can still be processed —
+        // this copy consumed nothing.
+        onUndecryptable?.();
         // If the dhKey indexed to a known peer but ratchetDecrypt threw,
         // the session for THAT peer is the broken one — pass the hint so
         // the coordinator can target a single re-handshake rather than
@@ -259,7 +263,9 @@ export class MessageHandler {
         });
       }
     } catch {
-      // Malformed packet — drop silently
+      // Malformed packet — drop silently (and release the dedup slot;
+      // an identical copy can't do better, but unmarking is harmless).
+      onUndecryptable?.();
     }
   }
 

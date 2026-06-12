@@ -1,6 +1,6 @@
 # P2P Transport — Opportunistic Direct Paths
 
-**Status:** v1 draft — design specification, not yet scheduled for implementation. Written so that adopters (and we) know exactly what the device-to-device layer will look like before any of it is built, the same spec-before-implementation discipline used for [federation](federation.md). Implementation is demand-gated: see [ADR-004](adr/004-opportunistic-transport-upgrade.md) for the decision record and the triggers.
+**Status:** v1 — **Phase 1 implemented** (2026-06-12): the LAN bearer carries real messages via opportunistic dual-send, verified by a relay-death integration test (`tests/lan-transport.test.ts` — two SDK processes keep messaging after the relay is killed). Phases 2–4 remain design-only and demand-gated. Written so that adopters (and we) know exactly what the device-to-device layer will look like before any of it is built, the same spec-before-implementation discipline used for [federation](federation.md). Implementation is demand-gated: see [ADR-004](adr/004-opportunistic-transport-upgrade.md) for the decision record and the triggers.
 
 This document specifies how MeshWhisper clients establish direct device-to-device transport — LAN, proximity radio (Bluetooth/Multipeer/Nearby), and internet WebRTC — as an *opportunistic upgrade* over the always-available relay path.
 
@@ -116,7 +116,7 @@ await MeshWhisper.init({
 
 | Phase | Scope | Effort | Trigger |
 |---|---|---|---|
-| 1 | Wire real-message delivery over the LAN bearer (dual-send broadcast — today only chaff traverses LAN links, see §2) + tests; `examples/local-first/` proving two devices messaging with the relay down; `onTransportUpgrade` | small | mostly built — finish it when an offline/local-first adopter use case appears |
+| 1 | ~~Wire real-message delivery over the LAN bearer~~ — **shipped 2026-06-12**: dual-send broadcast in `routeAndSend`, fan-out contract in `LocalTransport`, pre-decrypt packet dedup with release-on-undecryptable, `transports.lan` config knob, relay-death integration test. Remaining from this phase: `examples/local-first/`, `onTransportUpgrade` callback | done (core) | on-site/internal-network use cases (human and machine-to-machine) |
 | 2 | WebRTC direct paths (relay signaling, contacts-only, opt-in) | ~3–4 weeks | adopter pain on media bandwidth/latency, or a privacy-marketing need for "your messages can bypass even the relay" |
 | 3 | Native proximity bridges (Multipeer, Nearby; Swift/Kotlin) | months | an adopter shipping a native app that needs offline proximity messaging — do not build speculatively; carries App Store review risk (see ADR-001 §risks) |
 | 4 | Multi-hop device routing (activate `SocialGraphRouter` across direct links) | large | meaningful density of Phase 1–3 devices in real deployments |

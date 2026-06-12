@@ -191,6 +191,26 @@ export class BearerNegotiator {
   }
 
   /**
+   * Offer a packet to every *direct* bearer (everything except `internet`)
+   * as a broadcast. Used for the opportunistic dual-send path: outbound
+   * packets are offered to LAN/proximity peers alongside the guaranteed
+   * relay send, and receivers deduplicate. Failures are always silent —
+   * a direct path may only ever make delivery faster, never less reliable.
+   */
+  async broadcastLocal(packet: Packet): Promise<void> {
+    const directs = Array.from(this.transports.values()).filter(
+      (t) => t.type !== 'internet',
+    );
+    await Promise.allSettled(
+      directs.map(async (t) => {
+        if (await t.isAvailable()) {
+          await t.send(packet, '');
+        }
+      }),
+    );
+  }
+
+  /**
    * Broadcast a packet across **all** available transports concurrently.
    * Errors on individual transports are suppressed so a single failure
    * does not prevent delivery on other bearers.

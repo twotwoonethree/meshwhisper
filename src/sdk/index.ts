@@ -34,6 +34,7 @@ import {
   deriveDestHash,
   getCurrentEpochHour,
   concat,
+  hash,
 } from '../crypto/index.js';
 import {
   serializePreKeyBundle,
@@ -715,15 +716,19 @@ export class MeshWhisper {
       localTransport = new NoOpTransport('local_net');
       nodeTransport = new BrowserTransport(primaryNodeUrl, getDestHashes, config.push, onNodeStatus);
     } else {
-      const [{ WebSocketTransport }, { LocalTransport }, { NodeTransport }] =
+      const [{ WebSocketTransport }, { LocalTransport }, { NodeTransport }, { NoOpTransport }] =
         await Promise.all([
           import('../transport/websocket/index.js'),
           import('../transport/local/index.js'),
           import('../transport/node/index.js'),
+          import('../transport/noop/index.js'),
         ]);
       const deviceId = randomBytes(16);
       wsTransport = new WebSocketTransport();
-      localTransport = new LocalTransport(deviceId);
+      const lanConfig = config.transports?.lan ?? true;
+      localTransport = lanConfig === false
+        ? new NoOpTransport('local_net')
+        : new LocalTransport(deviceId, typeof lanConfig === 'object' ? lanConfig : undefined);
       nodeTransport = new NodeTransport(primaryNodeUrl, getDestHashes, config.push, onNodeStatus);
     }
 
@@ -2379,21 +2384,68 @@ export class MeshWhisper {
 
     if (packet.flags === PacketFlags.CHAFF) return;
 
+    // Packet-level dedup BEFORE decryption. Dual-send (relay + direct
+    // bearers, docs/p2p-transport.md §6) delivers the same packet twice;
+    // a duplicate ratchet ciphertext would fail decryption (the message
+    // key is consumed by the first copy) and fire onDecryptFailure, which
+    // can trigger a spurious re-handshake. Keyed by content hash because
+    // senderEphemeralId is all-zeros on some construction paths.
+    //
+    // The mark is RELEASED if this copy turns out to be undecryptable
+    // (session not ready yet) so the other bearer's copy still delivers —
+    // marking before knowing the outcome would turn a transient decrypt
+    // failure into permanent message loss.
+    const dupKey = this.inboundPacketKey(packet);
+    if (this.isDuplicateInbound(dupKey)) return;
+    this.markInboundSeen(dupKey);
+
     const isForUs = this.namespaceManager.isMessageForUs(packet.destHash, this.identity.getPublicKey());
     if (isForUs) {
-      this.processLocalPacket(packet, source);
+      this.processLocalPacket(packet, source, () => this.seenInboundPackets.delete(dupKey));
     } else {
       this.maybeRelay(packet, source, bearer);
     }
   }
 
-  private processLocalPacket(packet: Packet, source: string): void {
+  // Rolling LRU of inbound packet content hashes for dual-send dedup.
+  private readonly seenInboundPackets = new Map<string, number>();
+  private static readonly SEEN_INBOUND_MAX = 2048;
+  private static readonly SEEN_INBOUND_TTL_MS = 60_000;
+
+  private inboundPacketKey(packet: Packet): string {
+    return uint8ArrayToHex(
+      hash(concat(packet.destHash, packet.senderEphemeralId, packet.encryptedPayload)),
+    ).slice(0, 32);
+  }
+
+  private isDuplicateInbound(key: string): boolean {
+    const seenAt = this.seenInboundPackets.get(key);
+    return seenAt !== undefined && Date.now() - seenAt < MeshWhisper.SEEN_INBOUND_TTL_MS;
+  }
+
+  private markInboundSeen(key: string): void {
+    const now = Date.now();
+    this.seenInboundPackets.set(key, now);
+    if (this.seenInboundPackets.size > MeshWhisper.SEEN_INBOUND_MAX) {
+      for (const [k, t] of this.seenInboundPackets) {
+        if (now - t >= MeshWhisper.SEEN_INBOUND_TTL_MS) this.seenInboundPackets.delete(k);
+        if (this.seenInboundPackets.size <= MeshWhisper.SEEN_INBOUND_MAX) break;
+      }
+      // Still over cap (all fresh): evict oldest insertion order.
+      while (this.seenInboundPackets.size > MeshWhisper.SEEN_INBOUND_MAX) {
+        const oldest = this.seenInboundPackets.keys().next().value as string;
+        this.seenInboundPackets.delete(oldest);
+      }
+    }
+  }
+
+  private processLocalPacket(packet: Packet, source: string, onUndecryptable?: () => void): void {
     switch (packet.flags) {
       case PacketFlags.HANDSHAKE:
         this.sessionManager.handleHandshakePacket(packet.encryptedPayload);
         break;
       case PacketFlags.DATA:
-        this.messageHandler.handleDataPacket(packet);
+        this.messageHandler.handleDataPacket(packet, onUndecryptable);
         break;
       case PacketFlags.ACK:
         break;
@@ -2486,6 +2538,12 @@ export class MeshWhisper {
   // ================================================================
 
   private async routeAndSend(packet: Packet, recipientId: string): Promise<void> {
+    // Opportunistic dual-send (docs/p2p-transport.md §6): offer the packet to
+    // any connected LAN/proximity peers in parallel with the guaranteed path.
+    // Receivers dedup by packet ID, and only the addressee can match the
+    // destHash, so this is safe, private, and free to fail silently.
+    this.negotiator.broadcastLocal(packet).catch(() => {});
+
     try {
       await this.negotiator.send(packet, recipientId);
       return;
