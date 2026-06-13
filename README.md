@@ -201,9 +201,12 @@ Node operators can also choose to **peer**: relay-to-relay [federation](docs/fed
 - **[docs/getting-started.md](docs/getting-started.md)** — complete walkthrough from zero to working PWA
 - **[docs/api.md](docs/api.md)** — full SDK API reference
 - **[prudence/REFERENCE.md](prudence/REFERENCE.md)** — Prudence as a living example: which SDK feature lives where in the demo app, and the non-obvious patterns to copy
-- **[examples/](examples/)** — Minimal end-to-end integrations. Start with **[support-bot](examples/support-bot/)** — a customer-service AI agent as a MeshWhisper peer, ~150 lines.
+- **[examples/](examples/)** — Minimal end-to-end integrations. Start with **[support-bot](examples/support-bot/)** — a customer-service AI agent as a MeshWhisper peer, ~150 lines. Or **[local-first](examples/local-first/)** — on-site human and machine-to-machine comms that keep working when the relay (or the internet) is gone.
 - **[docs/identity-patterns.md](docs/identity-patterns.md)** — Six identity-derivation patterns (username+password, email, phone, OS keychain, Secure Enclave, passkey) — pick what matches your threat model; the SDK is neutral
 - **[docs/self-hosting.md](docs/self-hosting.md)** — server configuration, all environment variables
+- **[docs/local-networks.md](docs/local-networks.md)** — running on isolated/air-gapped networks; LAN peer-to-peer delivery so conversations survive losing the relay
+- **[docs/federation.md](docs/federation.md)** — relay-to-relay peering protocol (open mode joins the mesh with one env var and one bootstrap entry)
+- **[docs/p2p-transport.md](docs/p2p-transport.md)** — opportunistic direct-transport spec; what's shipped (LAN) and what's demand-gated (WebRTC, proximity radio)
 - **[docs/codebase-overview.md](docs/codebase-overview.md)** — technical overview for contributors and reviewers
 - **[docs/direction.md](docs/direction.md)** — what MeshWhisper is today, where it's going, what we're deliberately not building
 - **[docs/adr/](docs/adr/)** — architecture decision records: the *why* behind significant choices

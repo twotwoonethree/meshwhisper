@@ -38,6 +38,7 @@ interface MeshWhisperConfig {
   username?: string;
   developerKey?: string;
   permissionModel?: 'open' | 'mutual' | 'introduction' | 'transactional' | 'custom';
+  transports?: { lan?: boolean | { udpPort?: number; tcpPort?: number } };
   push?: PushConfig;
   storage?: StorageBackend;
   messageRetention?: 'unbounded' | { kind: 'count'; max: number } | { kind: 'ageMs'; max: number };
@@ -66,6 +67,7 @@ interface MeshWhisperConfig {
 | `username` | No | — | Human-readable username registered with the relay alongside your pre-key bundle. Other users can add you with `addContactByKey('@alice')` instead of a raw public key. Usernames are scoped to the namespace; ownership semantics are governed by the namespace's `usernamePolicy` (default `'signed-transfer'` — username is sticky to whichever key first claimed it; takeover requires a signed transfer token). See [Namespace policy](#namespace-policy) and [Username transfer](#username-transfer). |
 | `developerKey` | No | random | Base64-encoded developer public key. Tie to a stable key in production so sessions survive app updates. |
 | `permissionModel` | No | `"open"` | Who can send messages. `"open"` = anyone. `"mutual"` = only existing contacts. |
+| `transports` | No | `{ lan: true }` | Direct-transport config ([p2p-transport.md](p2p-transport.md)). `lan` enables the LAN bearer (Node.js only): peers on the same subnet deliver messages directly, so established conversations survive relay outages. `false` disables; `{ udpPort, tcpPort }` overrides the default ports (19205/19206), e.g. for multiple instances on one host. Browsers ignore this (no LAN discovery API exists). |
 | `push` | No | — | Push notification configuration. Required for offline delivery. See [`PushConfig`](#pushconfig). |
 | `storage` | No | auto | Storage backend. Auto-selected in browser (IDBStorage) and Node.js (null). Pass explicitly to override. See [`StorageBackend`](#storagebackend). |
 | `messageRetention` | No | `'unbounded'` | Per-conversation history cap. `'unbounded'` keeps everything (default, suitable for customer-service / compliance). `{ kind: 'count', max }` keeps the N most recent. `{ kind: 'ageMs', max }` drops messages older than `max` ms. Eviction runs on write and at boot. |

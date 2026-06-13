@@ -183,23 +183,34 @@ The intended use case is a developer who wants to add messaging to their existin
 - `NodeTransport` — ws package, Node.js only
 - `NoOpTransport` — stub for unavailable transports (e.g. LAN transport in browser)
 - `WebSocketTransport` — direct P2P WebSocket (Node.js only, used for mesh networking)
-- `LocalTransport` — LAN UDP discovery + TCP (Node.js only)
-- `PlatformP2PTransport` — bridge for native P2P (Apple Multipeer, Google Nearby)
-- `BearerNegotiator` — selects best available transport
+- `LocalTransport` — LAN UDP discovery + TCP (Node.js only). Implements the broadcast fan-out contract: destination `''` frames the packet to every identified LAN peer. Receivers match on destHash, so addressed delivery works through promiscuous offering. Auto-enabled in Node.js; configurable via `MeshWhisperConfig.transports.lan`
+- `PlatformP2PTransport` — interface shell for native P2P (Apple Multipeer, Google Nearby); no bridge implementations exist yet
+- `BearerNegotiator` — selects best available transport for unicast; `broadcastLocal` offers a packet to all direct (non-internet) bearers in parallel for the opportunistic dual-send path. See [docs/p2p-transport.md](p2p-transport.md) for the full model
 - `init()` dynamically imports platform-appropriate transports — browser bundles never include `ws` or `fs`
+
+### Federation (`node/src/federation.ts`)
+- WebSocket subprotocol `meshwhisper-federation.v1`: mutual Ed25519 handshake (Hello + signed nonces), then PacketForward and Heartbeat frames
+- Modes: `FEDERATION_MODE=open|allowlist|off` (unset = allowlist if peers file non-empty, else off)
+- Open mode admits any peer completing the handshake, up to `FEDERATION_MAX_PEERS` (default 64)
+- Per-peer rate limiting (`FEDERATION_RATE_LIMIT`, default 6000 frames/min/peer, sliding window, silent drop)
+- Reactive blocklist (`FEDERATION_BLOCKLIST_FILE`) rejected at handshake regardless of mode
+- Hop-count TTL (`FEDERATION_MAX_HOPS`, default 3), 8KB frame cap, packet-id LRU dedup (1024 @ 60s)
+- Spec: [docs/federation.md](federation.md)
 
 ### Node relay server (`node/src/index.ts`)
 - WebSocket relay: routes binary packets by destination hash
 - SQLite persistence (`better-sqlite3`, WAL mode): blobs, push registrations, prekey bundles, and media all survive container restarts. `DB_PATH` env var controls location (default `./meshwhisper.db`; mount `/data` volume in Docker)
-- Blob store: queues encrypted blobs for offline recipients, TTL 72h, max 500/hash, max 256KB/blob
+- Blob store: queues encrypted blobs for offline recipients, default TTL 720h (30 days, `BLOB_TTL_HOURS`), max 500/hash, max 256KB/blob
 - Push token store: persisted to SQLite, survives WebSocket disconnect and server restart
 - Prekey directory: `POST /directory`, `GET /directory` — rate limited, persisted to SQLite
 - Media store: `POST /media`, `GET /media/:id` — TTL 7 days, max 50MB/file, persisted to SQLite
 - Archive store: `PUT /archive/:peerId`, `GET /archive/:peerId` — encrypted user backup, max 12MB/blob, SQLite-persisted, write-authenticated by SHA-256 of HKDF-derived token (first writer claims the slot)
 - Push webhook: POSTs to `PUSH_WEBHOOK_URL` when blob arrives for offline device
-- Rate limiting: sliding window per IP, configurable via env vars, `X-Forwarded-For` aware (in-memory, intentionally — ephemeral)
+- Rate limiting: sliding window per IP, configurable via env vars, `X-Forwarded-For` aware when `TRUST_PROXY=1`
+- Prometheus metrics: `GET /metrics` exposes `meshwhisper_*` gauges/counters including 12 federation series
+- Federation upgrade routing: WebSockets requesting the `meshwhisper-federation.v1` subprotocol are routed to the federation manager instead of the relay
 - CORS: all HTTP endpoints include `Access-Control-Allow-Origin: *` and handle OPTIONS preflight
-- Health check: `GET /health` returns clients, blobs, prekeys, push registrations, media counts
+- Health check: `GET /health` returns clients, blobs, prekeys, push registrations, media counts, federation peer counts
 - Graceful shutdown on SIGINT/SIGTERM — closes SQLite connection cleanly
 
 ### Push service (`push-service/`)
@@ -215,10 +226,11 @@ The intended use case is a developer who wants to add messaging to their existin
 - Built with esbuild to 1.6KB IIFE bundle
 
 ### CLI (`cli/`)
-- `npx @meshwhisper/cli init` — interactive scaffolding
-- Generates developer key (32 bytes base64) and salt (32 bytes hex)
-- Prints `.env` block and SDK init snippet
-- For self-hosted: generates `docker-compose.yml` with Node + push services
+- `npx @meshwhisper/cli init` — interactive scaffolding: prompts for namespace, Foundation-vs-self-hosted, Web Push, and whether to join open federation, plus app shape (browser/Node)
+- For self-hosted: generates `meshwhisper-node/` with `docker-compose.yml`, standalone `Dockerfile.node`/`Dockerfile.push` that install the published `@meshwhisper/node` and `@meshwhisper/push-service` packages, a 0600 `.env` with generated VAPID keys and derived `BASE_URL`, and `federation-peers.json` bootstrapped against the Foundation relay
+- Generates a working SDK skeleton (`src/meshwhisper.ts` for browser, `meshwhisper-chat.mts` for Node)
+- `npx @meshwhisper/cli doctor [url]` — health-check any node (Foundation by default)
+- `npx @meshwhisper/cli vapid` — RFC 8292 Web Push key pair via `node:crypto` (no deps)
 
 ### Safety numbers (`src/fingerprint/`)
 - Signal-style 60-digit verification codes derived from a sorted BLAKE3 hash of two Ed25519 identity keys

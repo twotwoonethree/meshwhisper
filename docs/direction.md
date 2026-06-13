@@ -1,6 +1,6 @@
 # Direction
 
-A snapshot of where MeshWhisper is today and where it's going. Last updated: 2026-06-10.
+A snapshot of where MeshWhisper is today and where it's going. Last updated: 2026-06-13.
 
 This is not a roadmap with dates and it is not a manifesto. It is a record of the strategic decisions the project is operating under, with pointers to the artifacts that make those decisions concrete.
 

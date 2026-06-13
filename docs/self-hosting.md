@@ -47,7 +47,7 @@ services:
       BASE_URL: "https://relay.myapp.com"   # ← your public HTTPS URL (no trailing slash)
       PUSH_WEBHOOK_URL: "http://push:4000/notify"
       DB_PATH: "/data/meshwhisper.db"       # persist data across restarts
-      BLOB_TTL_HOURS: "72"                  # how long to queue messages for offline devices
+      BLOB_TTL_HOURS: "720"                 # how long to queue messages for offline devices (default 30 days)
       MEDIA_TTL_HOURS: "168"               # how long to keep uploaded media (7 days)
     volumes:
       - node_data:/data
@@ -183,7 +183,7 @@ server {
 | `PORT` | `8080` | HTTP + WebSocket listen port |
 | `BASE_URL` | *(host header)* | Public-facing HTTPS base URL. Required behind a proxy. Example: `https://relay.myapp.com` |
 | `PUSH_WEBHOOK_URL` | *(none)* | URL of the push service `/notify` endpoint. Required for offline push delivery. Example: `http://push:4000/notify` |
-| `BLOB_TTL_HOURS` | `72` | How long to queue encrypted blobs for offline recipients (hours) |
+| `BLOB_TTL_HOURS` | `720` (30 days) | How long to queue encrypted blobs for offline recipients (hours) |
 | `MAX_BLOB_SIZE` | `262144` (256 KB) | Maximum size of a single queued blob (bytes) |
 | `MAX_BLOBS_PER_HASH` | `500` | Maximum queued blobs per destination hash |
 | `MEDIA_TTL_HOURS` | `168` (7 days) | How long to retain uploaded media blobs (hours) |
