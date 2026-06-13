@@ -927,6 +927,9 @@ export class MeshWhisper {
         ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
         ...(options?.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
       });
+      // Mirror to our own other devices so the user's other clients
+      // also see the outbound message. Best-effort, never blocks.
+      this.fanOutToOwnDevices(recipientId, false, payload, messageId, timestamp, options);
     }
   }
 
@@ -1315,6 +1318,10 @@ export class MeshWhisper {
           }
         }),
     );
+
+    // Mirror to our own other devices. The sync carries the groupId so the
+    // receiving device stores it under the group conversation.
+    this.fanOutToOwnDevices(groupId, true, payload, messageId, now, options);
   }
 
   // ================================================================
@@ -2692,6 +2699,46 @@ export class MeshWhisper {
   }
 
   /**
+   * Self-fan-out (Signal-style "sync messages"): when this device sends a
+   * message, mirror it to every OTHER device on the same account so the
+   * user's other devices show the outbound message in their UI too.
+   * Best-effort and silent — failure here never blocks the primary send.
+   *
+   * Security: the receiver verifies the sync-source's accountKey matches
+   * the local accountKey before applying, so no contact can inject a
+   * "you said X" into your history.
+   */
+  private fanOutToOwnDevices(
+    recipientId: string,
+    isGroup: boolean,
+    payload: Uint8Array,
+    messageId: string,
+    timestamp: number,
+    options?: SendOptions,
+  ): void {
+    const me = this.getLocalPeerId();
+    const myAccountKey = this.permissionManager.getAccountForDevice(me) ?? me;
+    const myDevices = this.permissionManager.getDevicesForAccount(myAccountKey)
+      .filter((d) => d !== me);
+    if (myDevices.length === 0) return;
+
+    const sync: Record<string, unknown> = {
+      __mw_ctrl: 'sync_send',
+      syncRecipientId: recipientId,
+      syncIsGroup: isGroup,
+      syncMessageId: messageId,
+      syncTimestamp: timestamp,
+      syncPayload: Array.from(payload),
+      ...(options?.replyTo ? { syncReplyTo: options.replyTo } : {}),
+      ...(options?.forwardedFrom ? { syncForwardedFrom: options.forwardedFrom } : {}),
+      ...(options?.expiry ? { syncExpiry: options.expiry } : {}),
+    };
+    for (const device of myDevices) {
+      this.sendControl(device, sync);
+    }
+  }
+
+  /**
    * Send a control message scoped to a conversation. DMs deliver to the
    * peer; groups fan out the same control to every other member, with
    * `groupId` set so receivers apply the change to the group conversation
@@ -2936,6 +2983,60 @@ export class MeshWhisper {
         try {
           this.onDisappearingMessagesChangedHandler?.(conversationId, normalized, fromPeerId);
         } catch { /* swallow handler throws */ }
+        break;
+      }
+
+      case 'sync_send': {
+        // A mirror of an outbound message from one of our own devices.
+        // Security: the sender's account must match ours. Without this
+        // check any contact could inject "you said X" into your history.
+        if (
+          typeof ctrl.syncRecipientId !== 'string' ||
+          typeof ctrl.syncIsGroup !== 'boolean' ||
+          typeof ctrl.syncMessageId !== 'string' ||
+          typeof ctrl.syncTimestamp !== 'number' ||
+          !Array.isArray(ctrl.syncPayload)
+        ) break;
+        const me = this.getLocalPeerId();
+        const myAccountKey = this.permissionManager.getAccountForDevice(me) ?? me;
+        const senderAccountKey = this.permissionManager.getAccountForDevice(fromPeerId);
+        if (senderAccountKey !== myAccountKey) break; // not from one of our devices
+        const payloadBytes = new Uint8Array(ctrl.syncPayload);
+        const expiresAt = ctrl.syncExpiry
+          ? ctrl.syncTimestamp + ctrl.syncExpiry * 1000
+          : undefined;
+        const stored: import('../persistence/types.js').StoredMessage = {
+          id: ctrl.syncMessageId,
+          conversationId: ctrl.syncRecipientId,
+          senderId: me, // we sent it, on the other device
+          recipientId: ctrl.syncRecipientId,
+          payload: Array.from(payloadBytes),
+          timestamp: ctrl.syncTimestamp,
+          direction: 'outbound',
+          status: 'sent',
+          ...(expiresAt ? { expiresAt } : {}),
+          ...(ctrl.syncIsGroup ? { groupId: ctrl.syncRecipientId, groupSenderId: me } : {}),
+          ...(ctrl.syncReplyTo ? { replyTo: ctrl.syncReplyTo } : {}),
+          ...(ctrl.syncForwardedFrom ? { forwardedFrom: ctrl.syncForwardedFrom } : {}),
+        };
+        this.messageHandler.saveMessage(stored).then(() => {
+          // Surface to the app so UIs can refresh the conversation view.
+          // The Message shape mirrors what the original sender's saveMessage
+          // would have stored on the sending device.
+          const message: import('../types.js').Message = {
+            id: stored.id,
+            senderId: me,
+            recipientId: ctrl.syncRecipientId!,
+            payload: payloadBytes,
+            timestamp: stored.timestamp,
+            urgency: 'normal',
+            ...(ctrl.syncExpiry ? { expiry: ctrl.syncExpiry } : {}),
+            ...(ctrl.syncIsGroup ? { groupId: ctrl.syncRecipientId, groupSenderId: me } : {}),
+            ...(ctrl.syncReplyTo ? { replyTo: ctrl.syncReplyTo } : {}),
+            ...(ctrl.syncForwardedFrom ? { forwardedFrom: ctrl.syncForwardedFrom } : {}),
+          };
+          try { this.config.onMessage?.(message); } catch { /* swallow */ }
+        }).catch(() => {});
         break;
       }
 

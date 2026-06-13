@@ -10,6 +10,12 @@ preserved in git history but not enumerated here.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-14
+
+### Added
+
+- **Self-fan-out.** Messages you send from one of your linked devices now mirror to your other linked devices. Signal-style: a `sync_send` control fires alongside every outbound DM and group message, carrying the messageId, timestamp, payload, and any `replyTo`/`forwardedFrom`/`expiry`. The receiving sibling device verifies the sender shares the local account key (no history-poisoning by random contacts), persists the message as outbound under the original conversation, and fires `onMessage` so the UI updates immediately. Prudence handles `senderId === getLocalPeerId()` as an outbound mirror — no notification, no unread bump, conversation list reorders by recency. Same messageId across every device for free cross-device dedup.
+
 ## [0.4.0] — 2026-06-13
 
 ### Added

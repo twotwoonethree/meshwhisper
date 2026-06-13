@@ -125,7 +125,8 @@ export interface ControlMessage {
     | 'device_revoked'
     | 'device_linked'
     | 'reaction'
-    | 'disappearing_messages';
+    | 'disappearing_messages'
+    | 'sync_send';
   /** session_ping / session_pong correlation id. */
   sessionPingId?: string;
   /** history_replay: a chunk of historical messages from the sender's view. */
@@ -162,6 +163,19 @@ export interface ControlMessage {
   kickedPeerId?: string;
   /** group_rename: the new group name. Only the current admin may issue this. */
   newGroupName?: string;
+  /**
+   * sync_send: self-fan-out from another device of the same account.
+   * The receiver verifies the sender shares the local account key before
+   * applying the message as outbound to the named conversation.
+   */
+  syncRecipientId?: string;
+  syncIsGroup?: boolean;
+  syncMessageId?: string;
+  syncTimestamp?: number;
+  syncPayload?: number[];
+  syncReplyTo?: { messageId: string; snippetText?: string };
+  syncForwardedFrom?: string;
+  syncExpiry?: number;
   messageId?: string;
   // entropy_challenge
   challengeData?: number[];

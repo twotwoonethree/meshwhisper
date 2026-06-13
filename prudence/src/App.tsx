@@ -248,7 +248,11 @@ export default function App() {
     const text = decoder(Array.from(msg.payload));
     if (!text) return;
 
-    const conversationId = msg.groupId ?? msg.senderId;
+    // Self-fan-out (sdk 0.5+): a message I sent from another linked device
+    // arrives here as a sync. The senderId is *this* device's peerId, and
+    // the conversation key is the original recipient (or groupId).
+    const isSelfSync = msg.senderId === MeshWhisper.getLocalPeerId();
+    const conversationId = msg.groupId ?? (isSelfSync ? msg.recipientId : msg.senderId);
     const isGroup = !!msg.groupId;
 
     try {
@@ -292,8 +296,8 @@ export default function App() {
         conversationId,
         text: isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'),
         timestamp: msg.timestamp ?? Date.now(),
-        direction: 'inbound',
-        status: 'delivered',
+        direction: isSelfSync ? 'outbound' : 'inbound',
+        status: isSelfSync ? 'sent' : 'delivered',
         media: { ...mediaPtr, status: 'pending' },
         ...(isGroup && msg.groupSenderId ? { senderId: msg.groupSenderId, senderName: senderDisplayName(msg.groupSenderId) } : {}),
       };
@@ -301,7 +305,7 @@ export default function App() {
         const existingConv = prev.conversations.find((c) => c.id === conversationId);
         const contact = existingConv?.contact ?? makeContact(conversationId);
         const isActive = prev.activeConversationId === conversationId;
-        if (isActive && mediaMsg.id) {
+        if (isActive && mediaMsg.id && !isSelfSync) {
           // Conversation is open — mark as read immediately so the unread
           // badge doesn't resurface on the next reload.
           (isGroup
@@ -310,24 +314,29 @@ export default function App() {
           ).catch(() => {});
           mediaMsg.status = 'read';
         }
+        const unread = isSelfSync
+          ? (existingConv?.unread ?? 0)
+          : (isActive ? 0 : (existingConv?.unread ?? 0) + 1);
         const updatedConv: Conversation = existingConv
-          ? { ...existingConv, lastMessage: mediaMsg, unread: isActive ? 0 : existingConv.unread + 1 }
-          : { id: conversationId, contact, lastMessage: mediaMsg, unread: 1, isTyping: false };
+          ? { ...existingConv, lastMessage: mediaMsg, unread }
+          : { id: conversationId, contact, lastMessage: mediaMsg, unread, isTyping: false };
         const conversations = existingConv
           ? prev.conversations.map((c) => (c.id === conversationId ? updatedConv : c))
           : [updatedConv, ...prev.conversations];
         conversations.sort((a, b) => (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0));
-        const isActiveAndVisible = isActive && document.visibilityState === 'visible' && document.hasFocus();
-        const senderLabel = isGroup
-          ? (existingConv?.contact.displayName ?? '@group')
-          : (`@${contact.username ?? contact.peerId.slice(0, 8)}`);
-        showMessageNotification({
-          title: senderLabel,
-          body: mediaMsg.text,
-          conversationId,
-          timestamp: mediaMsg.timestamp,
-          suppressBecauseActive: isActiveAndVisible,
-        });
+        if (!isSelfSync) {
+          const isActiveAndVisible = isActive && document.visibilityState === 'visible' && document.hasFocus();
+          const senderLabel = isGroup
+            ? (existingConv?.contact.displayName ?? '@group')
+            : (`@${contact.username ?? contact.peerId.slice(0, 8)}`);
+          showMessageNotification({
+            title: senderLabel,
+            body: mediaMsg.text,
+            conversationId,
+            timestamp: mediaMsg.timestamp,
+            suppressBecauseActive: isActiveAndVisible,
+          });
+        }
         return { ...prev, conversations, messages: { ...prev.messages, [conversationId]: [...(prev.messages[conversationId] ?? []), mediaMsg] } };
       });
       return;
@@ -338,8 +347,8 @@ export default function App() {
       conversationId,
       text,
       timestamp: msg.timestamp ?? Date.now(),
-      direction: 'inbound',
-      status: 'delivered',
+      direction: isSelfSync ? 'outbound' : 'inbound',
+      status: isSelfSync ? 'sent' : 'delivered',
       ...(isGroup && msg.groupSenderId ? {
         senderId: msg.groupSenderId,
         senderName: senderDisplayName(msg.groupSenderId),
@@ -353,9 +362,10 @@ export default function App() {
       const contact = existingConv?.contact ?? makeContact(conversationId);
       const isActive = prev.activeConversationId === conversationId;
 
-      if (isActive) {
-        // Conversation is open — mark as read immediately so the unread
-        // badge doesn't resurface on the next reload.
+      // For inbound messages with the conversation open, mark as read so
+      // the unread badge doesn't resurface on the next reload. Self-sync
+      // messages are already "ours" — nothing to mark read.
+      if (isActive && !isSelfSync) {
         (isGroup
           ? MeshWhisper.markReadLocal(appMsg.id, conversationId)
           : MeshWhisper.markRead(appMsg.id, conversationId)
@@ -363,9 +373,14 @@ export default function App() {
         appMsg.status = 'read';
       }
 
+      // Self-sync never bumps unread or fires a notification — it's a
+      // mirror of something I just typed on another device.
+      const unread = isSelfSync
+        ? (existingConv?.unread ?? 0)
+        : (isActive ? 0 : (existingConv?.unread ?? 0) + 1);
       const updatedConv: Conversation = existingConv
-        ? { ...existingConv, lastMessage: appMsg, unread: isActive ? 0 : existingConv.unread + 1 }
-        : { id: conversationId, contact, lastMessage: appMsg, unread: 1, isTyping: false };
+        ? { ...existingConv, lastMessage: appMsg, unread }
+        : { id: conversationId, contact, lastMessage: appMsg, unread, isTyping: false };
 
       const conversations = existingConv
         ? prev.conversations.map((c) => (c.id === conversationId ? updatedConv : c))
@@ -375,17 +390,19 @@ export default function App() {
         (b.lastMessage?.timestamp ?? 0) - (a.lastMessage?.timestamp ?? 0),
       );
 
-      const isActiveAndVisible = isActive && document.visibilityState === 'visible' && document.hasFocus();
-      const senderLabel = isGroup && msg.groupSenderId
-        ? `${senderDisplayName(msg.groupSenderId)} · ${existingConv?.contact.displayName ?? 'group'}`
-        : `@${contact.username ?? contact.peerId.slice(0, 8)}`;
-      showMessageNotification({
-        title: senderLabel,
-        body: appMsg.text,
-        conversationId,
-        timestamp: appMsg.timestamp,
-        suppressBecauseActive: isActiveAndVisible,
-      });
+      if (!isSelfSync) {
+        const isActiveAndVisible = isActive && document.visibilityState === 'visible' && document.hasFocus();
+        const senderLabel = isGroup && msg.groupSenderId
+          ? `${senderDisplayName(msg.groupSenderId)} · ${existingConv?.contact.displayName ?? 'group'}`
+          : `@${contact.username ?? contact.peerId.slice(0, 8)}`;
+        showMessageNotification({
+          title: senderLabel,
+          body: appMsg.text,
+          conversationId,
+          timestamp: appMsg.timestamp,
+          suppressBecauseActive: isActiveAndVisible,
+        });
+      }
 
       return {
         ...prev,
