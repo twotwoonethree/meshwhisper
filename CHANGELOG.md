@@ -10,6 +10,16 @@ preserved in git history but not enumerated here.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-13
+
+### Added
+
+- **Group fan-out for messenger features.** Reactions, quoted replies, message forwarding, and disappearing messages now work in groups — previously DM-only. The control wire format gains a `groupId` field on `reaction` and `disappearing_messages` so receivers apply the change to the group conversation; `sendToGroup` now honours `replyTo`/`forwardedFrom`/`expiry`/the group's disappearing-messages policy; `forwardMessage` routes to a group via `sendToGroup` when the destination is a group id. Prudence DM-only gates removed — the existing UI works in groups unchanged.
+
+### Fixed
+
+- **Group messages now have a stable id across every receiver's stored copy.** Previously each per-member fan-out built its own envelope id in `sendMessageRaw`, so the sender, receiver A, and receiver B held the same logical message under three different ids — breaking reactions, replies, forwarding, and delete-by-id for groups. `sendToGroup` now allocates one `messageId` and threads it through the `__mw_grp` envelope; receivers prefer the inner id over the outer.
+
 ## [0.3.0] — 2026-06-12
 
 ### Added

@@ -285,7 +285,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             </svg>
           </button>
         )}
-        {!group && onSetDisappearing && (
+        {onSetDisappearing && (
           <button
             onClick={() => setShowDisappearingPicker(true)}
             className={`w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center transition-colors ${disappearingTtlMs ? 'text-brand-400' : 'text-slate-500 hover:text-white'}`}

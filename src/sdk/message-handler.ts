@@ -279,26 +279,41 @@ export class MessageHandler {
         __mw_grp: string;
         sid: string;
         d: number[];
+        mid?: string;
+        ts?: number;
+        replyTo?: { messageId: string; snippetText?: string };
+        forwardedFrom?: string;
+        expiry?: number;
       };
-      const { __mw_grp: groupId, sid: groupSenderId, d } = grpEnv;
+      const { __mw_grp: groupId, sid: groupSenderId, d, mid, ts, replyTo, forwardedFrom, expiry } = grpEnv;
       const ciphertext = new Uint8Array(d);
 
       if (!this.onGroupData) return;
       const result = this.onGroupData(groupId, groupSenderId, ciphertext, fromPeerId);
       if (!result) return;
 
-      const expiresAt = envelope.expiry ? envelope.timestamp + envelope.expiry * 1000 : undefined;
+      // Group messages carry replyTo / forwardedFrom / expiry / mid / ts on
+      // the inner __mw_grp envelope (sendMessageRaw fan-out builds a default
+      // outer envelope per member, so neither the id nor the metadata can
+      // ride there). Prefer them over the outer envelope, falling back to
+      // outer fields when present (older senders that don't set mid/ts).
+      const effExpiry = expiry ?? envelope.expiry;
+      const effTimestamp = ts ?? envelope.timestamp;
+      const effMessageId = mid ?? envelope.id;
+      const expiresAt = effExpiry ? effTimestamp + effExpiry * 1000 : undefined;
 
       const message: Message = {
-        id: envelope.id,
+        id: effMessageId,
         senderId: groupSenderId,
         recipientId: this.getLocalPeerId(),
         payload: result.plaintext,
-        timestamp: envelope.timestamp,
+        timestamp: effTimestamp,
         urgency: envelope.urgency as Message['urgency'],
-        expiry: envelope.expiry,
+        expiry: effExpiry,
         groupId,
         groupSenderId,
+        ...(replyTo ? { replyTo } : {}),
+        ...(forwardedFrom ? { forwardedFrom } : {}),
       };
 
       this.saveMessage({
@@ -313,6 +328,8 @@ export class MessageHandler {
         groupId,
         groupSenderId,
         expiresAt,
+        ...(replyTo ? { replyTo } : {}),
+        ...(forwardedFrom ? { forwardedFrom } : {}),
       }).catch(() => {});
 
       if (this.onMessage) {

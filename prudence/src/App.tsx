@@ -1818,11 +1818,12 @@ export default function App() {
             onTransferAdmin={activeConv.group ? (newAdminId) => handleTransferGroupAdmin(activeConv.id, newAdminId) : undefined}
             onKickMember={activeConv.group ? (peerId) => { void handleKickGroupMember(activeConv.id, peerId); } : undefined}
             onRenameGroup={activeConv.group ? (newName) => handleRenameGroup(activeConv.id, newName) : undefined}
-            onReact={activeConv.group ? undefined : (messageId, emoji) => handleReact(activeConv.id, messageId, emoji)}
-            onForwardMessage={activeConv.group ? undefined : (messageId, toPeerId) => handleForward(activeConv.id, messageId, toPeerId)}
-            onSetDisappearing={activeConv.group ? undefined : (ttlMs) => handleSetDisappearing(activeConv.id, ttlMs)}
-            disappearingTtlMs={activeConv.group ? null : (state.disappearingByConversation?.[activeConv.id] ?? null)}
-            forwardTargets={activeConv.group ? undefined : state.conversations.filter((c) => !c.group && c.id !== activeConv.id).map((c) => c.contact)}
+            onReact={(messageId, emoji) => handleReact(activeConv.id, messageId, emoji)}
+            onForwardMessage={(messageId, toPeerId) => handleForward(activeConv.id, messageId, toPeerId)}
+            onSetDisappearing={(ttlMs) => handleSetDisappearing(activeConv.id, ttlMs)}
+            disappearingTtlMs={state.disappearingByConversation?.[activeConv.id] ?? null}
+            // Forwarding targets: every other conversation (DMs and groups alike)
+            forwardTargets={state.conversations.filter((c) => c.id !== activeConv.id).map((c) => c.contact)}
             onAttach={activeConv.group ? undefined : (file) => { void handleAttach(activeConv.id, file); }}
             onDownloadMedia={(msgId) => handleDownloadMedia(msgId, activeConv.id)}
             onRestoreHistory={activeConv.group ? undefined : () => handleRestoreHistory(activeConv.id)}

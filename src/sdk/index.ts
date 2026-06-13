@@ -312,8 +312,8 @@ export class GroupHandle {
   get name(): string { return this.group.name; }
   get members(): string[] { return Array.from(this.group.members.keys()); }
 
-  async send(payload: Uint8Array): Promise<void> {
-    await this.sdk.sendToGroup(this.group.id, payload);
+  async send(payload: Uint8Array, options?: SendOptions): Promise<void> {
+    await this.sdk.sendToGroup(this.group.id, payload, options);
   }
 
   /**
@@ -1242,21 +1242,50 @@ export class MeshWhisper {
     return this.getGroupsInstance();
   }
 
-  async sendToGroup(groupId: string, payload: Uint8Array): Promise<void> {
+  async sendToGroup(groupId: string, payload: Uint8Array, options?: SendOptions): Promise<void> {
     this.assertRunning();
+
+    // Auto-apply the group's disappearing-messages policy if set. Same
+    // rule as sendMessage: explicit options.expiry always wins. This is
+    // what makes setDisappearingMessages(groupId, ttl) actually expire
+    // group messages — without this the TTL would only have shown up on
+    // DMs that happened to share an id with the group, which is nothing.
+    const policyTtlMs = this.disappearingMessages.get(groupId);
+    if (policyTtlMs && options?.expiry === undefined) {
+      options = { ...(options ?? {}), expiry: Math.floor(policyTtlMs / 1000) };
+    }
+
     const { ciphertext, senderId } = this.groupManager.encryptForGroup(groupId, payload);
     const members = this.groupManager.getMembers(groupId);
+
+    // Stable group messageId, shared across every member's stored copy.
+    // Each per-member sendMessageRaw would otherwise generate its own
+    // envelope id, breaking anything that names a group message later
+    // (reactions, replies, forwarding, delete) — receivers would all
+    // have different ids for the same logical message. The id is sent
+    // on the inner __mw_grp envelope and used by handleGroupEnvelope as
+    // the message id on the receiver's stored copy.
+    const messageId = this.messageHandler.createMessageId();
+    const now = Date.now();
+    const expiresAt = options?.expiry ? now + options.expiry * 1000 : undefined;
 
     // Wrap in a group envelope so receivers can identify it and decrypt with
     // the sender key. Delivered pairwise (Double Ratchet) to each member.
     // The GROUP_ENVELOPE_MARKER prefix lets MessageHandler detect and route it.
+    // replyTo / forwardedFrom / expiry travel as envelope metadata so every
+    // member's receive path sees them — they only mattered for DMs before.
     const envelopePayload = new TextEncoder().encode(
-      JSON.stringify({ __mw_grp: groupId, sid: senderId, d: Array.from(ciphertext) }),
+      JSON.stringify({
+        __mw_grp: groupId,
+        sid: senderId,
+        d: Array.from(ciphertext),
+        mid: messageId,
+        ts: now,
+        ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
+        ...(options?.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
+        ...(options?.expiry ? { expiry: options.expiry } : {}),
+      }),
     );
-
-    // Store the outbound message once under the group conversation ID.
-    const messageId = this.messageHandler.createMessageId();
-    const now = Date.now();
     await this.messageHandler.saveMessage({
       id: messageId,
       conversationId: groupId,
@@ -1268,6 +1297,9 @@ export class MeshWhisper {
       status: 'sent',
       groupId,
       groupSenderId: this.getLocalPeerId(),
+      ...(expiresAt ? { expiresAt } : {}),
+      ...(options?.replyTo ? { replyTo: options.replyTo } : {}),
+      ...(options?.forwardedFrom ? { forwardedFrom: options.forwardedFrom } : {}),
     });
 
     await Promise.allSettled(
@@ -1794,10 +1826,9 @@ export class MeshWhisper {
    * gets the same change. `onReactionUpdated` fires on the receiver
    * side after the persisted message is updated.
    *
-   * `conversationId` is the peer ID for DMs. Group reactions follow the
-   * same shape (each member would receive the control) but aren't
-   * implemented in v1 — callers should restrict UI to DM conversations
-   * until the group fan-out path lands.
+   * `conversationId` is the peer ID for DMs or the group ID for groups —
+   * the control is fanned out to every other group member, and the
+   * `reactions` map accumulates one entry per reacting peer.
    */
   static async toggleReaction(
     conversationId: string,
@@ -1845,11 +1876,13 @@ export class MeshWhisper {
     // carry the original author forward rather than the most recent
     // forwarder. Matches the WhatsApp/Signal convention.
     const originalAuthor = source.forwardedFrom ?? source.senderId;
-    await this.sendMessage(
-      toRecipientId,
-      new Uint8Array(source.payload),
-      { ...(options ?? {}), forwardedFrom: originalAuthor },
-    );
+    const forwardOptions = { ...(options ?? {}), forwardedFrom: originalAuthor };
+    // Route to group or peer depending on the destination conversation.
+    if (this.groupManager.getGroup(toRecipientId)) {
+      await this.sendToGroup(toRecipientId, new Uint8Array(source.payload), forwardOptions);
+    } else {
+      await this.sendMessage(toRecipientId, new Uint8Array(source.payload), forwardOptions);
+    }
     return originalAuthor;
   }
 
@@ -1865,8 +1898,9 @@ export class MeshWhisper {
    * sends. The peer's `onDisappearingMessagesChanged` callback fires
    * once the local state is updated.
    *
-   * `conversationId` is the peer ID for DMs. Group support is deferred
-   * to a follow-up (would need fan-out of the control to every member).
+   * `conversationId` is the peer ID for DMs or the group ID for groups.
+   * For groups the policy change fans out to every other member so they
+   * all converge on the same TTL.
    */
   static async setDisappearingMessages(conversationId: string, ttlMs: number | null): Promise<void> {
     return MeshWhisper.instance.setDisappearingMessagesInstance(conversationId, ttlMs);
@@ -1883,7 +1917,7 @@ export class MeshWhisper {
       this.disappearingMessages.set(conversationId, normalized);
     }
     await this.persistDisappearingMessages();
-    this.sendControl(conversationId, {
+    this.sendControlToConversation(conversationId, {
       __mw_ctrl: 'disappearing_messages',
       disappearingTtlMs: normalized,
     });
@@ -1925,7 +1959,7 @@ export class MeshWhisper {
       conversationId, messageId, me, emoji, add,
     );
     if (outcome === 'noop') return 'noop';
-    this.sendControl(conversationId, {
+    this.sendControlToConversation(conversationId, {
       __mw_ctrl: 'reaction',
       messageId,
       reactionEmoji: emoji,
@@ -2658,6 +2692,27 @@ export class MeshWhisper {
   }
 
   /**
+   * Send a control message scoped to a conversation. DMs deliver to the
+   * peer; groups fan out the same control to every other member, with
+   * `groupId` set so receivers apply the change to the group conversation
+   * rather than to the message's sender. The group fan-out path here is
+   * what makes reactions / replies / forwarding / disappearing messages
+   * work in groups (DM-only before, see ADR thread on group-aware ctrl).
+   */
+  private sendControlToConversation(conversationId: string, payload: Record<string, unknown>): void {
+    const group = this.groupManager.getGroup(conversationId);
+    if (group) {
+      const me = this.getLocalPeerId();
+      const scoped = { ...payload, groupId: conversationId };
+      for (const member of this.groupManager.getMembers(conversationId)) {
+        if (member.id !== me) this.sendControl(member.id, scoped);
+      }
+      return;
+    }
+    this.sendControl(conversationId, payload);
+  }
+
+  /**
    * Send a tiny ratchet message immediately after we initiate an x3dh_init.
    * The receiver running ratchetDecrypt on this advances their session from
    * receive-only to fully usable (sending chain initialised). Without this,
@@ -2847,14 +2902,17 @@ export class MeshWhisper {
 
       case 'reaction': {
         if (!ctrl.messageId || typeof ctrl.reactionEmoji !== 'string' || typeof ctrl.reactionAdd !== 'boolean') break;
-        // The receiver applies the change to their own stored copy of
-        // the message (the conversation key is the inbound peer for DMs).
+        // Group-scoped (sender set ctrl.groupId) → apply to the group
+        // conversation; DM → apply against the sender peer. The reacting
+        // peerId stored in the reactions map is always the sender, so
+        // groups correctly accumulate one reaction per member.
+        const conversationId = ctrl.groupId ?? fromPeerId;
         void this.messageHandler.applyReaction(
-          fromPeerId, ctrl.messageId, fromPeerId, ctrl.reactionEmoji, ctrl.reactionAdd,
+          conversationId, ctrl.messageId, fromPeerId, ctrl.reactionEmoji, ctrl.reactionAdd,
         ).then((outcome) => {
           if (outcome === 'noop') return;
           this.onReactionUpdatedHandler?.(
-            fromPeerId, ctrl.messageId!, fromPeerId, ctrl.reactionEmoji!, ctrl.reactionAdd!,
+            conversationId, ctrl.messageId!, fromPeerId, ctrl.reactionEmoji!, ctrl.reactionAdd!,
           );
         }).catch(() => {});
         break;
@@ -2863,16 +2921,20 @@ export class MeshWhisper {
       case 'disappearing_messages': {
         const ttl = ctrl.disappearingTtlMs;
         const normalized = typeof ttl === 'number' && ttl > 0 ? Math.floor(ttl) : null;
-        const current = this.disappearingMessages.get(fromPeerId) ?? null;
+        // For groups, the TTL applies to the group conversation; for DMs
+        // it applies to the peer conversation. The changed-by callback
+        // receives the originating peerId either way.
+        const conversationId = ctrl.groupId ?? fromPeerId;
+        const current = this.disappearingMessages.get(conversationId) ?? null;
         if (current === normalized) break; // no-op
         if (normalized === null) {
-          this.disappearingMessages.delete(fromPeerId);
+          this.disappearingMessages.delete(conversationId);
         } else {
-          this.disappearingMessages.set(fromPeerId, normalized);
+          this.disappearingMessages.set(conversationId, normalized);
         }
         this.persistDisappearingMessages().catch(() => {});
         try {
-          this.onDisappearingMessagesChangedHandler?.(fromPeerId, normalized, fromPeerId);
+          this.onDisappearingMessagesChangedHandler?.(conversationId, normalized, fromPeerId);
         } catch { /* swallow handler throws */ }
         break;
       }
