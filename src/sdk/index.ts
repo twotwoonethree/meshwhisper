@@ -197,6 +197,12 @@ export interface SendOptions {
   urgency?: MessageUrgency;
   expiry?: number;
   /**
+   * Supply the message id instead of letting the SDK generate one. Lets a
+   * caller's optimistic UI message share the id used for storage,
+   * `onMessageStatus`, and `onCiphertext`, so all of them correlate.
+   */
+  messageId?: string;
+  /**
    * Mark this message as a reply to an earlier one. `messageId` is the
    * ID of the message being replied to (must be in the same
    * conversation); `snippetText` is a short preview the receiver can
@@ -899,7 +905,7 @@ export class MeshWhisper {
     let devices = this.permissionManager.getDevicesForAccount(accountKey);
     if (devices.length === 0) devices = [recipientId];
 
-    const messageId = generateMessageId();
+    const messageId = options?.messageId ?? generateMessageId();
     const timestamp = Date.now();
 
     const results = await Promise.allSettled(
@@ -912,6 +918,24 @@ export class MeshWhisper {
     }
 
     const isControl = isControlPayload(payload);
+
+    // Transparency hook (ADR-008): surface the relay-visible bytes of this
+    // message. Skipped for control messages and when no handler is set.
+    if (!isControl && this.config.onCiphertext) {
+      const first = results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<{ destHash: Uint8Array; ciphertext: Uint8Array } | void> | undefined;
+      const wire = first?.value;
+      if (wire) {
+        try {
+          this.config.onCiphertext({
+            messageId,
+            recipientId,
+            destHash: wire.destHash,
+            ciphertext: wire.ciphertext,
+            plaintextLength: payload.length,
+          });
+        } catch { /* never let a transparency hook break a send */ }
+      }
+    }
     if (!isControl) {
       const expiresAt = options?.expiry ? timestamp + options.expiry * 1000 : undefined;
       await this.messageHandler.saveMessage({
@@ -944,7 +968,7 @@ export class MeshWhisper {
     messageId: string,
     timestamp: number,
     options: SendOptions | undefined,
-  ): Promise<void> {
+  ): Promise<{ destHash: Uint8Array; ciphertext: Uint8Array }> {
     await this.sessionManager.ensureSession(deviceKey);
 
     const session = this.sessionManager.getSession(deviceKey);
@@ -1003,6 +1027,8 @@ export class MeshWhisper {
     for (const p of burst) {
       await this.routeAndSend(p, deviceKey);
     }
+    // Return the relay-visible bytes for the onCiphertext transparency hook.
+    return { destHash, ciphertext: fullPayload };
   }
 
   /** Like sendMessage but skips the outbound persistence step. Used by sendToGroup

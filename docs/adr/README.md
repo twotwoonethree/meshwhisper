@@ -36,3 +36,4 @@ Don't write an ADR for a typo fix or a refactor that doesn't change semantics. D
 - [ADR-004 — Opportunistic transport upgrade, not P2P-or-relay](004-opportunistic-transport-upgrade.md)
 - [ADR-006 — Presentation-layer state stays in the app; deferred typed event log](006-presentation-state-stays-in-the-app.md)
 - [ADR-007 — E2EE relay-backed message backup with a user-held recovery key (proposed)](007-e2ee-message-backup.md)
+- [ADR-008 — Ciphertext Peek: SDK transparency hook for the relay-visible bytes](008-ciphertext-peek-transparency-hook.md)

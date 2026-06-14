@@ -325,6 +325,20 @@ export type MessageRetention =
   | { kind: 'count'; max: number }
   | { kind: 'ageMs'; max: number };
 
+/** The relay-visible bytes for one outbound message — see `onCiphertext` / ADR-008. */
+export interface OutboundCiphertext {
+  /** Message id (matches the stored message and onMessageStatus). */
+  messageId: string;
+  /** The conversation/recipient this was sent to. */
+  recipientId: string;
+  /** The rotating per-epoch-hour relay address the packet is sent to. */
+  destHash: Uint8Array;
+  /** Ratchet header + ciphertext — exactly what the relay stores/forwards. */
+  ciphertext: Uint8Array;
+  /** Length of the original plaintext, for a size comparison in the UI. */
+  plaintextLength: number;
+}
+
 export interface MeshWhisperConfig {
   namespace: string;
   /** MeshWhisper Node endpoint(s). Use "mesh" for Foundation-hosted nodes,
@@ -386,6 +400,14 @@ export interface MeshWhisperConfig {
   onPresence?: (peerId: string, status: PresenceStatus) => void;
   /** Called when the delivery status of an outbound message changes. */
   onMessageStatus?: (messageId: string, status: import('./persistence/types.js').StoredMessage['status']) => void;
+  /**
+   * Transparency hook: fired once per outbound (non-control) message after it
+   * is encrypted, carrying the exact bytes the relay receives. Exposes only
+   * already-encrypted data (and the rotating destHash) — no key material or
+   * plaintext beyond a length. Intended for "this is what the relay sees"
+   * demos/inspectors. See ADR-008.
+   */
+  onCiphertext?: (info: OutboundCiphertext) => void;
   /**
    * Called when a recoverable error occurs (e.g. sendMessage fails because no
    * session could be established, or the Node connection drops and reconnect

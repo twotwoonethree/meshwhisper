@@ -38,6 +38,7 @@ export type {
   // Message
   MessageUrgency,
   PresenceStatus,
+  OutboundCiphertext,
   Message,
 
   // Group
