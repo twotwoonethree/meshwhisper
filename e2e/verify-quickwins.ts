@@ -22,10 +22,9 @@ const results: Record<string, boolean> = {};
   await waitForReady(bob);
   console.log(`alice=${alice.username}  bob=${bob.username}`);
 
-  // Establish a DM: alice adds bob, bob accepts, alice sends one message.
+  // Establish a DM: alice adds bob (auto-opens her into the thread), bob accepts.
   await aliceAddContact(alice, bob.username);
   await acceptIncomingRequest(bob);
-  await openConversation(alice, bob.username);
   await sendMessage(alice, 'hello from alice');
   // alice's own message renders optimistically regardless of delivery — that's
   // all the draft/delete tests need. Confirm her own bubble is present.

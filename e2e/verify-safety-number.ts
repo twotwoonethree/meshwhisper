@@ -22,10 +22,9 @@ async function readSafetyNumber(user: { page: import('@playwright/test').Page })
   await waitForReady(bob);
   console.log(`alice=${alice.username}  bob=${bob.username}`);
 
-  await aliceAddContact(alice, bob.username);
+  await aliceAddContact(alice, bob.username); // auto-opens alice into the thread
   await acceptIncomingRequest(bob);
-  await openConversation(alice, bob.username);
-  await sendMessage(alice, 'hi bob');
+  await sendMessage(alice, 'hi bob'); // alice is already in the conversation
   await openConversation(bob, alice.username);
   await sendMessage(bob, 'hi alice');
   await alice.page.waitForTimeout(3000);

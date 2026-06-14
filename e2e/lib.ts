@@ -197,8 +197,19 @@ export async function aliceAddContact(user: TestUser, peerUsername: string): Pro
 }
 
 export async function acceptIncomingRequest(user: TestUser, timeout = 30_000): Promise<void> {
-  await user.page.locator('text=/Contact requests/i').waitFor({ state: 'visible', timeout });
-  await user.page.locator('button.bg-brand-600, button.bg-brand-500').first().click();
+  // Scope to the request modal — the conversation-list pending banner also says
+  // "contact requests" and the empty-state has its own brand-coloured buttons, so
+  // a page-wide match is ambiguous. Click the accept (brand) button inside it.
+  // Gate on the modal heading (unambiguous — the pending banner says "contact
+  // request" lowercase/singular and the empty-state has no such heading).
+  await user.page.locator('h2:has-text("Contact requests")').waitFor({ state: 'visible', timeout });
+  // Let the request rows render after the heading, then click the accept button
+  // (the only brand-coloured button on the page). force + DOM-level click: the
+  // modal is bottom-anchored on the mobile viewport, so the edge-positioned
+  // button stalls Playwright's pointer actionability though it's clickable.
+  await user.page.waitForTimeout(1500);
+  await user.page.locator('button.bg-brand-600, button.bg-brand-500').first()
+    .evaluate((el) => (el as HTMLElement).click());
   // Generous settle window — accept triggers a directory lookup, addContactByKey,
   // and several control messages bouncing between peers. Give all of that time
   // to land before the test starts sending real traffic.

@@ -30,15 +30,15 @@ import { newUser, register, waitForReady, snap, closeAll } from './lib.js';
 
   // --- bob: Scan tab → paste alice's code → Connect ---
   await bob.page.locator('button[title="Add contact"]').click();
-  await bob.page.locator('button:has-text("Scan")').click();
+  await bob.page.getByRole('button', { name: 'Scan', exact: true }).click();
   await bob.page.locator('textarea[placeholder*="paste a contact code"]').fill(aliceCode);
   await bob.page.locator('button:has-text("Connect")').click();
-  // On a successful pair the app adds the conversation and closes the modal, so
-  // the real success signal is alice's tile appearing in bob's list (with her
-  // @name, resolved from the directory she published when generating the code).
-  await bob.page.locator(`button:has-text("@${alice.username}")`).waitFor({ state: 'visible', timeout: 20_000 });
+  // On a successful pair the app adds the conversation and auto-opens it, so bob
+  // lands straight in the thread (the composer is the reliable signal — on the
+  // mobile viewport the list is hidden while a conversation is open).
+  await bob.page.locator('textarea[placeholder="Message"]').waitFor({ state: 'visible', timeout: 20_000 });
   await snap(bob, 'qr-bob-paired');
-  const bobHasAlice = await bob.page.locator(`button:has-text("@${alice.username}")`).count();
+  const bobHasAlice = await bob.page.locator('textarea[placeholder="Message"]').count();
 
   // alice should receive bob's contact_request (carrying bob's @name).
   await alice.page.waitForTimeout(4000);
