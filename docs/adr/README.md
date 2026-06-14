@@ -34,3 +34,4 @@ Don't write an ADR for a typo fix or a refactor that doesn't change semantics. D
 - [ADR-002 — Relay-based architecture instead of P2P first](002-relay-first-not-p2p-first.md)
 - [ADR-003 — Tombstone + revival model for delete-and-re-add](003-tombstones-and-revivals.md)
 - [ADR-004 — Opportunistic transport upgrade, not P2P-or-relay](004-opportunistic-transport-upgrade.md)
+- [ADR-006 — Presentation-layer state stays in the app; deferred typed event log](006-presentation-state-stays-in-the-app.md)
