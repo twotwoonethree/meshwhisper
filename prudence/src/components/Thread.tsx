@@ -54,6 +54,8 @@ interface Props {
   onReact?: (messageId: string, emoji: string) => Promise<void>;
   /** DM only: forward a message to another contact. */
   onForwardMessage?: (messageId: string, toPeerId: string) => Promise<void>;
+  /** DM only: delete one of your own messages (locally + asks the peer to drop their copy). */
+  onDeleteMessage?: (messageId: string) => void;
   /** DM only: set the conversation's disappearing-messages TTL. */
   onSetDisappearing?: (ttlMs: number | null) => Promise<void>;
   /** DM only: current disappearing-messages TTL (ms), or null = off. */
@@ -171,7 +173,7 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onReact, onForwardMessage, onSetDisappearing, disappearingTtlMs, forwardTargets, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onReact, onForwardMessage, onDeleteMessage, onSetDisappearing, disappearingTtlMs, forwardTargets, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -194,6 +196,13 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   // Reactions / replies / forwards / disappearing-messages are DM-only in v1
   // (matching the SDK's deferral of group fan-out for these features).
   const isDM = !group;
+
+  // Draft persistence: the composer is uncontrolled (ref-based), and App keys
+  // Thread by conversation id, so this instance belongs to exactly one
+  // conversation. Persist the in-progress message per conversation so an
+  // accidental close/refresh doesn't lose it.
+  const conversationId = group?.id ?? contact.peerId;
+  const draftKey = `prudence:draft:${conversationId}`;
 
   // When the local user is the admin AND there are other members, the
   // leave button takes them through the admin-handoff dialog first.
@@ -245,6 +254,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
     if (!text) return;
     onSend(text, replyContext ?? undefined);
     if (inputRef.current) inputRef.current.value = '';
+    localStorage.removeItem(draftKey);
     autoResize();
     setReplyContext(null);
   }
@@ -254,6 +264,22 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  }
+
+  // Restore any saved draft when this conversation's Thread mounts.
+  useEffect(() => {
+    const draft = localStorage.getItem(draftKey);
+    if (draft && inputRef.current) {
+      inputRef.current.value = draft;
+      autoResize();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function persistDraft() {
+    const v = inputRef.current?.value ?? '';
+    if (v) localStorage.setItem(draftKey, v);
+    else localStorage.removeItem(draftKey);
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -684,6 +710,22 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
                 </svg>
                 Copy text
               </button>
+              {onDeleteMessage && targetMsg.direction === 'outbound' && (
+                <button
+                  onClick={() => {
+                    if (window.confirm('Delete this message? It will also be removed for the other person.')) {
+                      onDeleteMessage(targetMsg.id);
+                    }
+                    setActionsMenuFor(null);
+                  }}
+                  className="w-full px-5 py-3 text-left text-red-400 text-sm hover:bg-slate-800 transition-colors flex items-center gap-3 border-t border-slate-800"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                  </svg>
+                  Delete
+                </button>
+              )}
             </div>
           </div>
         );
@@ -970,7 +1012,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           placeholder="Message"
           rows={1}
           onKeyDown={handleKeyDown}
-          onInput={autoResize}
+          onInput={() => { autoResize(); persistDraft(); }}
           className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 transition-colors text-sm resize-none leading-relaxed"
           style={{ height: '40px' }}
         />

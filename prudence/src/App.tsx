@@ -1019,6 +1019,30 @@ export default function App() {
     }
   }
 
+  // SDK reference: deletion. MeshWhisper.deleteMessage removes the message from
+  // local storage AND sends a delete request to the peer; it fires
+  // onArchiveDirty itself, so no manual scheduleArchiveSync is needed. We remove
+  // it from React state optimistically and recompute the conversation preview.
+  async function handleDeleteMessage(conversationId: string, messageId: string) {
+    try {
+      await MeshWhisper.deleteMessage(messageId, conversationId);
+    } catch (err) {
+      console.error('[delete message] failed:', err);
+      return;
+    }
+    setState((prev) => {
+      const msgs = (prev.messages[conversationId] ?? []).filter((m) => m.id !== messageId);
+      const lastMessage = msgs[msgs.length - 1];
+      return {
+        ...prev,
+        messages: { ...prev.messages, [conversationId]: msgs },
+        conversations: prev.conversations.map((c) =>
+          c.id === conversationId ? { ...c, lastMessage } : c,
+        ),
+      };
+    });
+  }
+
   // Set the disappearing-messages policy on a DM. Updates local state +
   // injects a system message so the change is visible in the timeline.
   async function handleSetDisappearing(conversationId: string, ttlMs: number | null) {
@@ -1915,6 +1939,7 @@ export default function App() {
       <div className={`${activeConv ? 'flex' : 'hidden sm:flex'} flex-1 flex-col`}>
         {activeConv ? (
           <Thread
+            key={activeConv.id}
             contact={activeConv.contact}
             group={activeConv.group}
             localPeerId={MeshWhisper.getLocalPeerId()}
@@ -1951,6 +1976,7 @@ export default function App() {
             onRenameGroup={activeConv.group ? (newName) => handleRenameGroup(activeConv.id, newName) : undefined}
             onReact={(messageId, emoji) => handleReact(activeConv.id, messageId, emoji)}
             onForwardMessage={(messageId, toPeerId) => handleForward(activeConv.id, messageId, toPeerId)}
+            onDeleteMessage={activeConv.group ? undefined : (messageId) => { void handleDeleteMessage(activeConv.id, messageId); }}
             onSetDisappearing={(ttlMs) => handleSetDisappearing(activeConv.id, ttlMs)}
             disappearingTtlMs={state.disappearingByConversation?.[activeConv.id] ?? null}
             // Forwarding targets: every other conversation (DMs and groups alike)
