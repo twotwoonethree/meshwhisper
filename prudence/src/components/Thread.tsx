@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AppMessage, Contact, GroupInfo } from '../types.ts';
 import { isImageMime, formatFileSize, fileIconLabel } from '../media.ts';
+import ContactInfo from './ContactInfo.tsx';
+import { isVerified, markVerified, unverify } from '../verified-contacts.ts';
 
 // Split `text` on every (case-insensitive) occurrence of `query` and wrap the
 // matches in <mark> for in-thread search highlighting. Returns the plain string
@@ -192,6 +194,8 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [showContactInfo, setShowContactInfo] = useState(false);
+  const [verified, setVerified] = useState(() => !group && isVerified(contact.peerId));
   // The DM case is identified by the absence of a group on the conversation.
   // Reactions / replies / forwards / disappearing-messages are DM-only in v1
   // (matching the SDK's deferral of group fan-out for these features).
@@ -323,8 +327,15 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             {contact.displayName[0]?.toUpperCase()}
           </div>
         )}
-        <div className="flex-1">
-          <p className="text-white font-medium text-sm">{contact.displayName}</p>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="text-white font-medium text-sm truncate">{contact.displayName}</p>
+            {!group && verified && (
+              <svg className="w-4 h-4 text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" aria-label="Verified">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+              </svg>
+            )}
+          </div>
           {group ? (
             <p className="text-slate-500 text-xs">{group.members.length} members</p>
           ) : contact.username ? (
@@ -340,6 +351,17 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
           </svg>
         </button>
+        {!group && (
+          <button
+            onClick={() => setShowContactInfo(true)}
+            className={`w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center transition-colors ${verified ? 'text-green-400' : 'text-slate-500 hover:text-white'}`}
+            title="Contact info & verification"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
+            </svg>
+          </button>
+        )}
         {group && (
           <button
             onClick={() => setShowMembers(true)}
@@ -813,6 +835,20 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           </div>
         );
       })()}
+
+      {/* Contact info & safety-number verification (DM only) */}
+      {showContactInfo && !group && (
+        <ContactInfo
+          contact={contact}
+          verified={verified}
+          onToggleVerified={(next) => {
+            if (next) markVerified(contact.peerId);
+            else unverify(contact.peerId);
+            setVerified(next);
+          }}
+          onClose={() => setShowContactInfo(false)}
+        />
+      )}
 
       {/* Lightbox */}
       {lightboxUrl && (
