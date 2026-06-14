@@ -1,5 +1,11 @@
 const KEY = 'prudence:contact-names';
 
+/** Username format Prudence enforces everywhere (AddContact, Onboarding, and
+ *  inbound contact-request validation). Centralised so the rule can't drift. */
+export function isValidUsername(name: string): boolean {
+  return /^[a-z0-9_-]{3,30}$/.test(name);
+}
+
 type NamesMap = Record<string, string>;
 
 function load(): NamesMap {

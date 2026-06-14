@@ -67,3 +67,10 @@ export function restoreAll(peerIds: string[]): void {
   const accepted = new Set([...loadSet(ACCEPTED_KEY), ...peerIds]);
   saveSet(ACCEPTED_KEY, accepted);
 }
+
+/** Merge declined peers pulled from the relay archive into the local set, so a
+ *  decline on one device suppresses the same re-prompt on another. */
+export function restoreDeclined(peerIds: string[]): void {
+  const declined = new Set([...loadSet(DECLINED_KEY), ...peerIds]);
+  saveSet(DECLINED_KEY, declined);
+}

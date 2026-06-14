@@ -5,8 +5,8 @@ import { initSDK, getSDK } from './sdk.ts';
 import { getPushSubscription } from './push.ts';
 import { initStorage, idbStorage } from './storage.ts';
 import { deriveIdentityKey, uint8ArrayToHex } from './crypto.ts';
-import { saveContactName, saveContactNameInteractive, getContactName, getAllContactNames, removeContactName } from './contact-names.ts';
-import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as getAllAccepted, restoreAll as restoreAccepted } from './accepted-contacts.ts';
+import { saveContactName, saveContactNameInteractive, getContactName, getAllContactNames, removeContactName, isValidUsername } from './contact-names.ts';
+import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as getAllAccepted, getDeclined, restoreAll as restoreAccepted, restoreDeclined } from './accepted-contacts.ts';
 import { loadGroups, upsertGroup, removeStoredGroup } from './group-storage.ts';
 import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
 import { showMessageNotification } from './notifications.ts';
@@ -129,6 +129,7 @@ export default function App() {
       {
         contactNames: getAllContactNames(),
         acceptedContacts: getAllAccepted(),
+        declinedContacts: getDeclined(),
         groups: JSON.parse(localStorage.getItem('prudence:groups') ?? '[]'),
       },
       keepalive ? { keepalive: true } : undefined,
@@ -269,7 +270,7 @@ export default function App() {
         // and DON'T persist it to localStorage yet — a request that's later
         // declined should leave no trace. handleAcceptRequest saves the name
         // (which it already carries via pendingRequests) only on acceptance.
-        const reqUsername = ctrl.username && /^[a-z0-9_-]{3,30}$/.test(ctrl.username)
+        const reqUsername = ctrl.username && isValidUsername(ctrl.username)
           ? ctrl.username
           : undefined;
         if (!isHandled(msg.senderId)) {
@@ -762,6 +763,9 @@ export default function App() {
           if (Array.isArray(extra.acceptedContacts)) {
             restoreAccepted(extra.acceptedContacts as string[]);
           }
+          if (Array.isArray(extra.declinedContacts)) {
+            restoreDeclined(extra.declinedContacts as string[]);
+          }
         }
         if (cancelled) return;
         // Push merged state so the relay archive reflects all devices.
@@ -846,7 +850,12 @@ export default function App() {
             if (isControlMessage(text)) {
               if (m.direction === 'inbound') {
                 const cr = extractContactRequest(text);
-                if (cr && !isHandled(c.peerId)) pendingFromHistory.push({ peerId: c.peerId, username: cr.username });
+                if (cr && !isHandled(c.peerId)) {
+                  // Same validation as the live contact_request path — a stored
+                  // request can carry an unvalidated peer-supplied username.
+                  const username = cr.username && isValidUsername(cr.username) ? cr.username : undefined;
+                  pendingFromHistory.push({ peerId: c.peerId, username });
+                }
               }
               continue;
             }
@@ -1300,6 +1309,9 @@ export default function App() {
       ...prev,
       pendingRequests: prev.pendingRequests.filter((r) => r.peerId !== peerId),
     }));
+    // Push the decline to the relay archive so other devices suppress the same
+    // re-prompt. (Declines live in their own set now, separate from accepted.)
+    scheduleArchiveSync(getSDK());
   }
 
   async function handleCreateGroup(name: string, memberPeerIds: string[]) {

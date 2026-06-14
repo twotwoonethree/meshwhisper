@@ -18,6 +18,7 @@
 import { MeshWhisper } from '@meshwhisper/sdk';
 import type { StoredMessage } from '@meshwhisper/sdk';
 import { getSDK } from './sdk.ts';
+import { uint8ArrayToHex } from './crypto.ts';
 import { getAllContactNames } from './contact-names.ts';
 import { getAll as getAllAccepted, getDeclined } from './accepted-contacts.ts';
 import { loadGroups } from './group-storage.ts';
@@ -68,10 +69,6 @@ async function deriveKey(passphrase: string, salt: Uint8Array, usage: KeyUsage[]
   );
 }
 
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 async function encryptBundle(plaintext: string, passphrase: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -84,9 +81,9 @@ async function encryptBundle(plaintext: string, passphrase: string): Promise<str
     version: 1,
     kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: PBKDF2_ITERATIONS },
     cipher: 'AES-256-GCM',
-    salt: toHex(salt),
-    iv: toHex(iv),
-    ciphertext: toHex(ciphertext),
+    salt: uint8ArrayToHex(salt),
+    iv: uint8ArrayToHex(iv),
+    ciphertext: uint8ArrayToHex(ciphertext),
   }, null, 2);
 }
 
