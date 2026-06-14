@@ -93,8 +93,10 @@ function senderDisplayName(senderId: string): string {
 // "projection ratchet": a newly-added SDK field that gets dropped on one
 // reload path but not another. The real-time onMessage path projects a live
 // `Message` (no reactions, different status/self-sync logic) and stays separate.
-function projectStoredMessage(m: StoredMessage, conversationId: string): AppMessage {
-  const text = decoder(m.payload);
+function projectStoredMessage(m: StoredMessage, conversationId: string, decoded?: string): AppMessage {
+  // Callers that already decoded the payload (e.g. for the control-message
+  // check) pass it in to avoid decoding twice; standalone callers omit it.
+  const text = decoded ?? decoder(m.payload);
   const mediaPtr = text ? extractMediaPointer(text) : null;
   return {
     id: m.id,
@@ -729,7 +731,7 @@ export default function App() {
       for (const m of msgs as StoredMessage[]) {
         const text = decoder(m.payload);
         if (text && isControlMessage(text)) continue;
-        appMsgs.push(projectStoredMessage(m, peerId));
+        appMsgs.push(projectStoredMessage(m, peerId, text));
       }
       setState((prev) => ({
         ...prev,
@@ -893,7 +895,7 @@ export default function App() {
               }
               continue;
             }
-            appMsgs.push(projectStoredMessage(m, c.peerId));
+            appMsgs.push(projectStoredMessage(m, c.peerId, text));
           }
 
           setState((prev) => {
