@@ -49,13 +49,49 @@ export async function downloadAndDecrypt(url: string, keyBase64: string): Promis
   return new Uint8Array(plaintext);
 }
 
+/**
+ * Sanitize a peer-supplied filename before using it as a download target.
+ * Strips directory separators and path-traversal, drops control characters,
+ * collapses whitespace, and caps the length. Never returns an empty string.
+ */
+export function sanitizeFileName(name: string | undefined, fallback = 'download'): string {
+  if (!name) return fallback;
+  // Take only the basename — defeats "../" and absolute paths.
+  const base = name.split(/[\\/]/).pop() ?? '';
+  const cleaned = base
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f<>:"|?*]/g, '') // control + filesystem-reserved chars
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+/, '') // no leading dots ("." / ".." / hidden-file coercion)
+    .trim();
+  if (!cleaned) return fallback;
+  return cleaned.length > 200 ? cleaned.slice(0, 200) : cleaned;
+}
+
+/**
+ * Clamp a peer-supplied MIME type to a safe value for a download Blob. An
+ * attacker can mislabel content (e.g. an executable as image/png); forcing
+ * an unrecognised or active type to a neutral octet-stream means the browser
+ * won't try to render/execute it inline.
+ */
+export function safeDownloadMime(mimeType: string | undefined): string {
+  if (!mimeType || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(mimeType)) return 'application/octet-stream';
+  const lowered = mimeType.toLowerCase();
+  // Never hand back types the browser may execute/script from a download.
+  if (lowered.includes('html') || lowered.includes('javascript') || lowered.includes('xhtml') || lowered === 'image/svg+xml') {
+    return 'application/octet-stream';
+  }
+  return mimeType;
+}
+
 /** Trigger a browser save-file dialog for downloaded bytes */
 export function triggerDownload(bytes: Uint8Array, fileName: string, mimeType: string): void {
-  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mimeType });
+  const safeName = sanitizeFileName(fileName);
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: safeDownloadMime(mimeType) });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = fileName;
+  a.download = safeName;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

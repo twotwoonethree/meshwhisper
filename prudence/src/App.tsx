@@ -21,6 +21,11 @@ import GroupInviteModal from './components/GroupInviteModal.tsx';
 
 const USERNAME_KEY = 'prudence:username';
 
+// Cap the size of a decrypted media blob we'll hold in memory / render. A
+// malicious peer can point at an arbitrarily large encrypted blob; without a
+// bound, decrypting + creating an object URL can exhaust client memory (DoS).
+const MAX_MEDIA_BYTES = 50 * 1024 * 1024; // 50 MB
+
 function decoder(payload: number[]): string {
   try {
     return new TextDecoder().decode(new Uint8Array(payload));
@@ -259,18 +264,25 @@ export default function App() {
       const ctrl = JSON.parse(text) as { __prudence_ctrl?: string; username?: string };
       if (ctrl.__prudence_ctrl === 'contact_request') {
         console.log('[prudence] contact_request from', msg.senderId, 'username:', ctrl.username);
-        if (ctrl.username) saveContactName(msg.senderId, ctrl.username);
+        // The username here is peer-supplied. Validate it against the same
+        // format the app enforces elsewhere before trusting it for display,
+        // and DON'T persist it to localStorage yet — a request that's later
+        // declined should leave no trace. handleAcceptRequest saves the name
+        // (which it already carries via pendingRequests) only on acceptance.
+        const reqUsername = ctrl.username && /^[a-z0-9_-]{3,30}$/.test(ctrl.username)
+          ? ctrl.username
+          : undefined;
         if (!isHandled(msg.senderId)) {
           setState((prev) => {
             // If the SDK already surfaced this peer as a pending request when
             // their x3dh_init arrived, just fill in the username we now have.
             const existing = prev.pendingRequests.find((r) => r.peerId === msg.senderId);
             if (existing) {
-              if (!ctrl.username || existing.username === ctrl.username) return prev;
+              if (!reqUsername || existing.username === reqUsername) return prev;
               return {
                 ...prev,
                 pendingRequests: prev.pendingRequests.map((r) =>
-                  r.peerId === msg.senderId ? { ...r, username: ctrl.username } : r,
+                  r.peerId === msg.senderId ? { ...r, username: reqUsername } : r,
                 ),
               };
             }
@@ -278,7 +290,7 @@ export default function App() {
               ...prev,
               pendingRequests: [...prev.pendingRequests, {
                 peerId: msg.senderId,
-                username: ctrl.username,
+                username: reqUsername,
                 introducedBy: msg.senderId,
               }],
             };
@@ -300,6 +312,13 @@ export default function App() {
         status: isSelfSync ? 'sent' : 'delivered',
         media: { ...mediaPtr, status: 'pending' },
         ...(isGroup && msg.groupSenderId ? { senderId: msg.groupSenderId, senderName: senderDisplayName(msg.groupSenderId) } : {}),
+        // Projection ratchet: media messages can ALSO be replies / forwards.
+        // Mirror these like the text path (below) so attribution survives the
+        // first render — not just the post-reload re-hydration from storage.
+        // (No `reactions` here: the real-time Message type has none; they
+        // arrive separately via onReactionUpdated.)
+        ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+        ...(msg.forwardedFrom ? { forwardedFrom: msg.forwardedFrom } : {}),
       };
       setState((prev) => {
         const existingConv = prev.conversations.find((c) => c.id === conversationId);
@@ -554,6 +573,9 @@ export default function App() {
           },
         };
       });
+      // We resolved + saved new member/adder contact names above; push them
+      // to the relay archive so other devices (and a reload) keep the names.
+      scheduleArchiveSync(getSDK());
     })();
   }, []);
 
@@ -606,6 +628,9 @@ export default function App() {
           },
         };
       });
+      // We may have resolved + saved the leaver's contact name above; push it
+      // to the relay archive so other devices (and a reload) keep the name.
+      scheduleArchiveSync(getSDK());
     })();
   }, []);
 
@@ -658,7 +683,14 @@ export default function App() {
           timestamp: m.timestamp,
           direction: m.direction,
           status: m.status,
-          ...(mediaPtr ? { media: { ...mediaPtr, status: 'ready' as const } } : {}),
+          // Storage-backed media has a pointer but no decrypted bytes yet, so
+          // it starts 'pending' (tap-to-download) — same as the boot loader.
+          // 'ready' would imply a usable objectUrl that doesn't exist here.
+          ...(mediaPtr ? { media: { ...mediaPtr, status: 'pending' as const } } : {}),
+          ...(m.groupSenderId && m.direction === 'inbound' ? {
+            senderId: m.groupSenderId,
+            senderName: senderDisplayName(m.groupSenderId),
+          } : {}),
           ...(m.reactions ? { reactions: m.reactions } : {}),
           ...(m.replyTo ? { replyTo: m.replyTo } : {}),
           ...(m.forwardedFrom ? { forwardedFrom: m.forwardedFrom } : {}),
@@ -796,6 +828,10 @@ export default function App() {
                   : c,
               ),
             }));
+            // These resolutions are fire-and-forget and can land after the
+            // boot-time scheduleArchiveSync(sdk) below has already flushed,
+            // so re-schedule a push for each newly-backfilled name.
+            scheduleArchiveSync(getSDK());
           }).catch(() => {});
         }
         convs.forEach(async (c: SDKConversation) => {
@@ -875,7 +911,15 @@ export default function App() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [username, authenticated, handleMessage, handleMessageStatus, handleTyping, handleContactRequest, handleConnectionStatus, handleGroupInvite, handleHistoryRequest, handleHistoryRestored]);
+    // Boot the SDK exactly ONCE per authenticated session. Every on* handler
+    // passed to initSDK is a stable useCallback([]) ref that reads fresh state
+    // through functional setState updaters — none of them ever change identity,
+    // and none close over stale state. They are deliberately NOT dependencies:
+    // some are defined after this effect (listing them would hit the temporal
+    // dead zone), and re-running this effect would re-initialise the entire
+    // SDK. Depend only on the identity gate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username, authenticated]);
 
   async function handleRegister(chosenUsername: string, password: string) {
     initStorage(chosenUsername);
@@ -963,9 +1007,17 @@ export default function App() {
       direction: 'outbound',
       status: 'delivered',
     };
+    // The in-thread system message is transient (like every system message in
+    // Prudence — there's no SDK API to persist a local-only note, so it's gone
+    // on reload). The DURABLE record of the policy is the disappearing-clock
+    // indicator in the thread header, which is hydrated from the SDK's persisted
+    // state on boot (disappearingByConversation), so the "why" survives reload.
     setState((prev) => ({
       ...prev,
       disappearingByConversation: { ...(prev.disappearingByConversation ?? {}), [conversationId]: ttlMs },
+      conversations: prev.conversations.map((c) =>
+        c.id === conversationId ? { ...c, lastMessage: sysMsg } : c,
+      ),
       messages: {
         ...prev.messages,
         [conversationId]: [...(prev.messages[conversationId] ?? []), sysMsg],
@@ -1026,6 +1078,9 @@ export default function App() {
         setState((prev) => ({
           ...prev,
           disappearingByConversation: { ...(prev.disappearingByConversation ?? {}), [conversationId]: ttlMs },
+          conversations: prev.conversations.map((c) =>
+            c.id === conversationId ? { ...c, lastMessage: sysMsg } : c,
+          ),
           messages: {
             ...prev.messages,
             [conversationId]: [...(prev.messages[conversationId] ?? []), sysMsg],
@@ -1385,11 +1440,15 @@ export default function App() {
       if (!kickedName) {
         kickedName = (await MeshWhisper.resolveUsername(peerId).catch(() => undefined))
           ?? (peerId.slice(0, 8) + '…');
+        // Persist a real resolved name (not the truncated peer-ID placeholder)
+        // so it survives reload — mirrors the add/leave handlers.
+        if (kickedName && !kickedName.includes('…')) saveContactName(peerId, kickedName);
       }
       let kickerName = getContactName(kickedBy);
       if (!kickerName) {
         kickerName = (await MeshWhisper.resolveUsername(kickedBy).catch(() => undefined))
           ?? (kickedBy.slice(0, 8) + '…');
+        if (kickerName && !kickerName.includes('…')) saveContactName(kickedBy, kickerName);
       }
       const groups = await loadGroups();
       const stored = groups.find((g) => g.id === groupId);
@@ -1422,6 +1481,8 @@ export default function App() {
           },
         };
       });
+      // Push any newly-saved kicked/kicker names to the relay archive.
+      scheduleArchiveSync(getSDK());
     })();
   }, []);
 
@@ -1468,23 +1529,24 @@ export default function App() {
     // Mirror the change in our local conversation state + inject a system
     // message so the local UI reflects the rename immediately. Other members
     // get the same via the onGroupRenamed callback below.
+    const sysMsg: AppMessage = {
+      id: crypto.randomUUID(),
+      conversationId: groupId,
+      text: `Group renamed from "${oldName}" to "${newName}"`,
+      timestamp: Date.now(),
+      direction: 'outbound',
+      status: 'delivered',
+    };
     setState((prev) => ({
       ...prev,
       conversations: prev.conversations.map((c) =>
         c.id === groupId && c.group
-          ? { ...c, contact: { ...c.contact, displayName: newName }, group: { ...c.group, name: newName } }
+          ? { ...c, contact: { ...c.contact, displayName: newName }, group: { ...c.group, name: newName }, lastMessage: sysMsg }
           : c,
       ),
       messages: {
         ...prev.messages,
-        [groupId]: [...(prev.messages[groupId] ?? []), {
-          id: crypto.randomUUID(),
-          conversationId: groupId,
-          text: `Group renamed from "${oldName}" to "${newName}"`,
-          timestamp: Date.now(),
-          direction: 'outbound',
-          status: 'delivered',
-        }],
+        [groupId]: [...(prev.messages[groupId] ?? []), sysMsg],
       },
     }));
     // Persist the new name in the locally-stored group roster so it survives reload.
@@ -1521,7 +1583,7 @@ export default function App() {
           ...prev,
           conversations: prev.conversations.map((c) =>
             c.id === groupId && c.group
-              ? { ...c, contact: { ...c.contact, displayName: newName }, group: { ...c.group, name: newName } }
+              ? { ...c, contact: { ...c.contact, displayName: newName }, group: { ...c.group, name: newName }, lastMessage: sysMsg }
               : c,
           ),
           messages: {
@@ -1564,6 +1626,9 @@ export default function App() {
     };
     setState((prev) => ({
       ...prev,
+      conversations: prev.conversations.map((c) =>
+        c.id === groupId ? { ...c, lastMessage: systemMsg } : c,
+      ),
       messages: {
         ...prev.messages,
         [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
@@ -1599,6 +1664,9 @@ export default function App() {
       };
       setState((prev) => ({
         ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === groupId ? { ...c, lastMessage: systemMsg } : c,
+        ),
         messages: {
           ...prev.messages,
           [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
@@ -1726,6 +1794,9 @@ export default function App() {
     }));
     try {
       const bytes = await downloadAndDecrypt(msg.media.url, msg.media.key);
+      if (bytes.length > MAX_MEDIA_BYTES) {
+        throw new Error(`media exceeds ${MAX_MEDIA_BYTES} byte cap (${bytes.length})`);
+      }
       if (isImageMime(msg.media.mimeType)) {
         const objectUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: msg.media.mimeType }));
         setState((prev) => ({

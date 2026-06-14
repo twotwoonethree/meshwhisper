@@ -693,7 +693,12 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
       {/* Lightbox */}
       {lightboxUrl && (
         <div className="fixed inset-0 z-50 bg-slate-950/95 flex items-center justify-center p-4" onClick={() => setLightboxUrl(null)}>
-          <img src={lightboxUrl} alt="Photo" className="max-w-full max-h-full object-contain rounded-xl" />
+          <img
+            src={lightboxUrl}
+            alt="Photo"
+            className="max-w-full max-h-full object-contain rounded-xl"
+            onError={() => setLightboxUrl(null)}
+          />
           <button className="absolute top-4 right-4 w-9 h-9 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />

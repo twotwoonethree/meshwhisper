@@ -18,6 +18,16 @@
 
 const RECENT_THRESHOLD_MS = 30_000;
 
+// Notification text comes from peer-controlled content (display names, message
+// bodies). The Notification API doesn't parse HTML, so this isn't an injection
+// vector — but unbounded length and stray control characters make for ugly /
+// abusable notifications. Strip control chars and cap the length.
+function sanitizeNotificationText(text: string, maxLen: number): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = text.replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen - 1) + '…' : cleaned;
+}
+
 export function canShowNotifications(): boolean {
   return (
     typeof window !== 'undefined' &&
@@ -50,8 +60,8 @@ export function showMessageNotification(opts: MessageNotificationOptions): void 
   const tag = `prudence:${opts.conversationId}`;
 
   try {
-    const n = new Notification(opts.title, {
-      body: opts.body,
+    const n = new Notification(sanitizeNotificationText(opts.title, 80), {
+      body: sanitizeNotificationText(opts.body, 200),
       icon: '/icon-192.png',
       badge: '/icon-192.png',
       tag,
