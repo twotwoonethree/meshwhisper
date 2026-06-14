@@ -416,6 +416,41 @@ export default function App() {
     scheduleArchiveSync(getSDK());
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // SDK reference: onMessageStatus. The SDK fires this when a peer's
+  // 'delivered' or 'read' control receipt updates the local stored copy
+  // of an outbound message. Walk the in-memory thread state and bump
+  // the matching message's status. Only ever advances (sent → delivered
+  // → read), so a stale 'delivered' arriving after a 'read' is ignored
+  // — receipts can race across reconnects.
+  const handleMessageStatus = useCallback((messageId: string, status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed') => {
+    const rank: Record<typeof status, number> = {
+      sending: 0, sent: 1, delivered: 2, read: 3, failed: 1,
+    };
+    setState((prev) => {
+      let touched = false;
+      const messages: typeof prev.messages = {};
+      for (const [convId, msgs] of Object.entries(prev.messages)) {
+        let any = false;
+        const next = msgs.map((m) => {
+          if (m.id !== messageId) return m;
+          if (rank[status] <= rank[m.status]) return m;
+          any = true; touched = true;
+          return { ...m, status };
+        });
+        messages[convId] = any ? next : msgs;
+      }
+      if (!touched) return prev;
+      // Also keep the conversation list's lastMessage in sync so the
+      // tick on the conversation row matches the thread.
+      const conversations = prev.conversations.map((c) => {
+        if (c.lastMessage?.id !== messageId) return c;
+        if (rank[status] <= rank[c.lastMessage.status]) return c;
+        return { ...c, lastMessage: { ...c.lastMessage, status } };
+      });
+      return { ...prev, messages, conversations };
+    });
+  }, []);
+
   const handleTyping = useCallback((peerId: string, isTyping: boolean) => {
     setState((prev) => ({
       ...prev,
@@ -657,6 +692,7 @@ export default function App() {
 
       void initSDK(username, {
         onMessage: handleMessage,
+        onMessageStatus: handleMessageStatus,
         onTyping: handleTyping,
         onContactRequest: handleContactRequest,
         onConnectionStatus: handleConnectionStatus,
@@ -839,7 +875,7 @@ export default function App() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [username, authenticated, handleMessage, handleTyping, handleContactRequest, handleConnectionStatus, handleGroupInvite, handleHistoryRequest, handleHistoryRestored]);
+  }, [username, authenticated, handleMessage, handleMessageStatus, handleTyping, handleContactRequest, handleConnectionStatus, handleGroupInvite, handleHistoryRequest, handleHistoryRestored]);
 
   async function handleRegister(chosenUsername: string, password: string) {
     initStorage(chosenUsername);

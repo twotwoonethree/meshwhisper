@@ -17,6 +17,7 @@ export async function initSDK(
   username: string,
   handlers: {
     onMessage: (msg: Message) => void;
+    onMessageStatus?: (messageId: string, status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed') => void;
     onTyping: (peerId: string, isTyping: boolean) => void;
     onContactRequest: (peerId: string, introducedBy: string, username?: string) => void;
     onConnectionStatus: (status: 'connected' | 'disconnected') => void;
@@ -43,6 +44,7 @@ export async function initSDK(
     storage: idbStorage,
     ...(pushSubscription ? { push: { platform: 'webpush' as const, subscription: pushSubscription } } : {}),
     onMessage: handlers.onMessage,
+    ...(handlers.onMessageStatus ? { onMessageStatus: handlers.onMessageStatus } : {}),
     onTyping: handlers.onTyping,
     onContactRequest: handlers.onContactRequest,
     onConnectionStatus: handlers.onConnectionStatus,
