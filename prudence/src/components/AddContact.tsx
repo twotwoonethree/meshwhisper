@@ -7,24 +7,25 @@ import { markAccepted } from '../accepted-contacts.ts';
 import { peerIdFromContactQR, looksLikeContactQR } from '../qr.ts';
 import QRScanner from './QRScanner.tsx';
 
+type Mode = 'search' | 'mycode' | 'scan';
+
 interface Props {
   myUsername: string;
   onClose: () => void;
   onAdded: (peerId: string, username: string) => void;
+  /** Which tab to open on. Defaults to 'search'. */
+  initialMode?: Mode;
 }
-
-type Mode = 'search' | 'mycode' | 'scan';
 
 type SearchState =
   | { status: 'idle' }
   | { status: 'searching' }
   | { status: 'found'; peerId: string; username: string }
   | { status: 'not_found' }
-  | { status: 'sent' }
   | { status: 'error'; message: string };
 
-export default function AddContact({ myUsername, onClose, onAdded }: Props) {
-  const [mode, setMode] = useState<Mode>('search');
+export default function AddContact({ myUsername, onClose, onAdded, initialMode = 'search' }: Props) {
+  const [mode, setMode] = useState<Mode>(initialMode);
   const [query, setQuery] = useState('');
   const [state, setState] = useState<SearchState>({ status: 'idle' });
 
@@ -80,8 +81,8 @@ export default function AddContact({ myUsername, onClose, onAdded }: Props) {
       if (!peerId) { setState({ status: 'error', message: 'Could not reach user — bundle not found on relay.' }); return; }
       const payload = new TextEncoder().encode(JSON.stringify({ __prudence_ctrl: 'contact_request', username: myUsername }));
       await sdk.sendMessage(peerId, payload);
+      // onAdded opens the conversation and closes this modal.
       onAdded(peerId, state.username);
-      setState({ status: 'sent' });
     } catch (err: unknown) {
       setState({ status: 'error', message: err instanceof Error ? err.message : 'Could not send request.' });
     }
@@ -102,8 +103,7 @@ export default function AddContact({ myUsername, onClose, onAdded }: Props) {
       markAccepted(peerId);
       const payload = new TextEncoder().encode(JSON.stringify({ __prudence_ctrl: 'contact_request', username: myUsername }));
       await sdk.sendMessage(peerId, payload);
-      onAdded(peerId, username);
-      setState({ status: 'sent' });
+      onAdded(peerId, username); // opens the conversation and closes this modal
     } catch {
       setState({ status: 'error', message: 'Could not pair from that code.' });
     }
@@ -125,19 +125,7 @@ export default function AddContact({ myUsername, onClose, onAdded }: Props) {
           </button>
         </div>
 
-        {state.status === 'sent' ? (
-          <div className="text-center py-4">
-            <div className="w-12 h-12 rounded-full bg-brand-600/20 border border-brand-600/30 flex items-center justify-center mx-auto mb-3">
-              <svg className="w-6 h-6 text-brand-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-              </svg>
-            </div>
-            <p className="text-white font-medium mb-1">Connected</p>
-            <p className="text-slate-400 text-sm">You can start the conversation now.</p>
-            <button onClick={onClose} className="mt-4 text-brand-400 text-sm hover:text-brand-300 transition-colors">Done</button>
-          </div>
-        ) : (
-          <>
+        <>
             <div className="flex gap-1 bg-slate-950/50 rounded-lg p-1 mb-5">
               <button className={tabClass('search')} onClick={() => { setMode('search'); setState({ status: 'idle' }); }}>Username</button>
               <button className={tabClass('mycode')} onClick={() => { setMode('mycode'); setState({ status: 'idle' }); }}>My code</button>
@@ -218,8 +206,7 @@ export default function AddContact({ myUsername, onClose, onAdded }: Props) {
             )}
 
             {state.status === 'error' && <p className="text-red-400 text-sm text-center mt-3">{state.message}</p>}
-          </>
-        )}
+        </>
       </div>
     </div>
   );

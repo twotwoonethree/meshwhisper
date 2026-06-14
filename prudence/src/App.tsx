@@ -1915,6 +1915,7 @@ export default function App() {
               if (existing) {
                 return {
                   ...prev,
+                  activeConversationId: peerId, // jump straight into the chat
                   conversations: prev.conversations.map((c) =>
                     c.id === peerId ? { ...c, contact: makeContact(peerId, finalName) } : c,
                   ),
@@ -1922,6 +1923,7 @@ export default function App() {
               }
               return {
                 ...prev,
+                activeConversationId: peerId, // jump straight into the chat
                 conversations: [
                   { id: peerId, contact: makeContact(peerId, finalName), unread: 0, isTyping: false },
                   ...prev.conversations,

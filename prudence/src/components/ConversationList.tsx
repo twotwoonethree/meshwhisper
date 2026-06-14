@@ -63,7 +63,9 @@ export default function ConversationList({
   onLock,
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
+  const [addMode, setAddMode] = useState<'search' | 'mycode' | 'scan'>('search');
   const [showSettings, setShowSettings] = useState(false);
+  const openAdd = (mode: 'search' | 'mycode' | 'scan') => { setAddMode(mode); setShowAdd(true); };
   const [showSearch, setShowSearch] = useState(false);
   const [query, setQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -132,7 +134,7 @@ export default function ConversationList({
               </svg>
             </button>
             <button
-              onClick={() => setShowAdd(true)}
+              onClick={() => openAdd('search')}
               className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-400 hover:text-white transition-colors"
               title="Add contact"
             >
@@ -198,9 +200,23 @@ export default function ConversationList({
         {/* List */}
         <div className="flex-1 scrollable">
           {conversations.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center px-6">
-              <p className="text-slate-500 text-sm mb-2">No conversations yet</p>
-              <p className="text-slate-600 text-xs">Tap + to add a contact</p>
+            <div className="flex flex-col justify-center h-full px-6 py-8">
+              <p className="text-white text-sm font-medium text-center mb-1">Start a conversation</p>
+              <p className="text-slate-500 text-xs text-center mb-6">Three ways to connect — all end-to-end encrypted.</p>
+              <div className="space-y-2">
+                <button onClick={() => openAdd('search')} className="w-full flex items-center gap-3 bg-slate-800 hover:bg-slate-700 rounded-xl px-4 py-3 text-left transition-colors">
+                  <svg className="w-5 h-5 text-brand-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+                  <span><span className="block text-white text-sm font-medium">Find by @username</span><span className="block text-slate-500 text-xs">If you know who you're looking for</span></span>
+                </button>
+                <button onClick={() => openAdd('mycode')} className="w-full flex items-center gap-3 bg-slate-800 hover:bg-slate-700 rounded-xl px-4 py-3 text-left transition-colors">
+                  <svg className="w-5 h-5 text-brand-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0 1 3.75 9.375v-4.5ZM3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 0 1-1.125-1.125v-4.5ZM13.5 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0 1 13.5 9.375v-4.5Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 19.5h2.25M13.5 13.5h.008v.008H13.5V13.5Zm.375 3.75h.008v.008h-.008v-.008Z" /></svg>
+                  <span><span className="block text-white text-sm font-medium">Show your code</span><span className="block text-slate-500 text-xs">Let someone nearby scan you in</span></span>
+                </button>
+                <button onClick={() => openAdd('scan')} className="w-full flex items-center gap-3 bg-slate-800 hover:bg-slate-700 rounded-xl px-4 py-3 text-left transition-colors">
+                  <svg className="w-5 h-5 text-brand-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0 1 3.75 9.375v-4.5ZM13.5 8.25h6m-6 3h3.75M13.5 14.25h6M3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 0 1-1.125-1.125v-4.5Z" /></svg>
+                  <span><span className="block text-white text-sm font-medium">Scan a code</span><span className="block text-slate-500 text-xs">Point your camera at their code</span></span>
+                </button>
+              </div>
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center px-6">
@@ -255,6 +271,7 @@ export default function ConversationList({
       {showAdd && (
         <AddContact
           myUsername={myUsername}
+          initialMode={addMode}
           onClose={() => setShowAdd(false)}
           onAdded={(peerId, username) => { onContactAdded(peerId, username); setShowAdd(false); }}
         />
