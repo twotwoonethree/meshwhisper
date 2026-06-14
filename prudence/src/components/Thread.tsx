@@ -1,6 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { AppMessage, Contact, GroupInfo } from '../types.ts';
 import { isImageMime, formatFileSize, fileIconLabel } from '../media.ts';
+
+// Split `text` on every (case-insensitive) occurrence of `query` and wrap the
+// matches in <mark> for in-thread search highlighting. Returns the plain string
+// untouched when there's no active query. Purely client-side — messages are
+// already decrypted in memory, so search never touches the relay.
+function renderHighlighted(text: string, query: string): ReactNode {
+  if (!query) return text;
+  const lower = text.toLowerCase();
+  const q = query.toLowerCase();
+  const out: ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+  for (let idx = lower.indexOf(q); idx !== -1; idx = lower.indexOf(q, cursor)) {
+    if (idx > cursor) out.push(text.slice(cursor, idx));
+    out.push(
+      <mark key={key++} className="bg-amber-300/80 text-slate-900 rounded px-0.5">
+        {text.slice(idx, idx + q.length)}
+      </mark>,
+    );
+    cursor = idx + q.length;
+  }
+  if (cursor < text.length) out.push(text.slice(cursor));
+  return out;
+}
 
 interface Props {
   contact: Contact;
@@ -162,6 +187,9 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   const [replyContext, setReplyContext] = useState<{ messageId: string; snippetText?: string } | null>(null);
   const [forwardingMessageId, setForwardingMessageId] = useState<string | null>(null);
   const [showDisappearingPicker, setShowDisappearingPicker] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
   // The DM case is identified by the absence of a group on the conversation.
   // Reactions / replies / forwards / disappearing-messages are DM-only in v1
   // (matching the SDK's deferral of group fan-out for these features).
@@ -198,8 +226,15 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   useEffect(() => {
+    // Don't yank the view to the bottom while the user is reading search hits.
+    if (showSearch) return;
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
+  }, [messages, isTyping, showSearch]);
+
+  // Focus the search field as soon as it opens.
+  useEffect(() => {
+    if (showSearch) searchInputRef.current?.focus();
+  }, [showSearch]);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
@@ -235,6 +270,13 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
     if (url) setLightboxUrl(url);
   }
 
+  // In-thread search: filter the already-decrypted, in-memory messages by text.
+  // Empty query = show everything.
+  const activeQuery = showSearch ? searchQuery.trim() : '';
+  const displayMessages = activeQuery
+    ? messages.filter((m) => m.text?.toLowerCase().includes(activeQuery.toLowerCase()))
+    : messages;
+
   return (
     <div className="flex flex-col h-full bg-slate-950">
       {/* Header */}
@@ -263,6 +305,15 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             <p className="text-slate-500 text-xs">@{contact.username}</p>
           ) : null}
         </div>
+        <button
+          onClick={() => setShowSearch((v) => !v)}
+          className={`w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center transition-colors ${showSearch ? 'text-brand-400' : 'text-slate-500 hover:text-white'}`}
+          title="Search this conversation"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+          </svg>
+        </button>
         {group && (
           <button
             onClick={() => setShowMembers(true)}
@@ -328,6 +379,37 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
           </svg>
         </button>
       </div>
+
+      {/* In-thread search bar */}
+      {showSearch && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-800 bg-slate-900">
+          <svg className="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+          </svg>
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Escape') { setShowSearch(false); setSearchQuery(''); } }}
+            placeholder="Search this conversation…"
+            className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none"
+          />
+          {activeQuery && (
+            <span className="text-xs text-slate-500 flex-shrink-0 tabular-nums">
+              {displayMessages.length} {displayMessages.length === 1 ? 'match' : 'matches'}
+            </span>
+          )}
+          <button
+            onClick={() => { setShowSearch(false); setSearchQuery(''); }}
+            className="w-6 h-6 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors flex-shrink-0"
+            title="Close search"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Members panel — visible to anyone in the group; admins can kick. */}
       {showMembers && group && (
@@ -719,9 +801,16 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             </p>
           </div>
         )}
-        {messages.map((msg, i) => {
+        {activeQuery && displayMessages.length === 0 && (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-slate-600 text-sm text-center">
+              No messages match “{activeQuery}”.
+            </p>
+          </div>
+        )}
+        {displayMessages.map((msg, i) => {
           const isOut = msg.direction === 'outbound';
-          const prev = messages[i - 1];
+          const prev = displayMessages[i - 1];
           // "Grouped" means the message visually attaches to the previous one
           // (no name label, tighter spacing). It must be the SAME sender —
           // otherwise two different group members messaging back-to-back
@@ -781,7 +870,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
                   )}
                   {!hasMedia && (
                     <div className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${isOut ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-100 rounded-bl-sm'}`}>
-                      {msg.text}
+                      {renderHighlighted(msg.text, activeQuery)}
                     </div>
                   )}
 
