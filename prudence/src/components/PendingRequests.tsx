@@ -1,4 +1,5 @@
 import { getSDK } from '../sdk.ts';
+import { useEscapeKey } from '../hooks/useEscapeKey.ts';
 
 interface PendingRequest {
   peerId: string;
@@ -14,6 +15,7 @@ interface Props {
 }
 
 export default function PendingRequests({ requests, onAccept, onDecline, onClose }: Props) {
+  useEscapeKey(onClose);
   async function accept(req: PendingRequest) {
     const sdk = getSDK();
     if (!sdk) return;

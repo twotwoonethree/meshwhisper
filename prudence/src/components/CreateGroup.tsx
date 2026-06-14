@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Contact } from '../types.ts';
+import { useEscapeKey } from '../hooks/useEscapeKey.ts';
 
 interface Props {
   contacts: Contact[];
@@ -8,6 +9,7 @@ interface Props {
 }
 
 export default function CreateGroup({ contacts, onClose, onCreate }: Props) {
+  useEscapeKey(onClose);
   const [name, setName] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
 

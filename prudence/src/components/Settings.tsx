@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { exportMyData } from '../dataExport.ts';
+import { useEscapeKey } from '../hooks/useEscapeKey.ts';
 
 interface Props {
   myUsername: string;
@@ -7,6 +8,7 @@ interface Props {
 }
 
 export default function Settings({ myUsername, onClose }: Props) {
+  useEscapeKey(onClose);
   const [passphrase, setPassphrase] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);

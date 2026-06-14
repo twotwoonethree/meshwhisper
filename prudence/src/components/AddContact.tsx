@@ -6,6 +6,7 @@ import { saveContactName } from '../contact-names.ts';
 import { markAccepted } from '../accepted-contacts.ts';
 import { peerIdFromContactQR, looksLikeContactQR } from '../qr.ts';
 import QRScanner from './QRScanner.tsx';
+import { useEscapeKey } from '../hooks/useEscapeKey.ts';
 
 type Mode = 'search' | 'mycode' | 'scan';
 
@@ -25,6 +26,7 @@ type SearchState =
   | { status: 'error'; message: string };
 
 export default function AddContact({ myUsername, onClose, onAdded, initialMode = 'search' }: Props) {
+  useEscapeKey(onClose);
   const [mode, setMode] = useState<Mode>(initialMode);
   const [query, setQuery] = useState('');
   const [state, setState] = useState<SearchState>({ status: 'idle' });

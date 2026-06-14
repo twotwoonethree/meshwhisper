@@ -249,6 +249,22 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
     if (showSearch) searchInputRef.current?.focus();
   }, [showSearch]);
 
+  // Esc closes the topmost Thread-owned overlay. (ContactInfo, the search bar,
+  // and the modal components handle their own Esc.)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (lightboxUrl) setLightboxUrl(null);
+      else if (actionsMenuFor) setActionsMenuFor(null);
+      else if (forwardingMessageId) setForwardingMessageId(null);
+      else if (showDisappearingPicker) setShowDisappearingPicker(false);
+      else if (showAddMember) setShowAddMember(false);
+      else if (showMembers) setShowMembers(false);
+    };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [lightboxUrl, actionsMenuFor, forwardingMessageId, showDisappearingPicker, showAddMember, showMembers]);
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
   }
@@ -947,7 +963,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
                     <FileBubble msg={msg} isOut={isOut} onDownload={() => { if (onDownloadMedia) void onDownloadMedia(msg.id); }} />
                   )}
                   {!hasMedia && (
-                    <div className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed ${isOut ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-100 rounded-bl-sm'}`}>
+                    <div className={`px-3.5 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isOut ? 'bg-brand-600 text-white rounded-br-sm' : 'bg-slate-800 text-slate-100 rounded-bl-sm'}`}>
                       {renderHighlighted(msg.text, activeQuery)}
                     </div>
                   )}

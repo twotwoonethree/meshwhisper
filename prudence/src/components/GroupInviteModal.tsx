@@ -1,3 +1,5 @@
+import { useEscapeKey } from '../hooks/useEscapeKey.ts';
+
 interface Invite {
   groupId: string;
   groupName: string;
@@ -14,6 +16,7 @@ interface Props {
 }
 
 export default function GroupInviteModal({ invites, getContactName, onAccept, onDecline, onClose }: Props) {
+  useEscapeKey(onClose);
   if (invites.length === 0) return null;
 
   return (

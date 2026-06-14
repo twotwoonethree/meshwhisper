@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { MeshWhisper } from '@meshwhisper/sdk';
 import type { Contact } from '../types.ts';
+import { useEscapeKey } from '../hooks/useEscapeKey.ts';
 
 interface Props {
   contact: Contact;
@@ -15,6 +16,7 @@ function formatNumber(n: string): string {
 }
 
 export default function ContactInfo({ contact, verified, onToggleVerified, onClose }: Props) {
+  useEscapeKey(onClose);
   // getSafetyNumber throws if no session/identity key is known yet.
   let safetyNumber: string | null = null;
   let error: string | null = null;
