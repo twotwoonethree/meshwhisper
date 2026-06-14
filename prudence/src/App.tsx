@@ -85,6 +85,61 @@ function senderDisplayName(senderId: string): string {
   return name ? `@${name}` : senderId.slice(0, 8);
 }
 
+// SDK reference: the canonical projection of a PERSISTED SDK message
+// (StoredMessage) into Prudence's UI-shaped AppMessage. This is the single
+// place storage-backed messages — boot hydration and history recovery — are
+// mapped, so every SDK field (media pointer, group sender, reactions, replyTo,
+// forwardedFrom) is preserved in one spot. Keeping it here is what prevents the
+// "projection ratchet": a newly-added SDK field that gets dropped on one
+// reload path but not another. The real-time onMessage path projects a live
+// `Message` (no reactions, different status/self-sync logic) and stays separate.
+function projectStoredMessage(m: StoredMessage, conversationId: string): AppMessage {
+  const text = decoder(m.payload);
+  const mediaPtr = text ? extractMediaPointer(text) : null;
+  return {
+    id: m.id,
+    conversationId,
+    text: mediaPtr
+      ? (isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'))
+      : (text ?? ''),
+    timestamp: m.timestamp,
+    direction: m.direction,
+    status: m.status,
+    // Storage-backed media has a pointer but no decrypted bytes yet, so it
+    // starts 'pending' (tap-to-download); 'ready' would imply an objectUrl
+    // that doesn't exist until the user downloads it.
+    ...(mediaPtr ? { media: { ...mediaPtr, status: 'pending' as const } } : {}),
+    ...(m.groupSenderId && m.direction === 'inbound'
+      ? { senderId: m.groupSenderId, senderName: senderDisplayName(m.groupSenderId) }
+      : {}),
+    ...(m.reactions ? { reactions: m.reactions } : {}),
+    ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+    ...(m.forwardedFrom ? { forwardedFrom: m.forwardedFrom } : {}),
+  };
+}
+
+// Append a message to a conversation AND keep the conversation-list preview
+// (lastMessage) in lockstep. Centralised because several system-message
+// handlers used to update `messages` but forget `lastMessage`, leaving the
+// list stale. Returns the patched slice; callers spread it and add any extra
+// fields (e.g. disappearingByConversation). Handlers that also mutate the
+// conversation's group/roster build their own map instead.
+function appendMessageState(
+  prev: AppState,
+  conversationId: string,
+  msg: AppMessage,
+): Pick<AppState, 'messages' | 'conversations'> {
+  return {
+    conversations: prev.conversations.map((c) =>
+      c.id === conversationId ? { ...c, lastMessage: msg } : c,
+    ),
+    messages: {
+      ...prev.messages,
+      [conversationId]: [...(prev.messages[conversationId] ?? []), msg],
+    },
+  };
+}
+
 export default function App() {
   const [username, setUsername] = useState<string | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
@@ -674,28 +729,7 @@ export default function App() {
       for (const m of msgs as StoredMessage[]) {
         const text = decoder(m.payload);
         if (text && isControlMessage(text)) continue;
-        const mediaPtr = text ? extractMediaPointer(text) : null;
-        appMsgs.push({
-          id: m.id,
-          conversationId: peerId,
-          text: mediaPtr
-            ? (isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'))
-            : (text ?? ''),
-          timestamp: m.timestamp,
-          direction: m.direction,
-          status: m.status,
-          // Storage-backed media has a pointer but no decrypted bytes yet, so
-          // it starts 'pending' (tap-to-download) — same as the boot loader.
-          // 'ready' would imply a usable objectUrl that doesn't exist here.
-          ...(mediaPtr ? { media: { ...mediaPtr, status: 'pending' as const } } : {}),
-          ...(m.groupSenderId && m.direction === 'inbound' ? {
-            senderId: m.groupSenderId,
-            senderName: senderDisplayName(m.groupSenderId),
-          } : {}),
-          ...(m.reactions ? { reactions: m.reactions } : {}),
-          ...(m.replyTo ? { replyTo: m.replyTo } : {}),
-          ...(m.forwardedFrom ? { forwardedFrom: m.forwardedFrom } : {}),
-        });
+        appMsgs.push(projectStoredMessage(m, peerId));
       }
       setState((prev) => ({
         ...prev,
@@ -859,25 +893,7 @@ export default function App() {
               }
               continue;
             }
-            const mediaPtr = extractMediaPointer(text);
-            appMsgs.push({
-              id: m.id,
-              conversationId: c.peerId,
-              text: mediaPtr
-                ? (isImageMime(mediaPtr.mimeType) ? 'Photo' : (mediaPtr.fileName ?? 'File'))
-                : text,
-              timestamp: m.timestamp,
-              direction: m.direction,
-              status: m.status,
-              ...(m.groupSenderId && m.direction === 'inbound' ? {
-                senderId: m.groupSenderId,
-                senderName: senderDisplayName(m.groupSenderId),
-              } : {}),
-              ...(mediaPtr ? { media: { ...mediaPtr, status: 'pending' as const } } : {}),
-              ...(m.reactions ? { reactions: m.reactions } : {}),
-              ...(m.replyTo ? { replyTo: m.replyTo } : {}),
-              ...(m.forwardedFrom ? { forwardedFrom: m.forwardedFrom } : {}),
-            });
+            appMsgs.push(projectStoredMessage(m, c.peerId));
           }
 
           setState((prev) => {
@@ -1023,14 +1039,8 @@ export default function App() {
     // state on boot (disappearingByConversation), so the "why" survives reload.
     setState((prev) => ({
       ...prev,
+      ...appendMessageState(prev, conversationId, sysMsg),
       disappearingByConversation: { ...(prev.disappearingByConversation ?? {}), [conversationId]: ttlMs },
-      conversations: prev.conversations.map((c) =>
-        c.id === conversationId ? { ...c, lastMessage: sysMsg } : c,
-      ),
-      messages: {
-        ...prev.messages,
-        [conversationId]: [...(prev.messages[conversationId] ?? []), sysMsg],
-      },
     }));
   }
 
@@ -1086,14 +1096,8 @@ export default function App() {
         };
         setState((prev) => ({
           ...prev,
+          ...appendMessageState(prev, conversationId, sysMsg),
           disappearingByConversation: { ...(prev.disappearingByConversation ?? {}), [conversationId]: ttlMs },
-          conversations: prev.conversations.map((c) =>
-            c.id === conversationId ? { ...c, lastMessage: sysMsg } : c,
-          ),
-          messages: {
-            ...prev.messages,
-            [conversationId]: [...(prev.messages[conversationId] ?? []), sysMsg],
-          },
         }));
       })();
     },
@@ -1636,16 +1640,7 @@ export default function App() {
       direction: 'outbound',
       status: 'delivered',
     };
-    setState((prev) => ({
-      ...prev,
-      conversations: prev.conversations.map((c) =>
-        c.id === groupId ? { ...c, lastMessage: systemMsg } : c,
-      ),
-      messages: {
-        ...prev.messages,
-        [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
-      },
-    }));
+    setState((prev) => ({ ...prev, ...appendMessageState(prev, groupId, systemMsg) }));
   }
 
   // Fires when the admin transfers admin or makes the group adminless.
@@ -1674,16 +1669,7 @@ export default function App() {
         direction: 'inbound',
         status: 'delivered',
       };
-      setState((prev) => ({
-        ...prev,
-        conversations: prev.conversations.map((c) =>
-          c.id === groupId ? { ...c, lastMessage: systemMsg } : c,
-        ),
-        messages: {
-          ...prev.messages,
-          [groupId]: [...(prev.messages[groupId] ?? []), systemMsg],
-        },
-      }));
+      setState((prev) => ({ ...prev, ...appendMessageState(prev, groupId, systemMsg) }));
     })();
   }, []);
 

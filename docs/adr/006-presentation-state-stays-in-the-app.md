@@ -45,6 +45,15 @@ MeshWhisper.getConversationEvents(conversationId): Promise<ConversationEvent[]>
 
 Consumers render these however they like; the SDK owns persistence and cross-device consistency. This is a **deliberate roadmap feature**, not a hardening fix, and it is the only form in which "system-message persistence" should ever enter the SDK.
 
+## Noted: SDK twin-type smell (related, not blocking)
+
+While fixing the Prudence "projection ratchet" bugs (SDK fields silently dropped when mapping a message into the app's `AppMessage` shape), a contributing **SDK design smell** surfaced — recorded here so it isn't lost, though it does **not** require an SDK change and does not remove the app's need to project:
+
+- The SDK exposes message data through **two types** — `Message` (real-time, via `onMessage`) and `StoredMessage` (persisted, via `getMessages`/history) — with **overlapping but non-identical fields** (e.g. `Message` has no `reactions`; `StoredMessage` does; both carry `replyTo`/`forwardedFrom`/`groupSenderId`).
+- Combined with **multiple entry points** (live callback, boot hydration, history recovery), this forces consumers to hand-map at several sites and to remember *which type carries which field* — exactly the condition that let a field land on one path but not another.
+
+The app-side fix (a single `projectStoredMessage()` for the persisted paths, plus a separate live-`Message` path) is correct regardless and lives in Prudence. The *optional* SDK hardening, if ever revisited, would be to make `Message`/`StoredMessage` share a common base (so a field can't exist on one but not the other) or to offer a single canonical normalizer. **Nice-to-have, low priority, not required** — captured only so the smell is on record.
+
 ## Consequences
 
 - The Prudence↔SDK boundary stays clean: apps own rendering, the SDK owns security + authoritative state.
