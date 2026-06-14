@@ -35,3 +35,4 @@ Don't write an ADR for a typo fix or a refactor that doesn't change semantics. D
 - [ADR-003 — Tombstone + revival model for delete-and-re-add](003-tombstones-and-revivals.md)
 - [ADR-004 — Opportunistic transport upgrade, not P2P-or-relay](004-opportunistic-transport-upgrade.md)
 - [ADR-006 — Presentation-layer state stays in the app; deferred typed event log](006-presentation-state-stays-in-the-app.md)
+- [ADR-007 — E2EE relay-backed message backup with a user-held recovery key (proposed)](007-e2ee-message-backup.md)
