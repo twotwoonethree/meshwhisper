@@ -282,6 +282,13 @@ export default function App() {
     return () => document.removeEventListener('prudence:openConversation', handler);
   }, []);
 
+  // Reflect total unread count in the browser tab title so a backgrounded
+  // user sees "(3) Prudence" even when push is unavailable.
+  useEffect(() => {
+    const total = state.conversations.reduce((n, c) => n + (c.unread || 0), 0);
+    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) Prudence` : 'Prudence';
+  }, [state.conversations]);
+
   useEffect(() => {
     const u = localStorage.getItem(USERNAME_KEY);
     if (!u) {

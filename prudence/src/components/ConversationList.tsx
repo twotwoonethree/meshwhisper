@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { Conversation } from '../types.ts';
 import AddContact from './AddContact.tsx';
 import InstallButton from './InstallButton.tsx';
@@ -64,6 +64,21 @@ export default function ConversationList({
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [query, setQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (showSearch) searchInputRef.current?.focus();
+  }, [showSearch]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? conversations.filter((c) =>
+        c.contact.displayName.toLowerCase().includes(q) ||
+        (c.contact.username?.toLowerCase().includes(q) ?? false),
+      )
+    : conversations;
 
   return (
     <>
@@ -79,6 +94,15 @@ export default function ConversationList({
           </div>
           <div className="flex items-center gap-1">
             <InstallButton />
+            <button
+              onClick={() => setShowSearch((v) => !v)}
+              className={`w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center transition-colors ${showSearch ? 'text-brand-400' : 'text-slate-500 hover:text-slate-300'}`}
+              title="Search conversations"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+              </svg>
+            </button>
             <button
               onClick={() => setShowSettings(true)}
               className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-slate-300 transition-colors"
@@ -119,6 +143,32 @@ export default function ConversationList({
           </div>
         </div>
 
+        {/* Search bar */}
+        {showSearch && (
+          <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-800">
+            <svg className="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+            </svg>
+            <input
+              ref={searchInputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setShowSearch(false); setQuery(''); } }}
+              placeholder="Search conversations…"
+              className="flex-1 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none"
+            />
+            <button
+              onClick={() => { setShowSearch(false); setQuery(''); }}
+              className="w-6 h-6 rounded-full hover:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-white transition-colors flex-shrink-0"
+              title="Close search"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        )}
+
         {/* Pending contact requests banner */}
         {pendingCount > 0 && (
           <button
@@ -152,8 +202,12 @@ export default function ConversationList({
               <p className="text-slate-500 text-sm mb-2">No conversations yet</p>
               <p className="text-slate-600 text-xs">Tap + to add a contact</p>
             </div>
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-center px-6">
+              <p className="text-slate-500 text-sm">No conversations match “{query.trim()}”.</p>
+            </div>
           ) : (
-            conversations.map((conv) => (
+            filtered.map((conv) => (
               <button
                 key={conv.id}
                 onClick={() => onSelect(conv.id)}
