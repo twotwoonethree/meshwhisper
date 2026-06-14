@@ -1,5 +1,5 @@
 import { MeshWhisper } from '@meshwhisper/sdk';
-import type { Message } from '@meshwhisper/sdk';
+import type { Message, OutboundCiphertext } from '@meshwhisper/sdk';
 import { idbStorage } from './storage.ts';
 import type { WebPushSubscription } from './push.ts';
 
@@ -18,6 +18,7 @@ export async function initSDK(
   handlers: {
     onMessage: (msg: Message) => void;
     onMessageStatus?: (messageId: string, status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed') => void;
+    onCiphertext?: (info: OutboundCiphertext) => void;
     onTyping: (peerId: string, isTyping: boolean) => void;
     onContactRequest: (peerId: string, introducedBy: string, username?: string) => void;
     onConnectionStatus: (status: 'connected' | 'disconnected') => void;
@@ -45,6 +46,7 @@ export async function initSDK(
     ...(pushSubscription ? { push: { platform: 'webpush' as const, subscription: pushSubscription } } : {}),
     onMessage: handlers.onMessage,
     ...(handlers.onMessageStatus ? { onMessageStatus: handlers.onMessageStatus } : {}),
+    ...(handlers.onCiphertext ? { onCiphertext: handlers.onCiphertext } : {}),
     onTyping: handlers.onTyping,
     onContactRequest: handlers.onContactRequest,
     onConnectionStatus: handlers.onConnectionStatus,

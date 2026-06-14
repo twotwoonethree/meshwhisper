@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import type { AppMessage, Contact, GroupInfo } from '../types.ts';
 import { isImageMime, formatFileSize, fileIconLabel } from '../media.ts';
 import ContactInfo from './ContactInfo.tsx';
+import CiphertextPeek from './CiphertextPeek.tsx';
+import type { CiphertextInfo } from '../types.ts';
 import { isVerified, markVerified, unverify } from '../verified-contacts.ts';
 
 // Split `text` on every (case-insensitive) occurrence of `query` and wrap the
@@ -58,6 +60,8 @@ interface Props {
   onForwardMessage?: (messageId: string, toPeerId: string) => Promise<void>;
   /** DM only: delete one of your own messages (locally + asks the peer to drop their copy). */
   onDeleteMessage?: (messageId: string) => void;
+  /** Look up the relay-visible ciphertext captured for an outbound message id. */
+  getCiphertext?: (messageId: string) => CiphertextInfo | undefined;
   /** DM only: set the conversation's disappearing-messages TTL. */
   onSetDisappearing?: (ttlMs: number | null) => Promise<void>;
   /** DM only: current disappearing-messages TTL (ms), or null = off. */
@@ -175,7 +179,7 @@ function FileBubble({ msg, isOut, onDownload }: { msg: AppMessage; isOut: boolea
 
 const ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip';
 
-export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onReact, onForwardMessage, onDeleteMessage, onSetDisappearing, disappearingTtlMs, forwardTargets, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
+export default function Thread({ contact, group, isGroupAdmin, isAdminless, localPeerId, addableContacts, messages, isTyping, onBack, onSend, onRemove, onAddMember, onTransferAdmin, onKickMember, onRenameGroup, onReact, onForwardMessage, onDeleteMessage, getCiphertext, onSetDisappearing, disappearingTtlMs, forwardTargets, onAttach, onDownloadMedia, onRestoreHistory, onExport }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -195,6 +199,7 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [showContactInfo, setShowContactInfo] = useState(false);
+  const [peekFor, setPeekFor] = useState<AppMessage | null>(null);
   const [verified, setVerified] = useState(() => !group && isVerified(contact.peerId));
   // The DM case is identified by the absence of a group on the conversation.
   // Reactions / replies / forwards / disappearing-messages are DM-only in v1
@@ -748,6 +753,18 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
                 </svg>
                 Copy text
               </button>
+              {getCiphertext && targetMsg.direction === 'outbound' && !targetMsg.media && (
+                <button
+                  onClick={() => { setPeekFor(targetMsg); setActionsMenuFor(null); }}
+                  className="w-full px-5 py-3 text-left text-white text-sm hover:bg-slate-800 transition-colors flex items-center gap-3"
+                >
+                  <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                  </svg>
+                  What the relay sees
+                </button>
+              )}
               {onDeleteMessage && targetMsg.direction === 'outbound' && (
                 <button
                   onClick={() => {
@@ -863,6 +880,15 @@ export default function Thread({ contact, group, isGroupAdmin, isAdminless, loca
             setVerified(next);
           }}
           onClose={() => setShowContactInfo(false)}
+        />
+      )}
+
+      {/* Ciphertext Peek — "what the relay sees" for an outbound message */}
+      {peekFor && (
+        <CiphertextPeek
+          plaintext={peekFor.text}
+          info={getCiphertext?.(peekFor.id)}
+          onClose={() => setPeekFor(null)}
         />
       )}
 

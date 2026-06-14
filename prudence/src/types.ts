@@ -1,3 +1,12 @@
+/** Cached relay-visible bytes for one outbound message (from onCiphertext),
+ *  hex-encoded for the Ciphertext Peek inspector. */
+export interface CiphertextInfo {
+  ciphertextHex: string;
+  destHashHex: string;
+  byteLength: number;
+  plaintextLength: number;
+}
+
 export interface Contact {
   peerId: string;
   username?: string;

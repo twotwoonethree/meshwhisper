@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { Message, Conversation as SDKConversation, StoredMessage } from '@meshwhisper/sdk';
+import type { Message, Conversation as SDKConversation, StoredMessage, OutboundCiphertext } from '@meshwhisper/sdk';
 import { MeshWhisper } from '@meshwhisper/sdk';
 import { initSDK, getSDK } from './sdk.ts';
 import { getPushSubscription } from './push.ts';
@@ -10,7 +10,7 @@ import { isHandled, markAccepted, markDeclined as markDeclinedContact, getAll as
 import { loadGroups, upsertGroup, removeStoredGroup } from './group-storage.ts';
 import { generateThumbnail, readFileBytes, downloadAndDecrypt, triggerDownload, isImageMime, formatFileSize as _formatFileSize } from './media.ts';
 import { showMessageNotification } from './notifications.ts';
-import type { AppState, AppMessage, AppMessageMedia, Conversation, Contact, GroupInfo } from './types.ts';
+import type { AppState, AppMessage, AppMessageMedia, Conversation, Contact, GroupInfo, CiphertextInfo } from './types.ts';
 import Onboarding from './components/Onboarding.tsx';
 import Login from './components/Login.tsx';
 import ConversationList from './components/ConversationList.tsx';
@@ -165,6 +165,9 @@ export default function App() {
   const archiveSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const archiveSyncMaxTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const archivePending = useRef(false);
+  // Ciphertext Peek cache: relay-visible bytes per outbound message id, fed by
+  // the SDK's onCiphertext hook. Ephemeral (not persisted) — for the inspector.
+  const ciphertextCache = useRef<Map<string, CiphertextInfo>>(new Map());
 
   // SDK reference: archive sync. See ../REFERENCE.md "Archive sync".
   // scheduleArchiveSync = debounced (5s) for routine state changes;
@@ -535,6 +538,18 @@ export default function App() {
     });
   }, []);
 
+  // SDK reference: onCiphertext transparency hook (ADR-008). Cache the
+  // relay-visible bytes (hex) per message id so the Ciphertext Peek inspector
+  // can show "what the relay sees" for a tapped message.
+  const handleCiphertext = useCallback((info: OutboundCiphertext) => {
+    ciphertextCache.current.set(info.messageId, {
+      ciphertextHex: uint8ArrayToHex(info.ciphertext),
+      destHashHex: uint8ArrayToHex(info.destHash),
+      byteLength: info.ciphertext.length,
+      plaintextLength: info.plaintextLength,
+    });
+  }, []);
+
   const handleTyping = useCallback((peerId: string, isTyping: boolean) => {
     setState((prev) => ({
       ...prev,
@@ -782,6 +797,7 @@ export default function App() {
       void initSDK(username, {
         onMessage: handleMessage,
         onMessageStatus: handleMessageStatus,
+        onCiphertext: handleCiphertext,
         onTyping: handleTyping,
         onContactRequest: handleContactRequest,
         onConnectionStatus: handleConnectionStatus,
@@ -1185,7 +1201,9 @@ export default function App() {
     const payload = new TextEncoder().encode(text);
     const sendPromise = isGroupConv
       ? sdk.sendToGroup(conversationId, payload as Uint8Array)
-      : sdk.sendMessage(conversationId, payload as Uint8Array, replyTo ? { replyTo } : undefined);
+      // Pass our optimistic id so the stored message, onMessageStatus, and the
+      // onCiphertext peek all share it (see ADR-008).
+      : sdk.sendMessage(conversationId, payload as Uint8Array, { messageId: msgId, ...(replyTo ? { replyTo } : {}) });
     sendPromise.then(() => {
       setState((prev) => ({
         ...prev,
@@ -1958,6 +1976,7 @@ export default function App() {
             contact={activeConv.contact}
             group={activeConv.group}
             localPeerId={MeshWhisper.getLocalPeerId()}
+            getCiphertext={(id) => ciphertextCache.current.get(id)}
             isGroupAdmin={
               !!activeConv.group &&
               (() => {
