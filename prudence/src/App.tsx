@@ -562,10 +562,23 @@ export default function App() {
   const handleContactRequest = useCallback(
     (peerId: string, introducedBy: string, reqUsername?: string) => {
       if (isHandled(peerId)) return;
-      setState((prev) => ({
-        ...prev,
-        pendingRequests: [...prev.pendingRequests, { peerId, introducedBy, username: reqUsername }],
-      }));
+      setState((prev) => {
+        // Dedupe: the SDK's onContactRequest (x3dh_init) and Prudence's own
+        // __prudence_ctrl 'contact_request' can both fire for the same peer in
+        // either order. If we already have a pending entry, fill in a username
+        // we didn't have rather than appending a duplicate.
+        const existing = prev.pendingRequests.find((r) => r.peerId === peerId);
+        if (existing) {
+          if (!reqUsername || existing.username === reqUsername) return prev;
+          return {
+            ...prev,
+            pendingRequests: prev.pendingRequests.map((r) =>
+              r.peerId === peerId ? { ...r, username: reqUsername } : r,
+            ),
+          };
+        }
+        return { ...prev, pendingRequests: [...prev.pendingRequests, { peerId, introducedBy, username: reqUsername }] };
+      });
       setShowPending(true);
     },
     [],
