@@ -259,6 +259,8 @@ export interface FederationStats {
   peersConfigured: number;
   peersConnected: number;
   forwardsSentTotal: number;
+  /** Subset of forwardsSentTotal sent via direct home-relay routing (ADR-010). */
+  routedForwardsSentTotal: number;
   forwardsReceivedTotal: number;
   deliveredLocallyTotal: number;
   storedLocallyTotal: number;
@@ -289,6 +291,7 @@ export class FederationManager {
     peersConfigured: 0,
     peersConnected: 0,
     forwardsSentTotal: 0,
+    routedForwardsSentTotal: 0,
     forwardsReceivedTotal: 0,
     deliveredLocallyTotal: 0,
     storedLocallyTotal: 0,
@@ -389,6 +392,37 @@ export class FederationManager {
     // Insert into our own cache so a loop back to us is dropped.
     this.cache.checkAndInsert(packetId.toString('hex'));
     this.fanOut(packetId, 0, Buffer.from(packet), null);
+  }
+
+  /**
+   * ADR-010: route a locally-received packet *directly* to the one federated
+   * peer that homes the recipient (identified by federation pubkey), instead
+   * of flooding every peer. Returns true if the packet was sent; false if the
+   * target relay isn't a connected peer (the caller then falls back to the
+   * flood so delivery still happens). The peer handles the resulting
+   * PacketForward frame identically to a flooded one — no peer-side change.
+   */
+  forwardToRelay(targetPubkeyHex: string, packet: Uint8Array): boolean {
+    if (packet.byteLength > MAX_FRAME_BODY - 17) return false;
+    const state = this.peers.get(targetPubkeyHex);
+    if (!state || !state.established || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    const packetId = nodeCrypto.randomBytes(16);
+    this.cache.checkAndInsert(packetId.toString('hex'));
+    const body = Buffer.alloc(17 + packet.length);
+    packetId.copy(body, 0);
+    body.writeUInt8(0, 16);
+    Buffer.from(packet).copy(body, 17);
+    const frame = encodeFrame(FRAME_PACKET_FORWARD, body);
+    try {
+      state.ws.send(frame, { binary: true });
+      this.stats.forwardsSentTotal++;
+      this.stats.routedForwardsSentTotal++;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // ---- internals ----

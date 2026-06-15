@@ -319,4 +319,9 @@ export interface HandshakeEnvelope {
   // the sender's namespace. Absent for normal same-namespace apps (default),
   // so the envelope is byte-identical to before for them.
   senderNamespace?: number[];
+  // The sender's home-relay federation pubkey (hex) — present ONLY when the
+  // sender opted into interop AND configured a homeRelay (ADR-010). Lets the
+  // receiver route replies directly to the sender's relay instead of flooding.
+  // Absent otherwise, so the envelope is byte-identical to before.
+  senderHomeRelay?: string;
 }

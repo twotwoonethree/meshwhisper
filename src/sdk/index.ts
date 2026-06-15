@@ -466,6 +466,12 @@ export class MeshWhisper {
   // for normal same-namespace contacts, so behaviour is unchanged by default.
   private readonly peerNamespaces = new Map<string, Uint8Array>();
 
+  // Per-peer home-relay federation pubkey (hex), learned from the contact
+  // invite or the handshake (ADR-010). When present, our relay routes packets
+  // to this peer directly to their home relay instead of flooding. Empty by
+  // default, so behaviour is unchanged for apps that don't advertise a relay.
+  private readonly peerHomeRelays = new Map<string, string>();
+
   // --- Presence ---
   private readonly presenceRecords: Map<string, PeerPresenceRecord> = new Map();
 
@@ -590,7 +596,7 @@ export class MeshWhisper {
       this.peerCache,
       this.storage,
       (packet, peerId) => this.routeAndSend(packet, peerId),
-      (peerId, peerNamespace) => this.onContactEstablished(peerId, peerNamespace),
+      (peerId, peerNamespace, peerHomeRelay) => this.onContactEstablished(peerId, peerNamespace, peerHomeRelay),
       (peerId) => this.sendHandshakeActivation(peerId),
       config.namespace,
       config.node ?? 'mesh',
@@ -599,6 +605,9 @@ export class MeshWhisper {
       (peerId: string) => this.destNamespaceFor(peerId),
       // Announce our namespace in handshakes only when interop is opted in.
       () => (this.config.interop ? this.namespaceManager.getNamespaceId() : null),
+      // Announce our home relay in handshakes only when interop is on and a
+      // homeRelay is configured (ADR-010) — lets peers route replies directly.
+      () => (this.config.interop && this.config.homeRelay ? this.config.homeRelay : null),
       (peerId, role) => this.onSessionEstablishedHook(peerId, role),
     );
 
@@ -1552,6 +1561,17 @@ export class MeshWhisper {
       const nsId = this.namespaceManager.getNamespaceId();
       const nsLen = new Uint8Array(2);
       new DataView(nsLen.buffer).setUint16(0, nsId.length, false);
+      // 0x02: interop + home relay (ADR-010). Carries the namespace id AND our
+      // home-relay federation pubkey so a scanner's relay can route directly to
+      // us. Falls back to 0x01 (namespace only) when no homeRelay is configured.
+      if (this.config.homeRelay) {
+        const relayBytes = hexToUint8Array(this.config.homeRelay);
+        const relayLen = new Uint8Array(2);
+        new DataView(relayLen.buffer).setUint16(0, relayBytes.length, false);
+        return uint8ArrayToBase64(concat(
+          new Uint8Array([0x02]), nsLen, nsId, relayLen, relayBytes, peerIdLen, peerIdBytes, serialized,
+        ));
+      }
       return uint8ArrayToBase64(concat(new Uint8Array([0x01]), nsLen, nsId, peerIdLen, peerIdBytes, serialized));
     }
     return uint8ArrayToBase64(concat(peerIdLen, peerIdBytes, serialized));
@@ -1571,10 +1591,17 @@ export class MeshWhisper {
     // layout (which begins with the peerId-length high byte, always 0x00).
     let offset = 0;
     let peerNamespace: Uint8Array | null = null;
-    if (raw[0] === 0x01) {
+    let peerHomeRelay: string | null = null;
+    if (raw[0] === 0x01 || raw[0] === 0x02) {
+      const version = raw[0];
       offset = 1;
       const nsLen = view.getUint16(offset, false); offset += 2;
       peerNamespace = raw.slice(offset, offset + nsLen); offset += nsLen;
+      // 0x02 additionally carries the peer's home-relay federation pubkey (ADR-010).
+      if (version === 0x02) {
+        const relayLen = view.getUint16(offset, false); offset += 2;
+        peerHomeRelay = uint8ArrayToHex(raw.slice(offset, offset + relayLen)); offset += relayLen;
+      }
     }
     const peerIdLen = view.getUint16(offset, false); offset += 2;
     const peerId = new TextDecoder().decode(raw.slice(offset, offset + peerIdLen)); offset += peerIdLen;
@@ -1588,6 +1615,10 @@ export class MeshWhisper {
     // and stays isolated (ADR-009).
     if (peerNamespace && this.config.interop) {
       this.peerNamespaces.set(peerId, peerNamespace);
+    }
+    // Remember the peer's home relay so our relay routes to it directly (ADR-010).
+    if (peerHomeRelay && this.config.interop) {
+      this.peerHomeRelays.set(peerId, peerHomeRelay);
     }
 
     if (this.config.permissionModel === 'mutual') {
@@ -2657,6 +2688,12 @@ export class MeshWhisper {
   // ================================================================
 
   private async routeAndSend(packet: Packet, recipientId: string): Promise<void> {
+    // Attach the recipient's home-relay routing hint (ADR-010) if we know it,
+    // so the relay transport can ask our relay to route directly rather than
+    // flood. Transport-only metadata — not part of the wire packet.
+    const homeRelay = this.peerHomeRelays.get(recipientId);
+    if (homeRelay) packet.homeRelay = homeRelay;
+
     // Opportunistic dual-send (docs/p2p-transport.md §6): offer the packet to
     // any connected LAN/proximity peers in parallel with the guaranteed path.
     // Receivers dedup by packet ID, and only the addressee can match the
@@ -2717,13 +2754,18 @@ export class MeshWhisper {
   // Internal — Contact establishment callback (from SessionManager)
   // ================================================================
 
-  private onContactEstablished(peerId: string, peerNamespace?: Uint8Array): void {
+  private onContactEstablished(peerId: string, peerNamespace?: Uint8Array, peerHomeRelay?: string): void {
     // If the peer announced a namespace in their handshake AND we've opted into
     // interop, remember it so our replies address into their namespace (ADR-009).
     // Gated on our own interop flag — a non-interop app ignores it and stays
     // isolated.
     if (peerNamespace && this.config.interop) {
       this.peerNamespaces.set(peerId, peerNamespace);
+    }
+    // Likewise remember the peer's home relay (ADR-010) so our relay routes
+    // replies directly to it instead of flooding the federation.
+    if (peerHomeRelay && this.config.interop) {
+      this.peerHomeRelays.set(peerId, peerHomeRelay);
     }
     // Capture pre-add state so we can tell whether this is a brand-new peer
     // contacting us, vs. someone we already knew re-handshaking (e.g. recovery

@@ -98,6 +98,13 @@ export class NodeTransport implements Transport {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('NodeTransport: not connected to Node');
     }
+    // ADR-010: if the packet carries a home-relay hint, tell the relay (over
+    // the same ordered TLS channel, just before the binary packet) which peer
+    // relay homes the recipient, so it routes directly instead of flooding.
+    if (packet.homeRelay) {
+      const destHashHex = Buffer.from(packet.destHash.subarray(0, 8)).toString('hex');
+      this.ws.send(JSON.stringify({ type: 'route', destHash: destHashHex, homeRelay: packet.homeRelay }));
+    }
     const binary = serializePacket(packet);
     return new Promise<void>((resolve, reject) => {
       this.ws!.send(binary, { binary: true }, (err) => {

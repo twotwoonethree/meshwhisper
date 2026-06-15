@@ -777,6 +777,15 @@ const clientsByHash = new Map<string, WebSocket>();
 /** Reverse map so we can clean up on disconnect. */
 const hashesPerClient = new Map<WebSocket, Set<string>>();
 
+/**
+ * ADR-010 routing hints: per-connection destHash(hex) → home-relay federation
+ * pubkey(hex). A client sends a `route` control message just before a packet
+ * to tell us which federated peer homes the recipient, so we forward directly
+ * instead of flooding. Cleared on disconnect; capped per connection.
+ */
+const routeHintsPerClient = new Map<WebSocket, Map<string, string>>();
+const MAX_ROUTE_HINTS_PER_CLIENT = 1024;
+
 // ============================================================
 // Anonymous activity stream — for the public live-traffic page
 //
@@ -844,6 +853,7 @@ function deregisterClient(ws: WebSocket): void {
     // needed to wake the device when it is offline.
     hashesPerClient.delete(ws);
   }
+  routeHintsPerClient.delete(ws);
 }
 
 function deliverQueuedBlobs(ws: WebSocket, destHashes: string[]): void {
@@ -900,10 +910,18 @@ function handleRelayPacket(data: Uint8Array, sender: WebSocket): void {
       bumpActivity('wake');
     } else if (federation) {
       // No connected client and no push registration — this destHash may
-      // be homed on a federated peer. Forward best-effort. The local
-      // store (above) is kept as a harmless safety net; it expires per
-      // BLOB_TTL like everything else.
-      federation.forwardFromLocal(data);
+      // be homed on a federated peer. The local store (above) is kept as a
+      // harmless safety net; it expires per BLOB_TTL like everything else.
+      //
+      // ADR-010: if the sender gave us a home-relay hint, route directly to
+      // that peer instead of flooding the whole federation. Fall back to the
+      // hop-limited flood when there's no hint or the target isn't connected.
+      const targetRelay = routeHintsPerClient.get(sender)?.get(destHash);
+      if (targetRelay && federation.forwardToRelay(targetRelay, data)) {
+        bumpActivity('fwd');
+      } else {
+        federation.forwardFromLocal(data);
+      }
     }
   }
 }
@@ -933,6 +951,8 @@ function handleWebSocketConnection(ws: WebSocket): void {
         pushPlatform?: string;
         pushTopic?: string;
         pushSubscription?: string;
+        destHash?: string;
+        homeRelay?: string;
       };
 
       if (msg.type === 'hello' && Array.isArray(msg.destHashes)) {
@@ -965,6 +985,25 @@ function handleWebSocketConnection(ws: WebSocket): void {
       if (msg.type === 'pull') {
         const hashes = hashesPerClient.get(ws);
         if (hashes) deliverQueuedBlobs(ws, [...hashes]);
+        return;
+      }
+
+      // ADR-010: a routing hint for the next packet to `destHash`. We trust the
+      // sender's own claim about where their contact is homed (it came from the
+      // contact's self-describing invite); worst case it's wrong and the packet
+      // doesn't get delivered via this peer — no security impact, the payload
+      // is opaque and the relay is namespace-blind regardless.
+      if (msg.type === 'route' &&
+          typeof msg.destHash === 'string' && /^[0-9a-f]{16}$/.test(msg.destHash) &&
+          typeof msg.homeRelay === 'string' && /^[0-9a-f]{64}$/.test(msg.homeRelay)) {
+        let hints = routeHintsPerClient.get(ws);
+        if (!hints) { hints = new Map(); routeHintsPerClient.set(ws, hints); }
+        if (hints.size >= MAX_ROUTE_HINTS_PER_CLIENT && !hints.has(msg.destHash)) {
+          // Evict an arbitrary (oldest-inserted) entry to stay bounded.
+          const first = hints.keys().next().value;
+          if (first !== undefined) hints.delete(first);
+        }
+        hints.set(msg.destHash, msg.homeRelay);
         return;
       }
     } catch {
@@ -1117,6 +1156,8 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       federation?.connectedPeerCount() ?? 0);
     emit('meshwhisper_federation_forwards_sent_total', 'PacketForward frames sent to peers', 'counter',
       federation?.stats.forwardsSentTotal ?? 0);
+    emit('meshwhisper_federation_routed_forwards_sent_total', 'PacketForward frames sent via direct home-relay routing (ADR-010)', 'counter',
+      federation?.stats.routedForwardsSentTotal ?? 0);
     emit('meshwhisper_federation_forwards_received_total', 'PacketForward frames received from peers', 'counter',
       federation?.stats.forwardsReceivedTotal ?? 0);
     emit('meshwhisper_federation_delivered_locally_total', 'Federation packets delivered to a connected local client', 'counter',

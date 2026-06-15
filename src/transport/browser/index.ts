@@ -76,6 +76,12 @@ export class BrowserTransport implements Transport {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('BrowserTransport: not connected to Node');
     }
+    // ADR-010: route hint before the binary packet (see NodeTransport.send).
+    if (packet.homeRelay) {
+      let hex = '';
+      for (const b of packet.destHash.subarray(0, 8)) hex += b.toString(16).padStart(2, '0');
+      this.ws.send(JSON.stringify({ type: 'route', destHash: hex, homeRelay: packet.homeRelay }));
+    }
     const binary = serializePacket(packet);
     this.ws.send(binary);
   }

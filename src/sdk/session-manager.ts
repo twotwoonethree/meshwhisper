@@ -122,7 +122,7 @@ export class SessionManager {
      * Called when an inbound x3dh_init establishes a new session, so the
      * coordinator can register the new contact with the permission manager.
      */
-    private readonly onContactEstablished: (peerId: string, peerNamespace?: Uint8Array) => void,
+    private readonly onContactEstablished: (peerId: string, peerNamespace?: Uint8Array, peerHomeRelay?: string) => void,
     /**
      * Called immediately after we send an outbound x3dh_init. The coordinator
      * uses this to send a tiny ratchet "activate" message so the receiver's
@@ -140,6 +140,9 @@ export class SessionManager {
     /** Our namespace id to announce in outbound handshakes when interop is on,
      *  or null when it's off (so the envelope stays byte-identical). ADR-009. */
     private readonly interopNamespace: () => Uint8Array | null,
+    /** Our home-relay federation pubkey (hex) to announce in outbound
+     *  handshakes when interop is on, or null when off / unconfigured. ADR-010. */
+    private readonly interopHomeRelay: () => string | null,
     /**
      * Called when a handshake completes and a fresh session is in place.
      * The coordinator uses this to schedule a session-health ping that
@@ -891,6 +894,12 @@ export class SessionManager {
         const ns = this.interopNamespace();
         return ns ? { senderNamespace: Array.from(ns) } : {};
       })(),
+      // Announce our home relay so the recipient can route replies directly
+      // (ADR-010) — only when interop is on and a homeRelay is configured.
+      ...((): { senderHomeRelay?: string } => {
+        const hr = this.interopHomeRelay();
+        return hr ? { senderHomeRelay: hr } : {};
+      })(),
     };
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(handshakeEnvelope));
@@ -995,7 +1004,7 @@ export class SessionManager {
     // sender's namespace (if they announced one) so cross-namespace replies can
     // be addressed into it (ADR-009).
     const senderNs = envelope.senderNamespace ? new Uint8Array(envelope.senderNamespace) : undefined;
-    this.onContactEstablished(envelope.senderId, senderNs);
+    this.onContactEstablished(envelope.senderId, senderNs, envelope.senderHomeRelay);
 
     // Fresh session as the responder — clear any stale health state. We
     // do NOT initiate a ping ourselves; the initiator handles that.

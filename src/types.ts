@@ -128,6 +128,13 @@ export interface Packet {
   ttl: number;                // max 7
   payloadLength: number;
   encryptedPayload: Uint8Array;
+  /**
+   * Transport-only routing hint (NOT part of the wire packet — serializePacket
+   * ignores it). When set, the relay transport tells our own relay the
+   * recipient's home-relay federation pubkey (hex) so it can route directly
+   * instead of flooding the federation (ADR-010).
+   */
+  homeRelay?: string;
 }
 
 // --- Transport Types ---
@@ -350,6 +357,15 @@ export interface MeshWhisperConfig {
    * each other. Purely opt-in; flipping it changes nothing for apps that don't.
    */
   interop?: boolean;
+  /**
+   * This client's home-relay federation public key (hex), if known. When set
+   * (and interop is on), it is advertised in contact invites so a peer's relay
+   * can route packets *directly* to this relay (ADR-010) instead of flooding
+   * the federation. Purely an optimisation + privacy win — delivery still
+   * works without it (falls back to the hop-limited flood). Omit and nothing
+   * changes.
+   */
+  homeRelay?: string;
   /** MeshWhisper Node endpoint(s). Use "mesh" for Foundation-hosted nodes,
    *  a wss:// URL for self-hosted, or an array for hybrid mode. Defaults to "mesh". */
   node?: string | string[];

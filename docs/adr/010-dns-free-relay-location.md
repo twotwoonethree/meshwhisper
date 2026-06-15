@@ -104,6 +104,46 @@ Because the hint rides the client→RA TLS channel and is consumed by RA, and RA
 then dials RB directly, **no third-party relay sees the hint** — there is no
 public "destined-for-RB" header on the wire for transit relays to read.
 
+## Stage-1 — landed & proven (2026-06-15)
+
+The first stage — **home relay in the invite + a submit hint + a direct routed
+forward, with flood as fallback** — is implemented and verified end to end
+(`tests/cross-operator.test.ts`, the routed test). What shipped:
+
+- **Invite carries the home relay.** A new `homeRelay` config field (federation
+  pubkey hex). When set *and* interop is on, the contact QR gains a `0x02`
+  version (namespace id + home-relay pubkey); it falls back to `0x01`
+  (namespace only) or `0x00` (legacy) so older invites are unaffected. The
+  handshake envelope also carries `senderHomeRelay` (mirroring
+  `senderNamespace`), so routing is learned **bidirectionally** — the scanner
+  from the QR, the scannee from the handshake.
+- **Submit hint.** The SDK tags the outbound `Packet` with the recipient's
+  home relay (from `peerHomeRelays`); the relay transport sends a tiny
+  `{type:'route', destHash, homeRelay}` control message on the same ordered
+  channel just before the binary packet — so the hint always arrives first, no
+  race, and no third party sees it.
+- **Direct routed forward.** The relay records the per-connection hint and, when
+  a packet has no local client and no push registration, calls the new
+  `FederationManager.forwardToRelay(targetPubkey, packet)` — sending the
+  `PacketForward` frame to **only** the home relay instead of `fanOut`-ing to
+  every peer. If the target isn't a connected peer, it falls back to the flood,
+  so delivery never regresses. The receiving relay handles the frame
+  identically to a flooded one — **zero peer-side change**.
+- **Observable.** A new `meshwhisper_federation_routed_forwards_sent_total`
+  counter; the test asserts it increments (relay A routed straight to relay B)
+  while the message is delivered + decrypted across both the namespace and the
+  operator boundary.
+
+Strictly opt-in and backward-compatible: with no `homeRelay` configured the
+QR/handshake bytes and the wire protocol are unchanged, and the relay floods
+exactly as before — verified by the existing (non-`homeRelay`) cross-operator,
+cross-namespace, federation, and integration tests all staying green.
+
+Known follow-ups left for later stages: the SDK re-sends the route hint per
+packet (could be deduped per destHash); the home-relay pubkey is provided via
+config (a relay advertising its own federation key to clients is the automatic
+end-state); and stages 2–3 (gossip overlay, DHT/transit/onion) are unstarted.
+
 ## Privacy analysis (why this is strictly better than both alternatives)
 
 Count who touches a packet under each model:

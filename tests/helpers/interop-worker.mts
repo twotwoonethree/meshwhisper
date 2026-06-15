@@ -2,7 +2,7 @@
 // The SDK is a per-process singleton, so each peer runs in its own process —
 // which also lets two peers be LIVE on two different relays at once.
 //
-// argv: <nodeUrl> <username> <namespace> <interop:0|1>
+// argv: <nodeUrl> <username> <namespace> <interop:0|1> [homeRelayPubkeyHex]
 //
 // stdout:  READY <peerId>
 //          QR <base64>                  our contact code
@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import { MeshWhisper } from '../../src/index.js';
 import { NodeStorage } from '../../src/persistence/node-storage.js';
 
-const [, , nodeUrl, username, namespace, interopArg] = process.argv;
+const [, , nodeUrl, username, namespace, interopArg, homeRelay] = process.argv;
 const DEV_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const interop = interopArg === '1';
 
@@ -32,6 +32,7 @@ const mw = await MeshWhisper.init({
   developerKey: DEV_KEY,
   username,
   interop,
+  ...(homeRelay ? { homeRelay } : {}),
   storage: new NodeStorage(dir),
   transports: { lan: false },
   onMessage: (m) => {

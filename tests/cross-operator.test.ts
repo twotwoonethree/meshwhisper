@@ -75,12 +75,10 @@ interface Worker {
   send: (cmd: string) => void;
 }
 
-function spawnWorker(nodeUrl: string, username: string, namespace: string, interop: boolean): Worker {
-  const proc = childProcess.spawn(
-    TSX,
-    [path.join(__dirname, 'helpers', 'interop-worker.mts'), nodeUrl, username, namespace, interop ? '1' : '0'],
-    { cwd: REPO, stdio: ['pipe', 'pipe', 'pipe'] },
-  );
+function spawnWorker(nodeUrl: string, username: string, namespace: string, interop: boolean, homeRelay?: string): Worker {
+  const argv = [path.join(__dirname, 'helpers', 'interop-worker.mts'), nodeUrl, username, namespace, interop ? '1' : '0'];
+  if (homeRelay) argv.push(homeRelay);
+  const proc = childProcess.spawn(TSX, argv, { cwd: REPO, stdio: ['pipe', 'pipe', 'pipe'] });
   const lines: string[] = [];
   let buf = '';
   proc.stdout!.on('data', (d: Buffer) => {
@@ -102,17 +100,26 @@ async function waitFor(cond: () => boolean, timeoutMs: number, label: string): P
 }
 const lineStarting = (w: Worker, prefix: string) => w.lines.find((l) => l.startsWith(prefix));
 
+/** Scrape a single Prometheus counter value from a relay's /metrics. */
+async function scrapeMetric(port: number, name: string): Promise<number> {
+  const body = await fetch(`http://127.0.0.1:${port}/metrics`).then((r) => r.text());
+  const line = body.split('\n').find((l) => l.startsWith(`${name} `));
+  return line ? Number(line.slice(name.length + 1)) : 0;
+}
+
 describe('Cross-operator + interop (ADR-009 stage-2)', () => {
   let relayA: childProcess.ChildProcess;
   let relayB: childProcess.ChildProcess;
   let dirA: string;
   let dirB: string;
+  let pubA: string;
+  let pubB: string;
 
   beforeAll(async () => {
     dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xo-a-'));
     dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xo-b-'));
-    const pubA = generateFederationKeyFile(path.join(dirA, 'fed-key.json'));
-    const pubB = generateFederationKeyFile(path.join(dirB, 'fed-key.json'));
+    pubA = generateFederationKeyFile(path.join(dirA, 'fed-key.json'));
+    pubB = generateFederationKeyFile(path.join(dirB, 'fed-key.json'));
     // A dials B; B allow-lists A.
     fs.writeFileSync(path.join(dirA, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubB, url: `ws://127.0.0.1:${PORT_B}` }] }));
     fs.writeFileSync(path.join(dirB, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubA }] }));
@@ -155,6 +162,42 @@ describe('Cross-operator + interop (ADR-009 stage-2)', () => {
 
       const msg = bob.lines.find((l) => l.startsWith('MSG '))!;
       expect(msg).toContain('hello across app and operator');
+    } finally {
+      alice.proc.kill('SIGTERM');
+      bob.proc.kill('SIGTERM');
+    }
+  }, 60000);
+
+  it('ADR-010: with home-relay invites the sender relay routes DIRECTLY, not by flood', async () => {
+    // Same as above, but each worker advertises its relay's federation key as
+    // its homeRelay. Bob's QR now carries pubB; Alice's relay (A) should route
+    // her packet straight to relay B instead of flooding the federation.
+    const routedBefore = await scrapeMetric(PORT_A, 'meshwhisper_federation_routed_forwards_sent_total');
+
+    const alice = spawnWorker(`ws://127.0.0.1:${PORT_A}`, 'arouted', 'com.test.opA', true, pubA);
+    const bob = spawnWorker(`ws://127.0.0.1:${PORT_B}`, 'brouted', 'com.test.opB', true, pubB);
+    try {
+      await waitFor(() => !!lineStarting(alice, 'READY') && !!lineStarting(alice, 'QR'), 25000, 'alice ready');
+      await waitFor(() => !!lineStarting(bob, 'READY') && !!lineStarting(bob, 'QR'), 25000, 'bob ready');
+
+      const bobId = lineStarting(bob, 'READY')!.split(' ')[1];
+      const bobQR = lineStarting(bob, 'QR')!.slice('QR '.length);
+
+      // Bob's QR must be the v2 (interop + home relay) format: 0x02 first byte.
+      expect(Buffer.from(bobQR, 'base64')[0]).toBe(0x02);
+
+      alice.send(`ACCEPT ${bobQR}`);
+      await waitFor(() => !!lineStarting(alice, 'ACCEPTED'), 10000, 'alice accepted');
+      await new Promise((r) => setTimeout(r, 1500));
+
+      alice.send(`SEND ${bobId} routed straight to relay B`);
+
+      await waitFor(() => bob.lines.some((l) => l.startsWith('MSG ') && l.includes('routed straight to relay B')), 15000, 'bob receives routed message');
+
+      // The decisive assertion: relay A used a DIRECT routed forward (ADR-010),
+      // not the broadcast flood, to reach relay B.
+      const routedAfter = await scrapeMetric(PORT_A, 'meshwhisper_federation_routed_forwards_sent_total');
+      expect(routedAfter).toBeGreaterThan(routedBefore);
     } finally {
       alice.proc.kill('SIGTERM');
       bob.proc.kill('SIGTERM');
