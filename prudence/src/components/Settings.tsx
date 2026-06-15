@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { exportMyData } from '../dataExport.ts';
+import { INTEROP_KEY, interopEnabled } from '../sdk.ts';
 import { useEscapeKey } from '../hooks/useEscapeKey.ts';
 
 interface Props {
@@ -13,6 +14,14 @@ export default function Settings({ myUsername, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [interop] = useState(interopEnabled());
+
+  // interop is init-time config — persist the choice and restart to re-init
+  // the SDK with it. (Existing conversations live in IndexedDB and survive.)
+  function toggleInterop() {
+    localStorage.setItem(INTEROP_KEY, interop ? '0' : '1');
+    location.reload();
+  }
 
   async function handleExport() {
     setBusy(true);
@@ -65,6 +74,28 @@ export default function Settings({ myUsername, onClose }: Props) {
                 </li>
               </ul>
             </div>
+          </section>
+
+          {/* Cross-app messaging (interop) */}
+          <section>
+            <h3 className="text-slate-300 text-xs font-semibold uppercase tracking-wider mb-2">Cross-app messaging</h3>
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-slate-400 text-sm leading-relaxed flex-1">
+                Let people using <span className="text-slate-200">other MeshWhisper apps</span> message you, and you them —
+                like email between providers. Off (default) keeps you to Prudence users only. Either way, no relay can read
+                your messages.
+              </p>
+              <button
+                onClick={toggleInterop}
+                role="switch"
+                aria-checked={interop}
+                title="Toggle cross-app messaging (restarts the app)"
+                className={`relative flex-shrink-0 w-11 h-6 rounded-full transition-colors ${interop ? 'bg-brand-500' : 'bg-slate-700'}`}
+              >
+                <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${interop ? 'left-[22px]' : 'left-0.5'}`} />
+              </button>
+            </div>
+            <p className="text-slate-600 text-[11px] mt-2">Changing this restarts the app. Your conversations are kept.</p>
           </section>
 
           {/* Export */}

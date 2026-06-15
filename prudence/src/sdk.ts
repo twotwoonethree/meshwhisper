@@ -9,6 +9,14 @@ export const NAMESPACE = 'org.meshwhisper.prudence';
 // In production builds this falls back to the Foundation relay.
 export const NODE = (import.meta.env.VITE_RELAY_URL as string | undefined) ?? 'wss://relay.meshwhisper.org';
 
+// Cross-app interop (ADR-009) is opt-in and OFF by default — Prudence stays
+// isolated to other Prudence users unless the user turns it on. It's init-time
+// config, so the toggle persists this preference and reloads to re-init.
+export const INTEROP_KEY = 'prudence:interop';
+export function interopEnabled(): boolean {
+  return localStorage.getItem(INTEROP_KEY) === '1';
+}
+
 let instance: MeshWhisper | null = null;
 
 // SDK reference: canonical MeshWhisper.init() pattern with every callback
@@ -42,6 +50,7 @@ export async function initSDK(
     namespace: NAMESPACE,
     node: NODE,
     username,
+    interop: interopEnabled(),
     storage: idbStorage,
     ...(pushSubscription ? { push: { platform: 'webpush' as const, subscription: pushSubscription } } : {}),
     onMessage: handlers.onMessage,
