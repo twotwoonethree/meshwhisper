@@ -188,6 +188,51 @@ single-frame cap (~dozens of records — needs chunking/pagination for large
 federations); and NAT'd/dynamic-IP home relays (transit/TURN) plus multi-hop
 transit privacy (onion) remain the genuinely hard, unstarted parts.
 
+## Stage-3 — NAT transit, landed & proven (2026-06-15)
+
+The third stage closes the gap stages 1–2 left: a relay **behind NAT** has no
+dialable endpoint, so on-demand dial fails. The fix reuses a primitive the mesh
+already has — a NAT'd relay keeps a persistent *outbound* link to a public peer,
+so the path exists; we just route through it precisely instead of flooding.
+Implemented in `FederationManager` (`tests/federation-gossip.test.ts`, the NAT
+transit test):
+
+- **`via` transit anchors in the address record.** `AddrRecord.endpoint` is now
+  optional; a relay also advertises `via: [...]` — the pubkeys of the public
+  peers it holds outbound links to. A NAT'd relay (no `FEDERATION_ADVERTISE_URL`)
+  publishes an endpoint-less, `via`-only record. The signature now covers `via`
+  (canonical bumped to `meshwhisper-addr.v2`), so anchors can't be forged.
+- **`FRAME_PACKET_ROUTED` = "deliver to relay X".** When `forwardToRelay` can't
+  connect or dial the target but the record has `via` anchors, it sends a routed
+  frame `{hops, targetPubkey, packet}` to an anchor. The anchor simply runs
+  `forwardToRelay(target)` on its side — which, because the target holds an
+  outbound link to it, sends a plain forward down that link. The mechanism
+  **composes recursively and bottoms out at an ordinary `PACKET_FORWARD`**, so
+  the final delivery needs no special case. A hop counter (`MAX_TRANSIT_HOPS`)
+  plus the existing packet-id cache and per-peer rate limit bound it against
+  loops/amplification.
+- **Tiered `forwardToRelay`:** connected peer → send (stage 1); else dialable
+  endpoint → on-demand dial (stage 2); else `via` anchor → transit (stage 3);
+  else false → flood.
+- **Observable.** `meshwhisper_federation_transit_forwards_sent_total` and
+  `…_transit_frames_received_total`.
+
+The test proves it with `A ──▶ T ◀── B`, where B is NAT'd (no endpoint,
+`via:[T]`) and **A can never form a direct A→B link**: B's record gossips to A,
+A sends the packet to T addressed for B, T relays it down B's existing link, and
+a client on B receives the exact bytes — with A's `transit_forwards_sent`
+incremented, A's `discovered_dials` still **zero** (it never dialed B), and T's
+`transit_frames_received` incremented. Backward-compatible: relays with a public
+endpoint are still dialed directly (stages 1–2); all prior federation /
+cross-operator / cross-namespace / integration tests stay green.
+
+**The honest remaining gaps** (genuinely hard, deliberately out of this stage):
+*transit-hop privacy* — the routed frame names the target relay in cleartext to
+the transit anchor, so onion-layering the hops is still needed before transit is
+metadata-private; *both-ends-NAT'd with no common public anchor* is unsolved
+(needs a shared rendezvous, the residual hard case); and *idle learned-peer
+eviction* + *gossip pagination beyond one frame* remain housekeeping follow-ups.
+
 ## Privacy analysis (why this is strictly better than both alternatives)
 
 Count who touches a packet under each model:

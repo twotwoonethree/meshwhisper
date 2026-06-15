@@ -31,13 +31,17 @@ const WIRE_VERSION = 0x01;
 const FRAME_PACKET_FORWARD = 0x01;
 const FRAME_HEARTBEAT = 0x02;
 const FRAME_ADDR_GOSSIP = 0x03; // ADR-010 stage-2: signed relay address records
+const FRAME_PACKET_ROUTED = 0x04; // ADR-010 stage-3: "deliver to relay X" (one transit hop)
 
 // ADR-010 stage-2 bounds. Address records are public relay infrastructure,
 // so the only risk is resource exhaustion — keep the book and frames bounded.
-const ADDR_PROTO = 'meshwhisper-addr.v1';
+const ADDR_PROTO = 'meshwhisper-addr.v2'; // v2 adds the optional `via` transit anchors
 const MAX_ADDR_BOOK = 4096;          // learned relay endpoints we retain
 const MAX_PENDING_FORWARDS = 64;     // packets queued while an on-demand dial completes
 const ADDR_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // ignore records older than a week
+const MAX_VIA_ANCHORS = 16;          // transit anchors a record may advertise
+// ADR-010 stage-3: cap transit hops so routed packets can't loop or amplify.
+const MAX_TRANSIT_HOPS = parseInt(process.env.FEDERATION_MAX_TRANSIT_HOPS ?? '3', 10);
 
 const MAX_HOPS = parseInt(process.env.FEDERATION_MAX_HOPS ?? '3', 10);
 const MAX_FRAME_BODY = 8192;
@@ -112,14 +116,17 @@ export interface PeerConfig {
  * safe to spread freely across the federation.
  */
 export interface AddrRecord {
-  pubkey: string;   // hex ed25519 federation pubkey
-  endpoint: string; // ws:// URL the relay is reachable at
-  ts: number;       // ms epoch — LWW tiebreak
-  sig: string;      // hex ed25519 signature over the canonical bytes
+  pubkey: string;    // hex ed25519 federation pubkey
+  endpoint?: string; // ws:// URL the relay is directly reachable at — absent if NAT'd
+  via?: string[];    // ADR-010 stage-3: transit-anchor pubkeys this relay holds a
+                     // persistent outbound link to; how to reach it when endpoint-less
+  ts: number;        // ms epoch — LWW tiebreak
+  sig: string;       // hex ed25519 signature over the canonical bytes
 }
 
-function buildAddrCanonical(pubkeyHex: string, endpoint: string, ts: number): Buffer {
-  return Buffer.from([ADDR_PROTO, pubkeyHex, endpoint, String(ts)].join('\n'), 'utf8');
+function buildAddrCanonical(pubkeyHex: string, endpoint: string, ts: number, via: string[] = []): Buffer {
+  // `via` is sorted so signer and verifier agree regardless of array order.
+  return Buffer.from([ADDR_PROTO, pubkeyHex, endpoint, String(ts), [...via].sort().join(',')].join('\n'), 'utf8');
 }
 
 /** Load { peers: [...] } from `peersPath`. Missing file = no peers = federation dormant. */
@@ -280,9 +287,18 @@ interface PeerState {
   dynamic: boolean;
   /** Per-peer PacketForward rate limiting (sliding 60s window). */
   frameWindow: { count: number; windowStart: number };
-  /** ADR-010 stage-2: packets queued while an on-demand dial to a learned
-   *  (gossip-discovered) relay completes; flushed once the link establishes. */
-  pendingForwards?: Buffer[];
+  /** ADR-010 stage-2/3: forwards queued while an on-demand dial to a learned
+   *  relay completes; flushed once the link establishes. A `routedTarget` marks
+   *  the entry as a transit hop (send a PACKET_ROUTED for that target) rather
+   *  than a direct delivery to this peer. */
+  pendingForwards?: PendingForward[];
+}
+
+interface PendingForward {
+  packet: Buffer;
+  /** When set, send a routed (transit) frame for this final target via this peer. */
+  routedTarget?: string;
+  hops: number;
 }
 
 export interface FederationStats {
@@ -307,6 +323,12 @@ export interface FederationStats {
   /** ADR-010 stage-2: forwards delivered to a relay reached via an on-demand
    *  dial to a gossip-learned endpoint (no static config for it). */
   discoveredDialsTotal: number;
+  /** ADR-010 stage-3: routed (transit) frames we sent toward a NAT'd relay
+   *  through one of its transit anchors. */
+  transitForwardsSentTotal: number;
+  /** ADR-010 stage-3: routed (transit) frames we received and re-dispatched as
+   *  the transit relay. */
+  transitFramesReceivedTotal: number;
 }
 
 // ---- Manager ----
@@ -346,6 +368,8 @@ export class FederationManager {
     addrRecordsKnown: 0,
     addrRecordsLearnedTotal: 0,
     discoveredDialsTotal: 0,
+    transitForwardsSentTotal: 0,
+    transitFramesReceivedTotal: 0,
   };
 
   constructor(opts: {
@@ -401,13 +425,21 @@ export class FederationManager {
 
   /** Dial every peer that has a url. Inbound peers connect to us instead. */
   start(): void {
-    // ADR-010 stage-2: seed the address book with our own signed record so it
-    // gossips out when peers connect.
-    if (this.advertiseUrl) {
+    // ADR-010 stage-2/3: seed the address book with our own signed record so it
+    // gossips out. `endpoint` advertises a directly-dialable address (public
+    // relays); `via` lists the transit anchors we hold persistent outbound links
+    // to (the configured peers we dial) — how to reach us when we're NAT'd and
+    // have no public endpoint.
+    const via = [...this.peers.values()].filter((s) => s.config.url).map((s) => s.config.pubkey);
+    if (this.advertiseUrl || via.length > 0) {
       const ts = Date.now();
-      const sig = nodeCrypto.sign(null, buildAddrCanonical(this.key.publicKeyHex, this.advertiseUrl, ts), this.key.privateKey);
+      const endpoint = this.advertiseUrl ?? '';
+      const sig = nodeCrypto.sign(null, buildAddrCanonical(this.key.publicKeyHex, endpoint, ts, via), this.key.privateKey);
       this.addrBook.set(this.key.publicKeyHex, {
-        pubkey: this.key.publicKeyHex, endpoint: this.advertiseUrl, ts, sig: sig.toString('hex'),
+        pubkey: this.key.publicKeyHex,
+        ...(this.advertiseUrl ? { endpoint: this.advertiseUrl } : {}),
+        ...(via.length > 0 ? { via } : {}),
+        ts, sig: sig.toString('hex'),
       });
       this.stats.addrRecordsKnown = this.addrBook.size;
     }
@@ -467,33 +499,80 @@ export class FederationManager {
    * still happens. The peer handles the resulting PacketForward frame
    * identically to a flooded one — no peer-side change.
    */
-  forwardToRelay(targetPubkeyHex: string, packet: Uint8Array): boolean {
-    if (packet.byteLength > MAX_FRAME_BODY - 17) return false;
+  forwardToRelay(targetPubkeyHex: string, packet: Uint8Array, hops = 0): boolean {
+    if (packet.byteLength > MAX_FRAME_BODY - 33) return false; // room for the routed header too
+    if (targetPubkeyHex === this.key.publicKeyHex) return false;
 
+    // 1. Connected peer — send now (stage 1).
     const state = this.peers.get(targetPubkeyHex);
     if (state?.established && state.ws && state.ws.readyState === WebSocket.OPEN) {
       return this.sendForwardFrame(state, packet);
     }
+    if (hops >= MAX_TRANSIT_HOPS) return false; // transit loop/amplification guard
 
-    // Not connected — can we reach it via a gossip-learned address? (ADR-010 stage-2)
     const addr = this.addrBook.get(targetPubkeyHex);
-    if (!addr || targetPubkeyHex === this.key.publicKeyHex) return false; // unknown — caller floods
+    if (!addr) return false; // wholly unknown — caller floods
 
-    let st = state;
-    if (!st) {
-      st = this.newPeerState({ pubkey: targetPubkeyHex, url: addr.endpoint }, false);
-      this.peers.set(targetPubkeyHex, st);
-    } else if (!st.config.url) {
-      st.config = { ...st.config, url: addr.endpoint };
+    // 2. Directly dialable endpoint — on-demand dial (stage 2).
+    if (addr.endpoint) {
+      this.queueAndDial(targetPubkeyHex, addr.endpoint, { packet: Buffer.from(packet), hops });
+      return true;
     }
-    // Queue (bounded) and kick off a dial if one isn't already in flight.
-    (st.pendingForwards ??= []).push(Buffer.from(packet));
+
+    // 3. NAT'd / endpoint-less — route through a transit anchor (stage 3). The
+    // anchor is a relay the target holds a persistent outbound link to; we ask
+    // it to forwardToRelay onward, which bottoms out at a plain forward to the
+    // target over that link.
+    for (const transitHex of addr.via ?? []) {
+      if (transitHex === this.key.publicKeyHex) continue;
+      const tState = this.peers.get(transitHex);
+      if (tState?.established && tState.ws && tState.ws.readyState === WebSocket.OPEN) {
+        if (this.sendRouted(tState, targetPubkeyHex, packet, hops + 1)) return true;
+        continue;
+      }
+      // Transit anchor not connected but publicly dialable — dial it, then send
+      // the routed frame once the link is up.
+      const tAddr = this.addrBook.get(transitHex);
+      if (tAddr?.endpoint) {
+        this.queueAndDial(transitHex, tAddr.endpoint, { packet: Buffer.from(packet), routedTarget: targetPubkeyHex, hops: hops + 1 });
+        return true;
+      }
+    }
+    return false; // no reachable path — caller floods
+  }
+
+  /** Ensure a peer state exists with a dial URL, queue a pending forward, and
+   *  kick off a dial if one isn't already in flight. */
+  private queueAndDial(pubkeyHex: string, endpoint: string, entry: PendingForward): void {
+    let st = this.peers.get(pubkeyHex);
+    if (!st) {
+      st = this.newPeerState({ pubkey: pubkeyHex, url: endpoint }, false);
+      this.peers.set(pubkeyHex, st);
+    } else if (!st.config.url) {
+      st.config = { ...st.config, url: endpoint };
+    }
+    (st.pendingForwards ??= []).push(entry);
     if (st.pendingForwards.length > MAX_PENDING_FORWARDS) st.pendingForwards.shift();
     if (!st.ws && !st.reconnectTimer) {
       this.stats.discoveredDialsTotal++;
       this.dial(st);
     }
-    return true;
+  }
+
+  /** Send a PACKET_ROUTED frame ("deliver to targetHex") to a transit relay. */
+  private sendRouted(state: PeerState, targetHex: string, packet: Uint8Array, hops: number): boolean {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return false;
+    const body = Buffer.alloc(1 + 32 + packet.length);
+    body.writeUInt8(hops, 0);
+    Buffer.from(targetHex, 'hex').copy(body, 1);
+    Buffer.from(packet).copy(body, 33);
+    try {
+      state.ws.send(encodeFrame(FRAME_PACKET_ROUTED, body), { binary: true });
+      this.stats.transitForwardsSentTotal++;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Encode + send a single PacketForward frame to an established peer. */
@@ -737,12 +816,15 @@ export class FederationManager {
     } catch { /* reaped on close */ }
   }
 
-  /** Flush packets queued while an on-demand dial completed. */
+  /** Flush forwards queued while an on-demand dial completed. */
   private flushPending(state: PeerState): void {
     const queued = state.pendingForwards;
     if (!queued || queued.length === 0) return;
     state.pendingForwards = [];
-    for (const packet of queued) this.sendForwardFrame(state, packet);
+    for (const e of queued) {
+      if (e.routedTarget) this.sendRouted(state, e.routedTarget, e.packet, e.hops);
+      else this.sendForwardFrame(state, e.packet);
+    }
   }
 
   private handleFrame(buf: Buffer, fromState: PeerState): void {
@@ -756,21 +838,13 @@ export class FederationManager {
 
     if (frame.frameType === FRAME_ADDR_GOSSIP) { this.handleAddrGossip(frame.body, fromState); return; }
 
+    if (frame.frameType === FRAME_PACKET_ROUTED) { this.handleRoutedForward(frame.body, fromState); return; }
+
     if (frame.frameType !== FRAME_PACKET_FORWARD) return; // unknown type — ignore (forward-compat)
     if (frame.body.length < 17 + 31) return; // packetId + forwardCount + minimum packet header
 
-    // Per-peer rate limiting — the abuse boundary in open mode. Sliding
-    // 60s window; excess frames are silently dropped (not a disconnect:
-    // legitimate bursts shouldn't sever the link).
-    const now = Date.now();
-    if (now - fromState.frameWindow.windowStart >= 60_000) {
-      fromState.frameWindow = { count: 0, windowStart: now };
-    }
-    fromState.frameWindow.count++;
-    if (fromState.frameWindow.count > this.rateLimitPerMin) {
-      this.stats.dropsRateLimitedTotal++;
-      return;
-    }
+    // Per-peer rate limiting — the abuse boundary in open mode.
+    if (this.overRateLimit(fromState)) return;
 
     const packetIdHex = frame.body.subarray(0, 16).toString('hex');
     const forwardCount = frame.body.readUInt8(16);
@@ -801,6 +875,39 @@ export class FederationManager {
     this.fanOut(frame.body.subarray(0, 16), forwardCount + 1, Buffer.from(packet), fromState.config.pubkey);
   }
 
+  /** Per-peer sliding-window rate limit (the open-mode abuse boundary). Returns
+   *  true (and counts a drop) when the peer is over its budget this minute. */
+  private overRateLimit(fromState: PeerState): boolean {
+    const now = Date.now();
+    if (now - fromState.frameWindow.windowStart >= 60_000) {
+      fromState.frameWindow = { count: 0, windowStart: now };
+    }
+    fromState.frameWindow.count++;
+    if (fromState.frameWindow.count > this.rateLimitPerMin) {
+      this.stats.dropsRateLimitedTotal++;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * ADR-010 stage-3: a transit relay received "deliver to relay X". We simply
+   * run forwardToRelay for that target on our side — which, since the target
+   * holds a persistent outbound link to us, sends a plain forward down it (one
+   * hop). The hop counter (carried in the frame, capped at MAX_TRANSIT_HOPS)
+   * bounds the path so routed frames can't loop or amplify across the mesh.
+   */
+  private handleRoutedForward(body: Buffer, fromState: PeerState): void {
+    if (body.length < 1 + 32 + 31) return; // hops + target + minimum packet header
+    if (this.overRateLimit(fromState)) return;
+    this.stats.transitFramesReceivedTotal++;
+    const hops = body.readUInt8(0);
+    if (hops >= MAX_TRANSIT_HOPS) { this.stats.dropsTtlTotal++; return; }
+    const targetHex = body.subarray(1, 33).toString('hex');
+    const packet = body.subarray(33);
+    this.forwardToRelay(targetHex, Buffer.from(packet), hops);
+  }
+
   /**
    * ADR-010 stage-2: ingest gossiped address records. Each is verified against
    * the claimed pubkey's signature (un-forgeable for another relay), merged
@@ -820,7 +927,17 @@ export class FederationManager {
     const changed: AddrRecord[] = [];
     for (const r of records) {
       if (!r || typeof r.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(r.pubkey)) continue;
-      if (typeof r.endpoint !== 'string' || !/^wss?:\/\//.test(r.endpoint) || r.endpoint.length > 256) continue;
+      // endpoint is optional (NAT'd relays have none) — validate when present.
+      if (r.endpoint !== undefined &&
+          (typeof r.endpoint !== 'string' || !/^wss?:\/\//.test(r.endpoint) || r.endpoint.length > 256)) continue;
+      // via (transit anchors) is optional — must be well-formed when present.
+      let via: string[] | undefined;
+      if (r.via !== undefined) {
+        if (!Array.isArray(r.via) || r.via.length > MAX_VIA_ANCHORS ||
+            r.via.some((v) => typeof v !== 'string' || !/^[0-9a-f]{64}$/.test(v))) continue;
+        via = r.via;
+      }
+      if (!r.endpoint && (!via || via.length === 0)) continue; // record offers no way to reach the relay
       if (typeof r.ts !== 'number' || !Number.isFinite(r.ts)) continue;
       if (typeof r.sig !== 'string' || !/^[0-9a-f]{128}$/.test(r.sig)) continue;
       if (r.pubkey === this.key.publicKeyHex) continue;       // never let a peer overwrite our own record
@@ -828,12 +945,16 @@ export class FederationManager {
 
       // Signature must verify against the claimed pubkey — this is what makes
       // the record self-certifying and un-spoofable for another relay.
-      if (!verifyWithRawPubkey(r.pubkey, buildAddrCanonical(r.pubkey, r.endpoint, r.ts), Buffer.from(r.sig, 'hex'))) continue;
+      if (!verifyWithRawPubkey(r.pubkey, buildAddrCanonical(r.pubkey, r.endpoint ?? '', r.ts, via ?? []), Buffer.from(r.sig, 'hex'))) continue;
 
       const existing = this.addrBook.get(r.pubkey);
       if (existing && existing.ts >= r.ts) continue;          // LWW: keep the newest
       if (!existing && this.addrBook.size >= MAX_ADDR_BOOK) continue; // bounded
-      const rec: AddrRecord = { pubkey: r.pubkey, endpoint: r.endpoint, ts: r.ts, sig: r.sig };
+      const rec: AddrRecord = {
+        pubkey: r.pubkey, ts: r.ts, sig: r.sig,
+        ...(r.endpoint ? { endpoint: r.endpoint } : {}),
+        ...(via ? { via } : {}),
+      };
       this.addrBook.set(r.pubkey, rec);
       this.stats.addrRecordsLearnedTotal++;
       changed.push(rec);

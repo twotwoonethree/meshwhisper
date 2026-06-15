@@ -174,3 +174,88 @@ describe('Federation gossip address overlay (ADR-010 stage-2)', () => {
     bob.close();
   }, 40000);
 });
+
+// ============================================================
+// ADR-010 stage-3 — NAT transit layer
+//
+// Relay B is NAT'd: it advertises NO direct endpoint, only that it is reachable
+// `via` a public transit anchor T (which it holds a persistent outbound link
+// to). A — which cannot dial B at all — routes a packet to B by sending it to T
+// with "deliver to B"; T relays it down B's existing link. No direct A→B
+// connection is ever possible.
+//
+//   A ──dials──▶ T ◀──dials── B        B.record = { via: [T] }  (no endpoint)
+// ============================================================
+
+describe('Federation NAT transit (ADR-010 stage-3)', () => {
+  const PA = 19930, PB = 19931, PT = 19932;
+  let relayA: childProcess.ChildProcess;
+  let relayB: childProcess.ChildProcess;
+  let relayT: childProcess.ChildProcess;
+  let dA: string; let dB: string; let dT: string;
+  let pubB: string;
+
+  beforeAll(async () => {
+    dA = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-nt-a-'));
+    dB = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-nt-b-'));
+    dT = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-nt-t-'));
+    const pubT = generateFederationKeyFile(path.join(dT, 'fed-key.json'));
+    generateFederationKeyFile(path.join(dA, 'fed-key.json'));
+    pubB = generateFederationKeyFile(path.join(dB, 'fed-key.json'));
+
+    // A and B each dial only the transit relay T. T knows no one (open).
+    fs.writeFileSync(path.join(dA, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubT, url: `ws://127.0.0.1:${PT}` }] }));
+    fs.writeFileSync(path.join(dB, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubT, url: `ws://127.0.0.1:${PT}` }] }));
+    fs.writeFileSync(path.join(dT, 'fed-peers.json'), JSON.stringify({ peers: [] }));
+
+    const base = (dir: string) => ({
+      FEDERATION_MODE: 'open',
+      FEDERATION_KEY_FILE: path.join(dir, 'fed-key.json'),
+      FEDERATION_PEERS_FILE: path.join(dir, 'fed-peers.json'),
+    });
+    // T and A are public (advertise an endpoint). B is NAT'd: NO advertise URL,
+    // so its record carries only `via: [T]`.
+    relayT = spawnRelay(PT, dT, { ...base(dT), FEDERATION_ADVERTISE_URL: `ws://127.0.0.1:${PT}` });
+    relayA = spawnRelay(PA, dA, { ...base(dA), FEDERATION_ADVERTISE_URL: `ws://127.0.0.1:${PA}` });
+    relayB = spawnRelay(PB, dB, { ...base(dB) }); // NAT'd — no advertised endpoint
+    await Promise.all([waitForHealth(PA), waitForHealth(PB), waitForHealth(PT)]);
+  }, 40000);
+
+  afterAll(() => {
+    relayA?.kill('SIGTERM'); relayB?.kill('SIGTERM'); relayT?.kill('SIGTERM');
+    for (const d of [dA, dB, dT]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
+  });
+
+  it('A reaches a NAT-bound B by transit through B\'s anchor — never a direct A→B link', async () => {
+    // A learns B's (endpoint-less, via:[T]) record through the gossip overlay.
+    await waitForMetric(PA, 'meshwhisper_federation_addr_records_known', 3, 25000, 'A learns NAT-bound B');
+
+    const transitBefore = await scrapeMetric(PA, 'meshwhisper_federation_transit_forwards_sent_total');
+
+    const destHash = nodeCrypto.randomBytes(8).toString('hex');
+    const bob = await connectClient(PB, [destHash]);
+    const gotPacket = new Promise<Buffer>((resolve) => {
+      bob.on('message', (raw: Buffer, isBinary: boolean) => { if (isBinary) resolve(raw); });
+    });
+
+    const alice = await connectClient(PA, []);
+    alice.send(JSON.stringify({ type: 'route', destHash, homeRelay: pubB }));
+    const packet = buildPacket(destHash, new Uint8Array([3, 1, 4, 1, 5]));
+    alice.send(packet, { binary: true });
+
+    const received = await Promise.race([
+      gotPacket,
+      new Promise<Buffer>((_, reject) => setTimeout(() => reject(new Error('packet never reached the NAT-bound relay via transit')), 15000)),
+    ]);
+    expect(Buffer.compare(received, packet)).toBe(0);
+
+    // Decisive: A routed via transit (not a direct dial — B has no endpoint to
+    // dial), and the transit relay T re-dispatched the routed frame.
+    expect(await scrapeMetric(PA, 'meshwhisper_federation_transit_forwards_sent_total')).toBeGreaterThan(transitBefore);
+    expect(await scrapeMetric(PA, 'meshwhisper_federation_discovered_dials_total')).toBe(0);
+    expect(await scrapeMetric(PT, 'meshwhisper_federation_transit_frames_received_total')).toBeGreaterThan(0);
+
+    alice.close();
+    bob.close();
+  }, 40000);
+});
