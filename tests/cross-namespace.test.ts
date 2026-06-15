@@ -1,18 +1,15 @@
 // ============================================================
-// MeshWhisper — Cross-namespace messaging (ADR-009 stage-1 spike)
+// MeshWhisper — Cross-namespace messaging (ADR-009 stage-1b)
 //
-// Proves that a message can cross from one namespace to another,
-// end-to-end encrypted, over a single (namespace-blind) relay — i.e.
-// that ADR-001's identity-layer isolation is a sender-side addressing
-// policy, not a crypto wall.
+// Proves the "email model" is automatic, bidirectional, and STRICTLY OPT-IN:
+//   - With `interop: true` on both apps, pairing exchanges namespace ids both
+//     ways (QR carries the generator's; the x3dh_init carries the scanner's),
+//     and users of different namespaces message each other E2EE over one relay.
+//   - With interop off (the default), the message does NOT cross — ADR-001
+//     isolation holds and the wire format is unchanged.
 //
-// Mechanism: a packet's destHash bakes in the namespace, and the recipient
-// listens on destHash(theirNamespace, theirKey). So a sender in namespace A
-// reaches a recipient in namespace B simply by addressing into B's namespace
-// (SDK.setPeerNamespace) instead of its own. The relay is unchanged.
-//
-// Uses the store-and-forward pattern because init() is a per-process
-// singleton (one live instance at a time), mirroring tests/integration.test.ts.
+// Uses store-and-forward because init() is a per-process singleton (one live
+// instance at a time), mirroring tests/integration.test.ts.
 // ============================================================
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -55,96 +52,102 @@ function stopRelay(proc: childProcess.ChildProcess, dbPath: string): void {
   for (const f of [dbPath, dbPath + '-wal', dbPath + '-shm']) { try { fs.unlinkSync(f); } catch { /* ignore */ } }
 }
 
-const NODE_URL_PORT = 19882;
+const PORT = 19882;
+const NS_A = 'com.test.appA';
+const NS_B = 'com.test.appB';
 
-describe('Cross-namespace messaging (ADR-009 stage-1)', () => {
+describe('Cross-namespace messaging (ADR-009 stage-1b)', () => {
   let relayProc: childProcess.ChildProcess;
   let dbPath: string;
   let MeshWhisper: typeof import('../src/sdk/index.js').MeshWhisper;
   let NodeStorage: typeof import('../src/persistence/node-storage.js').NodeStorage;
+  const NODE_URL = `ws://127.0.0.1:${PORT}`;
 
   beforeAll(async () => {
-    ({ proc: relayProc, dbPath } = spawnRelay(NODE_URL_PORT));
-    await waitForRelay(NODE_URL_PORT, relayProc);
+    ({ proc: relayProc, dbPath } = spawnRelay(PORT));
+    await waitForRelay(PORT, relayProc);
     ({ MeshWhisper } = await import('../src/sdk/index.js'));
     ({ NodeStorage } = await import('../src/persistence/node-storage.js'));
   }, 20000);
 
   afterAll(() => stopRelay(relayProc, dbPath));
 
-  const NODE_URL = `ws://127.0.0.1:${NODE_URL_PORT}`;
-  const NS_A = 'com.test.appA';
-  const NS_B = 'com.test.appB';
+  it('automatic + bidirectional when both apps opt into interop', async () => {
+    const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn-a-'));
+    const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn-b-'));
 
-  it('delivers an E2EE message from namespace A to namespace B (addressed into B)', async () => {
-    const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn-alice-'));
-    const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn-bob-'));
+    // A (namespace A, interop) — generate QR (carries A's namespace), capture id.
+    const alice = await MeshWhisper.init({ namespace: NS_A, node: NODE_URL, developerKey: TEST_DEV_KEY, interop: true, storage: new NodeStorage(aliceDir) });
+    const aliceId = alice.getLocalPeerId();
+    const qrA = MeshWhisper.generateContactQR();
+    await new Promise((r) => setTimeout(r, 300));
 
-    // Bob lives in namespace B — generate his QR + capture his id & namespace id.
-    const bob = await MeshWhisper.init({ namespace: NS_B, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(bobDir) });
-    const bobQR = MeshWhisper.generateContactQR();
+    // B (namespace B, interop) scans A's QR — learns A's namespace automatically,
+    // then sends to A. No manual setPeerNamespace anywhere.
+    const bob = await MeshWhisper.init({ namespace: NS_B, node: NODE_URL, developerKey: TEST_DEV_KEY, interop: true, storage: new NodeStorage(bobDir) });
     const bobId = bob.getLocalPeerId();
-    const bobNsId = bob.getNamespaceId();
+    await MeshWhisper.acceptContact(qrA);
     await new Promise((r) => setTimeout(r, 300));
-
-    // Alice lives in namespace A (this shuts Bob down — singleton).
-    const alice = await MeshWhisper.init({ namespace: NS_A, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(aliceDir) });
-    const aliceNsId = alice.getNamespaceId();
-    expect(Buffer.from(aliceNsId).toString('hex')).not.toBe(Buffer.from(bobNsId).toString('hex'));
-
-    // Tell Alice to address Bob in HIS namespace, then pair + send.
-    alice.setPeerNamespace(bobId, bobNsId);
-    await MeshWhisper.acceptContact(bobQR);
-    await new Promise((r) => setTimeout(r, 300));
-    await alice.sendMessage(bobId, new TextEncoder().encode('Hello across namespaces, Bob!'));
+    await bob.sendMessage(aliceId, new TextEncoder().encode('from B (appB) to A (appA)'));
     await new Promise((r) => setTimeout(r, 400));
-    await alice.shutdown();
+    await bob.shutdown();
 
-    // Bob comes back online in namespace B and should receive + decrypt it.
-    let received = '';
-    let resolve: (() => void) | null = null;
-    const got = new Promise<void>((r) => { resolve = r; });
-    await MeshWhisper.init({
-      namespace: NS_B, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(bobDir),
-      onMessage: (msg) => { received = new TextDecoder().decode(new Uint8Array(msg.payload)); resolve?.(); },
+    // A comes online: receives B's message AND learns B's namespace from B's
+    // x3dh_init — then replies, addressing into B's namespace automatically.
+    let aGot = '';
+    let aResolve: (() => void) | null = null;
+    const aReceived = new Promise<void>((r) => { aResolve = r; });
+    const aliceBack = await MeshWhisper.init({
+      namespace: NS_A, node: NODE_URL, developerKey: TEST_DEV_KEY, interop: true, storage: new NodeStorage(aliceDir),
+      onMessage: (m) => { aGot = new TextDecoder().decode(new Uint8Array(m.payload)); aResolve?.(); },
     });
-    await Promise.race([
-      got,
-      new Promise<void>((_, rej) => setTimeout(() => rej(new Error('Timeout: Bob (B) did not receive Alice (A) cross-namespace message')), 6000)),
-    ]);
+    await Promise.race([aReceived, new Promise<void>((_, rej) => setTimeout(() => rej(new Error('A never received B')), 6000))]);
+    await aliceBack.sendMessage(bobId, new TextEncoder().encode('from A (appA) to B (appB)'));
+    await new Promise((r) => setTimeout(r, 400));
+    await aliceBack.shutdown();
 
-    expect(received).toBe('Hello across namespaces, Bob!');
+    // B comes online: receives A's reply.
+    let bGot = '';
+    let bResolve: (() => void) | null = null;
+    const bReceived = new Promise<void>((r) => { bResolve = r; });
+    await MeshWhisper.init({
+      namespace: NS_B, node: NODE_URL, developerKey: TEST_DEV_KEY, interop: true, storage: new NodeStorage(bobDir),
+      onMessage: (m) => { bGot = new TextDecoder().decode(new Uint8Array(m.payload)); bResolve?.(); },
+    });
+    await Promise.race([bReceived, new Promise<void>((_, rej) => setTimeout(() => rej(new Error('B never received A reply')), 6000))]);
+
+    expect(aGot).toBe('from B (appB) to A (appA)');
+    expect(bGot).toBe('from A (appA) to B (appB)');
 
     await MeshWhisper.instance.shutdown();
     fs.rmSync(aliceDir, { recursive: true, force: true });
     fs.rmSync(bobDir, { recursive: true, force: true });
-  }, 25000);
+  }, 30000);
 
-  it('isolation holds by default: WITHOUT cross-namespace addressing the message is not delivered', async () => {
-    const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn2-alice-'));
-    const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn2-bob-'));
+  it('isolation holds by default: without interop the message does not cross', async () => {
+    const aliceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn2-a-'));
+    const bobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-xn2-b-'));
+
+    // No `interop` flag anywhere — the default, isolated behaviour.
+    const alice = await MeshWhisper.init({ namespace: NS_A, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(aliceDir) });
+    const aliceId = alice.getLocalPeerId();
+    const qrA = MeshWhisper.generateContactQR();
+    await new Promise((r) => setTimeout(r, 300));
 
     const bob = await MeshWhisper.init({ namespace: NS_B, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(bobDir) });
-    const bobQR = MeshWhisper.generateContactQR();
-    const bobId = bob.getLocalPeerId();
+    await MeshWhisper.acceptContact(qrA);
     await new Promise((r) => setTimeout(r, 300));
-
-    const alice = await MeshWhisper.init({ namespace: NS_A, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(aliceDir) });
-    // NOTE: deliberately NOT calling setPeerNamespace — Alice addresses into her own namespace (A).
-    await MeshWhisper.acceptContact(bobQR);
-    await new Promise((r) => setTimeout(r, 300));
-    await alice.sendMessage(bobId, new TextEncoder().encode('This should NOT cross'));
+    await bob.sendMessage(aliceId, new TextEncoder().encode('this must not cross'));
     await new Promise((r) => setTimeout(r, 400));
-    await alice.shutdown();
+    await bob.shutdown();
 
-    let received = '';
+    let aGot = '';
     await MeshWhisper.init({
-      namespace: NS_B, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(bobDir),
-      onMessage: (msg) => { received = new TextDecoder().decode(new Uint8Array(msg.payload)); },
+      namespace: NS_A, node: NODE_URL, developerKey: TEST_DEV_KEY, storage: new NodeStorage(aliceDir),
+      onMessage: (m) => { aGot = new TextDecoder().decode(new Uint8Array(m.payload)); },
     });
-    // Give it a real chance to (not) arrive.
     await new Promise((r) => setTimeout(r, 3500));
-    expect(received).toBe('');
+    expect(aGot).toBe('');
 
     await MeshWhisper.instance.shutdown();
     fs.rmSync(aliceDir, { recursive: true, force: true });

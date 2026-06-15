@@ -10,13 +10,20 @@ function base64ToBytes(b64: string): Uint8Array {
   return Uint8Array.from(atob(b64.trim()), (c) => c.charCodeAt(0));
 }
 
-/** Extract the peerId embedded in a scanned/pasted contact-QR payload. */
+/** Extract the peerId embedded in a scanned/pasted contact-QR payload.
+ *  Tolerates both the original format and the interop format (ADR-009), which
+ *  prepends a 0x01 version byte + the sender's namespace id. */
 export function peerIdFromContactQR(data: string): string {
   const raw = base64ToBytes(data);
-  if (raw.length < 2) throw new Error('Invalid contact code');
-  const peerIdLen = (raw[0] << 8) | raw[1];
-  if (peerIdLen <= 0 || 2 + peerIdLen > raw.length) throw new Error('Invalid contact code');
-  return new TextDecoder().decode(raw.slice(2, 2 + peerIdLen));
+  let off = 0;
+  if (raw[0] === 0x01) { // interop format: [0x01][u16 nsLen][nsId]…
+    const nsLen = (raw[1] << 8) | raw[2];
+    off = 3 + nsLen;
+  }
+  if (off + 2 > raw.length) throw new Error('Invalid contact code');
+  const peerIdLen = (raw[off] << 8) | raw[off + 1];
+  if (peerIdLen <= 0 || off + 2 + peerIdLen > raw.length) throw new Error('Invalid contact code');
+  return new TextDecoder().decode(raw.slice(off + 2, off + 2 + peerIdLen));
 }
 
 /** Cheap structural validation before handing a pasted string to the SDK. */

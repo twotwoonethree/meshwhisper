@@ -341,6 +341,15 @@ export interface OutboundCiphertext {
 
 export interface MeshWhisperConfig {
   namespace: string;
+  /**
+   * Opt into cross-namespace ("email model") interoperability (ADR-009).
+   * OFF by default: the app stays namespace-isolated exactly as before (ADR-001)
+   * — its contact QRs and handshakes are byte-identical and it neither announces
+   * its namespace nor honours another app's. When ON, pairing automatically
+   * exchanges namespace ids both ways so users of different apps can message
+   * each other. Purely opt-in; flipping it changes nothing for apps that don't.
+   */
+  interop?: boolean;
   /** MeshWhisper Node endpoint(s). Use "mesh" for Foundation-hosted nodes,
    *  a wss:// URL for self-hosted, or an array for hybrid mode. Defaults to "mesh". */
   node?: string | string[];

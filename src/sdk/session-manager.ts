@@ -122,7 +122,7 @@ export class SessionManager {
      * Called when an inbound x3dh_init establishes a new session, so the
      * coordinator can register the new contact with the permission manager.
      */
-    private readonly onContactEstablished: (peerId: string) => void,
+    private readonly onContactEstablished: (peerId: string, peerNamespace?: Uint8Array) => void,
     /**
      * Called immediately after we send an outbound x3dh_init. The coordinator
      * uses this to send a tiny ratchet "activate" message so the receiver's
@@ -137,6 +137,9 @@ export class SessionManager {
     /** Resolves the namespace id to address a peer in — their own when
      *  cross-namespace (ADR-009), ours otherwise. */
     private readonly namespaceIdFor: (peerId: string) => Uint8Array,
+    /** Our namespace id to announce in outbound handshakes when interop is on,
+     *  or null when it's off (so the envelope stays byte-identical). ADR-009. */
+    private readonly interopNamespace: () => Uint8Array | null,
     /**
      * Called when a handshake completes and a fresh session is in place.
      * The coordinator uses this to schedule a session-health ping that
@@ -882,6 +885,12 @@ export class SessionManager {
       ...(result.pqCiphertext
         ? { pqCiphertext: Array.from(result.pqCiphertext) }
         : {}),
+      // Announce our namespace so the recipient can reply cross-namespace —
+      // only when interop is opted in (else absent, envelope unchanged).
+      ...((): { senderNamespace?: number[] } => {
+        const ns = this.interopNamespace();
+        return ns ? { senderNamespace: Array.from(ns) } : {};
+      })(),
     };
 
     const envelopeBytes = new TextEncoder().encode(JSON.stringify(handshakeEnvelope));
@@ -982,8 +991,11 @@ export class SessionManager {
     this.storage?.set(`peers/${envelope.senderId}`, uint8ArrayToHex(peerX25519Key)).catch(() => {});
     this.storage?.set(`edkeys/${envelope.senderId}`, uint8ArrayToHex(peerEdKey)).catch(() => {});
 
-    // Notify the coordinator so it can update the permission manager
-    this.onContactEstablished(envelope.senderId);
+    // Notify the coordinator so it can update the permission manager. Pass the
+    // sender's namespace (if they announced one) so cross-namespace replies can
+    // be addressed into it (ADR-009).
+    const senderNs = envelope.senderNamespace ? new Uint8Array(envelope.senderNamespace) : undefined;
+    this.onContactEstablished(envelope.senderId, senderNs);
 
     // Fresh session as the responder — clear any stale health state. We
     // do NOT initiate a ping ourselves; the initiator handles that.

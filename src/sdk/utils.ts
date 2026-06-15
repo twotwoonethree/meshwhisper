@@ -314,4 +314,9 @@ export interface HandshakeEnvelope {
   usedOneTimePreKeyPublic?: number[];
   // ML-KEM-768 ciphertext (1088 bytes). Present when Alice performed PQXDH.
   pqCiphertext?: number[];
+  // The sender's namespace id — present ONLY when the sender opted into
+  // cross-namespace interop (ADR-009). Lets the receiver address replies into
+  // the sender's namespace. Absent for normal same-namespace apps (default),
+  // so the envelope is byte-identical to before for them.
+  senderNamespace?: number[];
 }

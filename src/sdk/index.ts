@@ -590,13 +590,15 @@ export class MeshWhisper {
       this.peerCache,
       this.storage,
       (packet, peerId) => this.routeAndSend(packet, peerId),
-      (peerId) => this.onContactEstablished(peerId),
+      (peerId, peerNamespace) => this.onContactEstablished(peerId, peerNamespace),
       (peerId) => this.sendHandshakeActivation(peerId),
       config.namespace,
       config.node ?? 'mesh',
       // Per-peer namespace: handshakes must address into the recipient's
       // namespace too (cross-namespace, ADR-009), not always ours.
       (peerId: string) => this.destNamespaceFor(peerId),
+      // Announce our namespace in handshakes only when interop is opted in.
+      () => (this.config.interop ? this.namespaceManager.getNamespaceId() : null),
       (peerId, role) => this.onSessionEstablishedHook(peerId, role),
     );
 
@@ -1538,10 +1540,21 @@ export class MeshWhisper {
 
     const serialized = serializePreKeyBundle(bundle);
     const peerIdBytes = new TextEncoder().encode(this.getLocalPeerId());
-    const lenBuf = new Uint8Array(2);
-    new DataView(lenBuf.buffer).setUint16(0, peerIdBytes.length, false);
-    const qrPayload = concat(lenBuf, peerIdBytes, serialized);
-    return uint8ArrayToBase64(qrPayload);
+    const peerIdLen = new Uint8Array(2);
+    new DataView(peerIdLen.buffer).setUint16(0, peerIdBytes.length, false);
+
+    // Interop (ADR-009): prefix a 0x01 version byte + our namespace id so a
+    // scanner can address replies into our namespace. The original format
+    // always starts with 0x00 (the high byte of the peerId length), so 0x01
+    // unambiguously marks the interop format. Non-interop apps (default) emit
+    // the original bytes exactly.
+    if (this.config.interop) {
+      const nsId = this.namespaceManager.getNamespaceId();
+      const nsLen = new Uint8Array(2);
+      new DataView(nsLen.buffer).setUint16(0, nsId.length, false);
+      return uint8ArrayToBase64(concat(new Uint8Array([0x01]), nsLen, nsId, peerIdLen, peerIdBytes, serialized));
+    }
+    return uint8ArrayToBase64(concat(peerIdLen, peerIdBytes, serialized));
   }
 
   static async acceptContact(scannedQRData: string): Promise<void> {
@@ -1553,13 +1566,29 @@ export class MeshWhisper {
 
     const raw = base64ToUint8Array(scannedQRData);
     const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-    const peerIdLen = view.getUint16(0, false);
-    const peerIdBytes = raw.slice(2, 2 + peerIdLen);
-    const peerId = new TextDecoder().decode(peerIdBytes);
-    const bundleBytes = raw.slice(2 + peerIdLen);
-    const bundle = deserializePreKeyBundle(bundleBytes);
+
+    // Detect the interop format (0x01 version byte); otherwise the original
+    // layout (which begins with the peerId-length high byte, always 0x00).
+    let offset = 0;
+    let peerNamespace: Uint8Array | null = null;
+    if (raw[0] === 0x01) {
+      offset = 1;
+      const nsLen = view.getUint16(offset, false); offset += 2;
+      peerNamespace = raw.slice(offset, offset + nsLen); offset += nsLen;
+    }
+    const peerIdLen = view.getUint16(offset, false); offset += 2;
+    const peerId = new TextDecoder().decode(raw.slice(offset, offset + peerIdLen)); offset += peerIdLen;
+    const bundle = deserializePreKeyBundle(raw.slice(offset));
 
     this.sessionManager.setBundle(peerId, bundle);
+
+    // If the QR announced a namespace and we've opted into interop, address
+    // this peer in THEIR namespace from the outset — including the handshake
+    // below. Gated on our own interop flag so a non-interop scanner ignores it
+    // and stays isolated (ADR-009).
+    if (peerNamespace && this.config.interop) {
+      this.peerNamespaces.set(peerId, peerNamespace);
+    }
 
     if (this.config.permissionModel === 'mutual') {
       this.permissionManager.confirmMutualContact(peerId);
@@ -2688,7 +2717,14 @@ export class MeshWhisper {
   // Internal — Contact establishment callback (from SessionManager)
   // ================================================================
 
-  private onContactEstablished(peerId: string): void {
+  private onContactEstablished(peerId: string, peerNamespace?: Uint8Array): void {
+    // If the peer announced a namespace in their handshake AND we've opted into
+    // interop, remember it so our replies address into their namespace (ADR-009).
+    // Gated on our own interop flag — a non-interop app ignores it and stays
+    // isolated.
+    if (peerNamespace && this.config.interop) {
+      this.peerNamespaces.set(peerId, peerNamespace);
+    }
     // Capture pre-add state so we can tell whether this is a brand-new peer
     // contacting us, vs. someone we already knew re-handshaking (e.g. recovery
     // from a stuck receiver-only session, or a rotated key on the peer side).

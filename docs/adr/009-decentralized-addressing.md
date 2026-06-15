@@ -21,7 +21,12 @@ Mechanism, confirmed in code: the relay is **already namespace-blind** (forwards
 
 Key finding worth recording: it's not enough to address the *data* message into the recipient's namespace — the **X3DH handshake (`x3dh_init`) must address into it too**, otherwise the recipient never establishes a session and the data can't decrypt (`isForUs` is true but decrypt fails silently). `SessionManager` was changed from a fixed namespace id to a per-peer resolver. X3DH itself is namespace-agnostic (fixed KDF context), so no crypto change was needed.
 
-Still explicit/manual (`setPeerNamespace`) and one-directional (the handshake *response* still goes to the responder's own namespace until they learn the initiator's). Productionising = carry the namespace id in the self-describing invite + reciprocal handshake (stage-1b), then federation routing (stage-2).
+**Stage-1b — automatic, bidirectional, opt-in (2026-06-15).** Promoted from the manual spike to a real, opt-in capability via a new `interop?: boolean` config flag (default off):
+
+- When **on**, pairing exchanges namespace ids both ways with no manual calls: the contact QR carries a versioned prefix (`0x01` + the generator's namespace id — the original format always starts `0x00`, so it's unambiguous and backward-compatible), and the `x3dh_init` handshake envelope carries the scanner's namespace id (`senderNamespace`), recorded atomically when the session is established (no ordering race). Both sides then address each other automatically.
+- When **off** (the default), the QR and handshake bytes are **identical to before**, no namespace is announced or honoured, and the app stays fully isolated (ADR-001). Verified: Prudence (non-interop) pairing is unchanged (QR length identical), same-namespace integration tests green, and a negative-control test confirms a message does not cross without opt-in.
+
+`tests/cross-namespace.test.ts` now proves automatic **bidirectional** A↔B messaging when both opt in, plus default isolation. Remaining: stage-2 federation routing across *different operators* (today: one shared relay), then DNS-free relay location (mesh/DHT).
 
 ## Decision (proposed)
 
