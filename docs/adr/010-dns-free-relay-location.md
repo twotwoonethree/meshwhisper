@@ -144,6 +144,50 @@ packet (could be deduped per destHash); the home-relay pubkey is provided via
 config (a relay advertising its own federation key to clients is the automatic
 end-state); and stages 2–3 (gossip overlay, DHT/transit/onion) are unstarted.
 
+## Stage-2 — landed & proven (2026-06-15)
+
+The second stage — the **`relayKey → endpoint` gossip overlay** that lets a relay
+route to a peer it knows only by key, dialing it on demand — is implemented and
+verified (`tests/federation-gossip.test.ts`). What shipped, all inside
+`FederationManager`:
+
+- **Self-certifying address records.** `AddrRecord { pubkey, endpoint, ts, sig }`
+  — a relay signs `(proto, pubkey, endpoint, ts)` with its federation key. A new
+  `FEDERATION_ADVERTISE_URL` seeds the relay's own signed record at startup. The
+  signature makes the record un-forgeable for any other relay; the `ts` gives
+  last-writer-wins so a moved relay's newer record supersedes the old.
+- **Gossip.** On every established federation link, a relay pushes its current
+  address book (a new `FRAME_ADDR_GOSSIP` frame, JSON, frame-bounded). Received
+  records are signature-verified, freshness-checked, LWW-merged, and — only when
+  genuinely new/newer — **re-gossiped to other peers** (excluding the sender), so
+  endpoints propagate transitively while converging (unchanged records aren't
+  re-sent, so there's no loop). The book is bounded (`MAX_ADDR_BOOK`).
+- **On-demand dial.** `forwardToRelay` now: if the target is connected, send; else
+  if its endpoint is in the address book, **dial it on demand**, queue the packet
+  (bounded), and flush once the link establishes; else return false → flood. So a
+  relay reaches a peer it has *no static configuration for*, located purely by key.
+- **Observable.** `meshwhisper_federation_addr_records_known` (gauge),
+  `…_addr_records_learned_total`, and `…_discovered_dials_total`.
+
+The test proves it with a 3-relay topology — A and B each know only a bootstrap
+C, no A↔B config — where B's signed record gossips B→C→A, then A dials B from the
+learned endpoint and a packet reaches a client on B (exact bytes), with A's
+`discovered_dials_total` incremented. Records carry only public relay
+infrastructure (never user data or homings), so gossiping them leaks nothing —
+the privacy analysis below is unchanged.
+
+Strictly additive and backward-compatible: with no `FEDERATION_ADVERTISE_URL` the
+address book stays empty, `forwardToRelay` behaves exactly as in stage-1 (routes
+to a configured connected peer or falls back to flood), and the existing
+two-relay federation, cross-operator, cross-namespace, and integration tests stay
+green.
+
+Known follow-ups for stage-3: on-demand-dialed peers currently persist (no
+eviction of idle learned relays); gossip is full-table-push + delta with a
+single-frame cap (~dozens of records — needs chunking/pagination for large
+federations); and NAT'd/dynamic-IP home relays (transit/TURN) plus multi-hop
+transit privacy (onion) remain the genuinely hard, unstarted parts.
+
 ## Privacy analysis (why this is strictly better than both alternatives)
 
 Count who touches a packet under each model:

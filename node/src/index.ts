@@ -1158,6 +1158,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       federation?.stats.forwardsSentTotal ?? 0);
     emit('meshwhisper_federation_routed_forwards_sent_total', 'PacketForward frames sent via direct home-relay routing (ADR-010)', 'counter',
       federation?.stats.routedForwardsSentTotal ?? 0);
+    emit('meshwhisper_federation_addr_records_known', 'Relay endpoint records held in the gossip address book (ADR-010 stage-2)', 'gauge',
+      federation?.stats.addrRecordsKnown ?? 0);
+    emit('meshwhisper_federation_addr_records_learned_total', 'Address records accepted from gossip (verified + LWW-newer)', 'counter',
+      federation?.stats.addrRecordsLearnedTotal ?? 0);
+    emit('meshwhisper_federation_discovered_dials_total', 'On-demand dials to gossip-learned relay endpoints (ADR-010 stage-2)', 'counter',
+      federation?.stats.discoveredDialsTotal ?? 0);
     emit('meshwhisper_federation_forwards_received_total', 'PacketForward frames received from peers', 'counter',
       federation?.stats.forwardsReceivedTotal ?? 0);
     emit('meshwhisper_federation_delivered_locally_total', 'Federation packets delivered to a connected local client', 'counter',
@@ -1660,6 +1666,10 @@ const federationMode: FederationMode | 'off' =
   : (federationPeersConfig.length > 0 ? 'allowlist' : 'off');
 const FEDERATION_MAX_PEERS = parseInt(process.env.FEDERATION_MAX_PEERS ?? '64', 10);
 const FEDERATION_RATE_LIMIT = parseInt(process.env.FEDERATION_RATE_LIMIT ?? '6000', 10); // frames/min/peer
+// ADR-010 stage-2: this relay's own reachable ws:// endpoint. When set it is
+// signed + gossiped so peers can locate us by key (DNS-free), and lets us dial
+// gossip-learned relays on demand. Omit to participate passively.
+const FEDERATION_ADVERTISE_URL = process.env.FEDERATION_ADVERTISE_URL;
 
 const federation: FederationManager | null = federationMode !== 'off'
   ? new FederationManager({
@@ -1669,6 +1679,7 @@ const federation: FederationManager | null = federationMode !== 'off'
       blockedPubkeys: loadBlocklist(FEDERATION_BLOCKLIST_FILE),
       maxPeers: FEDERATION_MAX_PEERS,
       rateLimitPerMin: FEDERATION_RATE_LIMIT,
+      ...(FEDERATION_ADVERTISE_URL ? { advertiseUrl: FEDERATION_ADVERTISE_URL } : {}),
       classifyLocal: (packet: Uint8Array) => {
         const destHash = readDestHash(packet);
         if (!destHash) return 'delivered'; // malformed — swallow, don't propagate

@@ -30,6 +30,14 @@ export const FEDERATION_SUBPROTOCOL = 'meshwhisper-federation.v1';
 const WIRE_VERSION = 0x01;
 const FRAME_PACKET_FORWARD = 0x01;
 const FRAME_HEARTBEAT = 0x02;
+const FRAME_ADDR_GOSSIP = 0x03; // ADR-010 stage-2: signed relay address records
+
+// ADR-010 stage-2 bounds. Address records are public relay infrastructure,
+// so the only risk is resource exhaustion — keep the book and frames bounded.
+const ADDR_PROTO = 'meshwhisper-addr.v1';
+const MAX_ADDR_BOOK = 4096;          // learned relay endpoints we retain
+const MAX_PENDING_FORWARDS = 64;     // packets queued while an on-demand dial completes
+const ADDR_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // ignore records older than a week
 
 const MAX_HOPS = parseInt(process.env.FEDERATION_MAX_HOPS ?? '3', 10);
 const MAX_FRAME_BODY = 8192;
@@ -93,6 +101,25 @@ export interface PeerConfig {
   pubkey: string;
   /** Present = this node initiates outbound connections to the peer. */
   url?: string;
+}
+
+/**
+ * ADR-010 stage-2: a self-certifying relay address record. A relay signs
+ * {pubkey, endpoint, ts} with its federation key and gossips it; peers verify
+ * the signature (so it can't be forged for another relay), keep the
+ * newest-by-ts (LWW, handling address changes), and re-gossip changes onward.
+ * Carries only public infrastructure — never user data or homings — so it is
+ * safe to spread freely across the federation.
+ */
+export interface AddrRecord {
+  pubkey: string;   // hex ed25519 federation pubkey
+  endpoint: string; // ws:// URL the relay is reachable at
+  ts: number;       // ms epoch — LWW tiebreak
+  sig: string;      // hex ed25519 signature over the canonical bytes
+}
+
+function buildAddrCanonical(pubkeyHex: string, endpoint: string, ts: number): Buffer {
+  return Buffer.from([ADDR_PROTO, pubkeyHex, endpoint, String(ts)].join('\n'), 'utf8');
 }
 
 /** Load { peers: [...] } from `peersPath`. Missing file = no peers = federation dormant. */
@@ -253,6 +280,9 @@ interface PeerState {
   dynamic: boolean;
   /** Per-peer PacketForward rate limiting (sliding 60s window). */
   frameWindow: { count: number; windowStart: number };
+  /** ADR-010 stage-2: packets queued while an on-demand dial to a learned
+   *  (gossip-discovered) relay completes; flushed once the link establishes. */
+  pendingForwards?: Buffer[];
 }
 
 export interface FederationStats {
@@ -270,6 +300,13 @@ export interface FederationStats {
   dropsRateLimitedTotal: number;
   handshakeFailuresTotal: number;
   handshakeRejectionsBlockedTotal: number;
+  /** ADR-010 stage-2: address records currently held in the gossip book. */
+  addrRecordsKnown: number;
+  /** ADR-010 stage-2: address-gossip records accepted (verified + LWW-newer). */
+  addrRecordsLearnedTotal: number;
+  /** ADR-010 stage-2: forwards delivered to a relay reached via an on-demand
+   *  dial to a gossip-learned endpoint (no static config for it). */
+  discoveredDialsTotal: number;
 }
 
 // ---- Manager ----
@@ -287,6 +324,11 @@ export class FederationManager {
   private readonly wss: WebSocketServer;
   private stopped = false;
 
+  // ADR-010 stage-2: our own reachable endpoint (signed + advertised), and the
+  // gossip address book mapping relay pubkey → newest known signed record.
+  private readonly advertiseUrl: string | null;
+  private readonly addrBook = new Map<string, AddrRecord>();
+
   readonly stats: FederationStats = {
     peersConfigured: 0,
     peersConnected: 0,
@@ -301,6 +343,9 @@ export class FederationManager {
     dropsRateLimitedTotal: 0,
     handshakeFailuresTotal: 0,
     handshakeRejectionsBlockedTotal: 0,
+    addrRecordsKnown: 0,
+    addrRecordsLearnedTotal: 0,
+    discoveredDialsTotal: 0,
   };
 
   constructor(opts: {
@@ -316,6 +361,10 @@ export class FederationManager {
     maxPeers?: number;
     /** Per-peer PacketForward frames accepted per minute; excess dropped. */
     rateLimitPerMin?: number;
+    /** ADR-010 stage-2: this relay's own reachable ws:// endpoint. When set,
+     *  it is signed + gossiped so peers can route to us by key, and lets us
+     *  dial gossip-learned relays on demand. Omit to stay gossip-passive. */
+    advertiseUrl?: string;
   }) {
     this.key = opts.key;
     this.classifyLocal = opts.classifyLocal;
@@ -323,6 +372,7 @@ export class FederationManager {
     this.blockedPubkeys = opts.blockedPubkeys ?? new Set();
     this.maxPeers = opts.maxPeers ?? 64;
     this.rateLimitPerMin = opts.rateLimitPerMin ?? 6000; // ≈100 frames/sec
+    this.advertiseUrl = opts.advertiseUrl ?? null;
     this.allowedPubkeys = new Set(opts.peers.map((p) => p.pubkey));
     for (const p of opts.peers) {
       this.peers.set(p.pubkey, this.newPeerState(p, false));
@@ -351,6 +401,16 @@ export class FederationManager {
 
   /** Dial every peer that has a url. Inbound peers connect to us instead. */
   start(): void {
+    // ADR-010 stage-2: seed the address book with our own signed record so it
+    // gossips out when peers connect.
+    if (this.advertiseUrl) {
+      const ts = Date.now();
+      const sig = nodeCrypto.sign(null, buildAddrCanonical(this.key.publicKeyHex, this.advertiseUrl, ts), this.key.privateKey);
+      this.addrBook.set(this.key.publicKeyHex, {
+        pubkey: this.key.publicKeyHex, endpoint: this.advertiseUrl, ts, sig: sig.toString('hex'),
+      });
+      this.stats.addrRecordsKnown = this.addrBook.size;
+    }
     for (const state of this.peers.values()) {
       if (state.config.url) this.dial(state);
     }
@@ -397,17 +457,48 @@ export class FederationManager {
   /**
    * ADR-010: route a locally-received packet *directly* to the one federated
    * peer that homes the recipient (identified by federation pubkey), instead
-   * of flooding every peer. Returns true if the packet was sent; false if the
-   * target relay isn't a connected peer (the caller then falls back to the
-   * flood so delivery still happens). The peer handles the resulting
-   * PacketForward frame identically to a flooded one — no peer-side change.
+   * of flooding every peer.
+   *
+   * Stage 1: if the target is a connected peer, send now.
+   * Stage 2: if it isn't connected but we know its endpoint from the gossip
+   * address book, dial it on demand, queue the packet, and send once the link
+   * is up. Returns false only when the target is wholly unknown (no connection,
+   * no learned address) — the caller then falls back to the flood so delivery
+   * still happens. The peer handles the resulting PacketForward frame
+   * identically to a flooded one — no peer-side change.
    */
   forwardToRelay(targetPubkeyHex: string, packet: Uint8Array): boolean {
     if (packet.byteLength > MAX_FRAME_BODY - 17) return false;
+
     const state = this.peers.get(targetPubkeyHex);
-    if (!state || !state.established || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
-      return false;
+    if (state?.established && state.ws && state.ws.readyState === WebSocket.OPEN) {
+      return this.sendForwardFrame(state, packet);
     }
+
+    // Not connected — can we reach it via a gossip-learned address? (ADR-010 stage-2)
+    const addr = this.addrBook.get(targetPubkeyHex);
+    if (!addr || targetPubkeyHex === this.key.publicKeyHex) return false; // unknown — caller floods
+
+    let st = state;
+    if (!st) {
+      st = this.newPeerState({ pubkey: targetPubkeyHex, url: addr.endpoint }, false);
+      this.peers.set(targetPubkeyHex, st);
+    } else if (!st.config.url) {
+      st.config = { ...st.config, url: addr.endpoint };
+    }
+    // Queue (bounded) and kick off a dial if one isn't already in flight.
+    (st.pendingForwards ??= []).push(Buffer.from(packet));
+    if (st.pendingForwards.length > MAX_PENDING_FORWARDS) st.pendingForwards.shift();
+    if (!st.ws && !st.reconnectTimer) {
+      this.stats.discoveredDialsTotal++;
+      this.dial(st);
+    }
+    return true;
+  }
+
+  /** Encode + send a single PacketForward frame to an established peer. */
+  private sendForwardFrame(state: PeerState, packet: Uint8Array): boolean {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return false;
     const packetId = nodeCrypto.randomBytes(16);
     this.cache.checkAndInsert(packetId.toString('hex'));
     const body = Buffer.alloc(17 + packet.length);
@@ -624,6 +715,34 @@ export class FederationManager {
       body.writeBigInt64BE(BigInt(Date.now()), 0);
       try { ws.send(encodeFrame(FRAME_HEARTBEAT, body), { binary: true }); } catch { /* reaped on close */ }
     }, HEARTBEAT_INTERVAL_MS);
+
+    // ADR-010 stage-2: share what we know about relay endpoints, then flush any
+    // packets that were queued waiting for this (on-demand-dialed) link.
+    this.sendAddrGossip(state, [...this.addrBook.values()]);
+    this.flushPending(state);
+  }
+
+  /** Send a batch of address records to a peer (as many as fit one frame). */
+  private sendAddrGossip(state: PeerState, records: AddrRecord[]): void {
+    if (records.length === 0 || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    // Greedily pack records until the JSON would exceed a frame body.
+    const fit: AddrRecord[] = [];
+    for (const r of records) {
+      fit.push(r);
+      if (Buffer.byteLength(JSON.stringify(fit)) > MAX_FRAME_BODY - 16) { fit.pop(); break; }
+    }
+    if (fit.length === 0) return;
+    try {
+      state.ws.send(encodeFrame(FRAME_ADDR_GOSSIP, Buffer.from(JSON.stringify(fit), 'utf8')), { binary: true });
+    } catch { /* reaped on close */ }
+  }
+
+  /** Flush packets queued while an on-demand dial completed. */
+  private flushPending(state: PeerState): void {
+    const queued = state.pendingForwards;
+    if (!queued || queued.length === 0) return;
+    state.pendingForwards = [];
+    for (const packet of queued) this.sendForwardFrame(state, packet);
   }
 
   private handleFrame(buf: Buffer, fromState: PeerState): void {
@@ -634,6 +753,8 @@ export class FederationManager {
       return;
     }
     if (frame.frameType === FRAME_HEARTBEAT) return; // lastFrameAt already updated
+
+    if (frame.frameType === FRAME_ADDR_GOSSIP) { this.handleAddrGossip(frame.body, fromState); return; }
 
     if (frame.frameType !== FRAME_PACKET_FORWARD) return; // unknown type — ignore (forward-compat)
     if (frame.body.length < 17 + 31) return; // packetId + forwardCount + minimum packet header
@@ -678,5 +799,57 @@ export class FederationManager {
     // Unknown locally — forward onward, excluding the peer it came from.
     this.stats.forwardedOnwardTotal++;
     this.fanOut(frame.body.subarray(0, 16), forwardCount + 1, Buffer.from(packet), fromState.config.pubkey);
+  }
+
+  /**
+   * ADR-010 stage-2: ingest gossiped address records. Each is verified against
+   * the claimed pubkey's signature (un-forgeable for another relay), merged
+   * LWW by timestamp, and — if genuinely new/newer — re-gossiped to our other
+   * peers (excluding the sender), so endpoints propagate transitively across
+   * the federation. Records carry only public infrastructure, never user data.
+   */
+  private handleAddrGossip(body: Buffer, fromState: PeerState): void {
+    let records: AddrRecord[];
+    try {
+      const parsed = JSON.parse(body.toString('utf8')) as unknown;
+      if (!Array.isArray(parsed)) return;
+      records = parsed as AddrRecord[];
+    } catch { return; }
+
+    const now = Date.now();
+    const changed: AddrRecord[] = [];
+    for (const r of records) {
+      if (!r || typeof r.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(r.pubkey)) continue;
+      if (typeof r.endpoint !== 'string' || !/^wss?:\/\//.test(r.endpoint) || r.endpoint.length > 256) continue;
+      if (typeof r.ts !== 'number' || !Number.isFinite(r.ts)) continue;
+      if (typeof r.sig !== 'string' || !/^[0-9a-f]{128}$/.test(r.sig)) continue;
+      if (r.pubkey === this.key.publicKeyHex) continue;       // never let a peer overwrite our own record
+      if (now - r.ts > ADDR_RECORD_MAX_AGE_MS || r.ts > now + 60_000) continue; // stale or implausibly future
+
+      // Signature must verify against the claimed pubkey — this is what makes
+      // the record self-certifying and un-spoofable for another relay.
+      if (!verifyWithRawPubkey(r.pubkey, buildAddrCanonical(r.pubkey, r.endpoint, r.ts), Buffer.from(r.sig, 'hex'))) continue;
+
+      const existing = this.addrBook.get(r.pubkey);
+      if (existing && existing.ts >= r.ts) continue;          // LWW: keep the newest
+      if (!existing && this.addrBook.size >= MAX_ADDR_BOOK) continue; // bounded
+      const rec: AddrRecord = { pubkey: r.pubkey, endpoint: r.endpoint, ts: r.ts, sig: r.sig };
+      this.addrBook.set(r.pubkey, rec);
+      this.stats.addrRecordsLearnedTotal++;
+      changed.push(rec);
+    }
+    this.stats.addrRecordsKnown = this.addrBook.size;
+
+    // Re-gossip only the records that actually changed, to peers other than
+    // the one we heard them from. Unchanged records aren't re-sent, so the
+    // gossip converges instead of looping.
+    if (changed.length > 0) {
+      for (const [pubkey, peer] of this.peers) {
+        if (pubkey === fromState.config.pubkey) continue;
+        if (peer.established && peer.ws && peer.ws.readyState === WebSocket.OPEN) {
+          this.sendAddrGossip(peer, changed);
+        }
+      }
+    }
   }
 }
