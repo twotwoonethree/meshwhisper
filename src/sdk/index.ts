@@ -459,6 +459,13 @@ export class MeshWhisper {
   // --- Persistence ---
   private readonly storage: StorageBackend | null;
 
+  // --- Cross-namespace addressing (ADR-009, stage-1 spike) ---
+  // Per-peer namespace id. When set for a peer, outbound packets to them are
+  // addressed into THEIR namespace's destHash instead of ours — which is the
+  // entire mechanism behind cross-namespace ("email model") messaging. Empty
+  // for normal same-namespace contacts, so behaviour is unchanged by default.
+  private readonly peerNamespaces = new Map<string, Uint8Array>();
+
   // --- Presence ---
   private readonly presenceRecords: Map<string, PeerPresenceRecord> = new Map();
 
@@ -587,7 +594,9 @@ export class MeshWhisper {
       (peerId) => this.sendHandshakeActivation(peerId),
       config.namespace,
       config.node ?? 'mesh',
-      this.namespaceManager.getNamespaceId(),
+      // Per-peer namespace: handshakes must address into the recipient's
+      // namespace too (cross-namespace, ADR-009), not always ours.
+      (peerId: string) => this.destNamespaceFor(peerId),
       (peerId, role) => this.onSessionEstablishedHook(peerId, role),
     );
 
@@ -1019,7 +1028,9 @@ export class MeshWhisper {
     const recipientPublicKey = this.peerCache.getPeerPublicKey(deviceKey);
     if (!recipientPublicKey) throw new Error(`No public key for recipient ${deviceKey}`);
 
-    const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
+    // Address into the recipient's namespace (their own if cross-namespace) —
+    // the destHash is where THEY listen. See ADR-009.
+    const destHash = deriveDestHash(this.destNamespaceFor(deviceKey), recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const packet = createDataPacket(destHash, senderEphId, fullPayload);
 
@@ -1068,7 +1079,7 @@ export class MeshWhisper {
     const recipientPublicKey = this.peerCache.getPeerPublicKey(recipientId);
     if (!recipientPublicKey) throw new Error(`No public key for recipient ${recipientId}`);
 
-    const destHash = deriveDestHash(this.namespaceManager.getNamespaceId(), recipientPublicKey, getCurrentEpochHour());
+    const destHash = deriveDestHash(this.destNamespaceFor(recipientId), recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const packet = createDataPacket(destHash, senderEphId, fullPayload);
 
@@ -2429,6 +2440,18 @@ export class MeshWhisper {
 
   getNamespaceId(): Uint8Array {
     return this.namespaceManager.getNamespaceId();
+  }
+
+  /** Namespace id to address a peer in: their own if known (cross-namespace),
+   *  otherwise ours (the normal same-namespace case). See ADR-009. */
+  private destNamespaceFor(peerId: string): Uint8Array {
+    return this.peerNamespaces.get(peerId) ?? this.namespaceManager.getNamespaceId();
+  }
+
+  /** Record a peer's namespace id so we address packets into THEIR namespace.
+   *  Public so a caller/test can establish a cross-namespace contact. */
+  setPeerNamespace(peerId: string, namespaceId: Uint8Array): void {
+    this.peerNamespaces.set(peerId, namespaceId);
   }
 
   isRunning(): boolean {

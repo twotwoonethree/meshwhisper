@@ -134,7 +134,9 @@ export class SessionManager {
     private readonly onHandshakeInitiated: (peerId: string) => void,
     private readonly namespace: string,
     private readonly nodeUrl: string | string[] | 'mesh',
-    private readonly namespaceId: Uint8Array,
+    /** Resolves the namespace id to address a peer in — their own when
+     *  cross-namespace (ADR-009), ours otherwise. */
+    private readonly namespaceIdFor: (peerId: string) => Uint8Array,
     /**
      * Called when a handshake completes and a fresh session is in place.
      * The coordinator uses this to schedule a session-health ping that
@@ -886,7 +888,7 @@ export class SessionManager {
     const recipientPublicKey = this.peerCache.getPeerPublicKey(peerId);
     if (!recipientPublicKey) return;
 
-    const destHash = deriveDestHash(this.namespaceId, recipientPublicKey, getCurrentEpochHour());
+    const destHash = deriveDestHash(this.namespaceIdFor(peerId), recipientPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const handshakePacket = createHandshakePacket(destHash, senderEphId, envelopeBytes);
 
@@ -997,7 +999,7 @@ export class SessionManager {
     const peerPublicKey = this.peerCache.getPeerPublicKey(envelope.senderId);
     if (!peerPublicKey) return;
 
-    const destHash = deriveDestHash(this.namespaceId, peerPublicKey, getCurrentEpochHour());
+    const destHash = deriveDestHash(this.namespaceIdFor(envelope.senderId), peerPublicKey, getCurrentEpochHour());
     const senderEphId = this.identity.generateEphemeralId();
     const responsePacket = createHandshakePacket(destHash, senderEphId, responseBytes);
 

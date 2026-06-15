@@ -13,6 +13,16 @@ The obvious way to build it — `user@domain`, resolved via DNS/`.well-known` (t
 
 The governing constraint is **Zooko's Triangle**: a name can be at most two of {human-meaningful, globally-unique, decentralized}. DNS sacrifices *decentralized*. Blockchain naming (ENS/Handshake) only relocates the choke point and is heavy/off-brand. To stay decentralized we sacrifice **global-uniqueness of the human name** — via petnames.
 
+## Stage-1 spike — landed & proven (2026-06-15)
+
+A minimal SDK spike demonstrates cross-namespace messaging end-to-end (`tests/cross-namespace.test.ts`): a sender in `com.test.appA` reaches a recipient in `com.test.appB`, E2EE, over a single unmodified relay; a negative-control test confirms isolation still holds by default.
+
+Mechanism, confirmed in code: the relay is **already namespace-blind** (forwards opaque packets by `destHash`) and the identity key is already cross-namespace — so this needed **zero relay changes** and is purely sender-side addressing. Added: a `peerNamespaces` map + `setPeerNamespace(peerId, nsId)` + `destNamespaceFor(peerId)`, used at the DM send sites.
+
+Key finding worth recording: it's not enough to address the *data* message into the recipient's namespace — the **X3DH handshake (`x3dh_init`) must address into it too**, otherwise the recipient never establishes a session and the data can't decrypt (`isForUs` is true but decrypt fails silently). `SessionManager` was changed from a fixed namespace id to a per-peer resolver. X3DH itself is namespace-agnostic (fixed KDF context), so no crypto change was needed.
+
+Still explicit/manual (`setPeerNamespace`) and one-directional (the handshake *response* still goes to the responder's own namespace until they learn the initiator's). Productionising = carry the namespace id in the self-describing invite + reciprocal handshake (stage-1b), then federation routing (stage-2).
+
 ## Decision (proposed)
 
 Adopt a **self-certifying + petname** addressing model. `anton@prudence` is a human label, locally meaningful and cryptographically anchored — *not* a DNS-resolvable global address.
