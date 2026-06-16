@@ -499,6 +499,13 @@ export class SessionManager {
   async targetedReestablish(peerId: string, force = false): Promise<void> {
     const now = Date.now();
     if (!force) {
+      // Don't tear down a session that can still send. A single undecryptable
+      // inbound packet (a stale/duplicate packet, or one from an old ratchet
+      // step) is NOT evidence that THIS session is broken — re-handshaking here
+      // resets the ratchet to a fresh state and silently breaks the working
+      // session, dropping in-flight messages. Genuinely-broken sessions are
+      // recovered by the session-health ping, which calls this with force=true.
+      if (this.isSendableSession(peerId)) return;
       const last = this.lastTargetedReestablishAt.get(peerId) ?? 0;
       if (now - last < SessionManager.TARGETED_REESTABLISH_COOLDOWN_MS) return;
     }
@@ -543,12 +550,22 @@ export class SessionManager {
 
   private async reestablishAllSessions(): Promise<void> {
     for (const [peerId, bundle] of this.peerPreKeyBundles) {
+      // Skip sessions that can still send — an unattributable undecryptable
+      // packet is no reason to nuke a working session (see targetedReestablish).
+      if (this.isSendableSession(peerId)) continue;
       try {
         await this.initiateHandshake(peerId, bundle);
       } catch {
         // Peer offline — try again on next decrypt failure after cooldown
       }
     }
+  }
+
+  /** True if we hold a session for `peerId` with an established sending chain —
+   *  i.e. one that can still encrypt outbound. Such sessions must not be torn
+   *  down by a transient/unattributed decrypt failure. */
+  private isSendableSession(peerId: string): boolean {
+    return this.sessions.get(peerId)?.sendingChainKey != null;
   }
 
   // ----------------------------------------------------------------
