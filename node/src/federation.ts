@@ -22,7 +22,7 @@ import * as nodeCrypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { IncomingMessage } from 'node:http';
-import { generateOnionKeypair, sealOnion, openOnion } from './onion.js';
+import { generateOnionKeypair, sealOnion, openOnion, type OnionHop } from './onion.js';
 
 export const FEDERATION_SUBPROTOCOL = 'meshwhisper-federation.v1';
 
@@ -44,6 +44,11 @@ const ADDR_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // ignore records older 
 const MAX_VIA_ANCHORS = 16;          // transit anchors a record may advertise
 // ADR-010 stage-3: cap transit hops so routed packets can't loop or amplify.
 const MAX_TRANSIT_HOPS = parseInt(process.env.FEDERATION_MAX_TRANSIT_HOPS ?? '3', 10);
+// ADR-010 stage-2: periodic anti-entropy. Event-driven gossip (on-establish +
+// on-change) is the fast path; this backstop re-pushes the address book on a
+// timer so the overlay still converges if any single propagation was delayed or
+// missed (late link establishment, a dropped re-gossip under load). Tunable.
+const GOSSIP_INTERVAL_MS = parseInt(process.env.FEDERATION_GOSSIP_INTERVAL_MS ?? '10000', 10);
 
 const MAX_HOPS = parseInt(process.env.FEDERATION_MAX_HOPS ?? '3', 10);
 const MAX_FRAME_BODY = 8192;
@@ -373,9 +378,14 @@ export class FederationManager {
   // gossip address book mapping relay pubkey → newest known signed record.
   private readonly advertiseUrl: string | null;
   private readonly addrBook = new Map<string, AddrRecord>();
+  private gossipTimer: ReturnType<typeof setInterval> | null = null;
   // ADR-010 stage-3+: when true, transit through an anchor is wrapped in an
   // onion so the anchor sees only "deliver to B", never the packet/destHash.
   private readonly onionTransit: boolean;
+  // ADR-010 stage-3++: how many extra intermediate relay hops to insert before
+  // the anchor when building an onion path, so a non-adjacent intermediate
+  // never learns the destination relay. 0 = minimal [anchor, target] path.
+  private readonly onionHops: number;
 
   readonly stats: FederationStats = {
     peersConfigured: 0,
@@ -421,6 +431,10 @@ export class FederationManager {
     /** ADR-010 stage-3+: onion-wrap transit hops so the transit relay never
      *  sees the packet/destHash, only the next hop. Default off. */
     onionTransit?: boolean;
+    /** ADR-010 stage-3++: extra intermediate hops to insert before the anchor
+     *  when building an onion path (hides the destination relay from
+     *  non-adjacent intermediates). Default 1; clamped to [0, 4]. */
+    onionHops?: number;
   }) {
     this.key = opts.key;
     this.classifyLocal = opts.classifyLocal;
@@ -430,6 +444,7 @@ export class FederationManager {
     this.rateLimitPerMin = opts.rateLimitPerMin ?? 6000; // ≈100 frames/sec
     this.advertiseUrl = opts.advertiseUrl ?? null;
     this.onionTransit = opts.onionTransit ?? false;
+    this.onionHops = Math.max(0, Math.min(4, opts.onionHops ?? 1));
     this.allowedPubkeys = new Set(opts.peers.map((p) => p.pubkey));
     for (const p of opts.peers) {
       this.peers.set(p.pubkey, this.newPeerState(p, false));
@@ -481,10 +496,26 @@ export class FederationManager {
     for (const state of this.peers.values()) {
       if (state.config.url) this.dial(state);
     }
+    // Periodic anti-entropy backstop (see GOSSIP_INTERVAL_MS): re-push our book
+    // to every established peer so the overlay converges even if an event-driven
+    // gossip was delayed or missed.
+    this.gossipTimer = setInterval(() => this.periodicGossip(), GOSSIP_INTERVAL_MS);
+    if (typeof this.gossipTimer.unref === 'function') this.gossipTimer.unref();
+  }
+
+  private periodicGossip(): void {
+    const records = [...this.addrBook.values()];
+    if (records.length === 0) return;
+    for (const peer of this.peers.values()) {
+      if (peer.established && peer.ws && peer.ws.readyState === WebSocket.OPEN) {
+        this.sendAddrGossip(peer, records);
+      }
+    }
   }
 
   stop(): void {
     this.stopped = true;
+    if (this.gossipTimer) { clearInterval(this.gossipTimer); this.gossipTimer = null; }
     for (const state of this.peers.values()) {
       if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
       if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
@@ -554,29 +585,28 @@ export class FederationManager {
       return true;
     }
 
-    // 3. NAT'd / endpoint-less — route through a transit anchor (stage 3). The
-    // anchor is a relay the target holds a persistent outbound link to.
-    for (const transitHex of addr.via ?? []) {
-      if (transitHex === this.key.publicKeyHex) continue;
-      const tAddr = this.addrBook.get(transitHex);
-
-      // 3a. Onion transit (stage 3+): wrap the packet in a layer for the anchor
-      // and an inner layer for the target. The anchor peels only its layer —
-      // it learns "deliver to B" but never sees the packet or the destHash.
-      if (this.onionTransit && addr.onionKey && tAddr?.onionKey) {
-        const onion = sealOnion(
-          [{ pubkey: transitHex, onionKey: tAddr.onionKey }, { pubkey: targetPubkeyHex, onionKey: addr.onionKey }],
-          Buffer.from(packet),
-        );
-        if (onion.byteLength <= MAX_FRAME_BODY && this.sendOnionTo(transitHex, onion)) {
+    // 3a. Onion transit (stage 3++): select a multi-hop path over the gossip
+    // topology — [intermediates…, anchor, target] — and seal one layer per hop.
+    // Each hop peels only its own layer (learns just the next hop), so a
+    // non-adjacent intermediate never sees the destination, and no hop but the
+    // target sees the packet/destHash.
+    if (this.onionTransit) {
+      const path = this.selectOnionPath(targetPubkeyHex);
+      if (path && path.length >= 2) {
+        const onion = sealOnion(path, Buffer.from(packet));
+        if (onion.byteLength <= MAX_FRAME_BODY && this.sendOnionTo(path[0].pubkey, onion)) {
           this.stats.onionForwardsSentTotal++;
           return true;
         }
-        continue;
       }
+      // fall through to cleartext routed transit if no usable onion path
+    }
 
-      // 3b. Cleartext routed transit (stage 3): ask the anchor to forwardToRelay
-      // onward, which bottoms out at a plain forward over its link to the target.
+    // 3b. Cleartext routed transit (stage 3): ask an anchor to forwardToRelay
+    // onward, which bottoms out at a plain forward over its link to the target.
+    for (const transitHex of addr.via ?? []) {
+      if (transitHex === this.key.publicKeyHex) continue;
+      const tAddr = this.addrBook.get(transitHex);
       const tState = this.peers.get(transitHex);
       if (tState?.established && tState.ws && tState.ws.readyState === WebSocket.OPEN) {
         if (this.sendRouted(tState, targetPubkeyHex, packet, hops + 1)) return true;
@@ -588,6 +618,47 @@ export class FederationManager {
       }
     }
     return false; // no reachable path — caller floods
+  }
+
+  /**
+   * ADR-010 stage-3++: choose an onion path to a NAT'd target from the gossip
+   * topology — `[intermediate…, anchor, target]`. The anchor is a relay in the
+   * target's `via` (it holds the target's inbound link); intermediates are
+   * public relays (dialable + onion-capable) inserted to hide the destination
+   * from non-adjacent hops. Returns null if no usable anchor is known.
+   */
+  private selectOnionPath(targetPubkeyHex: string): OnionHop[] | null {
+    const target = this.addrBook.get(targetPubkeyHex);
+    if (!target?.onionKey) return null;
+
+    // Terminal anchor: an onion-capable relay in target.via (not us).
+    let anchor: AddrRecord | undefined;
+    for (const v of target.via ?? []) {
+      const rec = this.addrBook.get(v);
+      if (rec?.onionKey && v !== this.key.publicKeyHex) { anchor = rec; break; }
+    }
+    if (!anchor) return null; // can't reach a NAT'd target without a usable anchor
+
+    // Intermediates: public, onion-capable relays — not us, the target, or the anchor.
+    const exclude = new Set([this.key.publicKeyHex, targetPubkeyHex, anchor.pubkey]);
+    const candidates = [...this.addrBook.values()].filter((r) => r.endpoint && r.onionKey && !exclude.has(r.pubkey));
+    const intermediates = this.pickRandom(candidates, this.onionHops);
+
+    const path: OnionHop[] = [];
+    for (const r of intermediates) path.push({ pubkey: r.pubkey, onionKey: r.onionKey! });
+    path.push({ pubkey: anchor.pubkey, onionKey: anchor.onionKey! });
+    path.push({ pubkey: targetPubkeyHex, onionKey: target.onionKey });
+    return path;
+  }
+
+  /** Pick up to n distinct random elements (Fisher-Yates partial draw). */
+  private pickRandom<T>(arr: T[], n: number): T[] {
+    const pool = arr.slice();
+    const out: T[] = [];
+    while (out.length < n && pool.length > 0) {
+      out.push(pool.splice(nodeCrypto.randomInt(pool.length), 1)[0]);
+    }
+    return out;
   }
 
   /** Send a pre-built onion to its first hop — connected peer now, else dial. */

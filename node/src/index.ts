@@ -1683,12 +1683,17 @@ const FEDERATION_ADVERTISE_URL = process.env.FEDERATION_ADVERTISE_URL;
 // ADR-010 stage-3+: onion-wrap transit hops so a transit relay never sees the
 // packet/destHash, only the next hop. Off by default.
 const FEDERATION_ONION_TRANSIT = /^(1|true|on)$/i.test(process.env.FEDERATION_ONION_TRANSIT ?? '');
+// ADR-010 stage-3++: extra intermediate hops in an onion path (hides the
+// destination relay from non-adjacent intermediates). Default applied in the manager.
+const FEDERATION_ONION_HOPS = /^\d+$/.test(process.env.FEDERATION_ONION_HOPS ?? '')
+  ? parseInt(process.env.FEDERATION_ONION_HOPS as string, 10) : undefined;
 
 const federation: FederationManager | null = federationMode !== 'off'
   ? new FederationManager({
       key: loadOrCreateFederationKey(FEDERATION_KEY_FILE),
       peers: federationPeersConfig,
       ...(FEDERATION_ONION_TRANSIT ? { onionTransit: true } : {}),
+      ...(FEDERATION_ONION_HOPS !== undefined ? { onionHops: FEDERATION_ONION_HOPS } : {}),
       mode: federationMode,
       blockedPubkeys: loadBlocklist(FEDERATION_BLOCKLIST_FILE),
       maxPeers: FEDERATION_MAX_PEERS,

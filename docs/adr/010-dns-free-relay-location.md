@@ -277,9 +277,46 @@ deliverable packet — and only B's `onion_delivered` increments. The whole suit
 The residual privacy note: at a single transit hop the anchor is adjacent to the
 destination, so it necessarily learns B — onion's gain there is hiding the
 *destHash/packet*. Hiding the destination *relay* from an intermediate requires
-≥2 transit hops, which the sealing supports (proven in the unit test) but which
-needs topology-aware path *selection* over the gossip graph to drive
-automatically — that path-selection layer is the next step, not built here.
+≥2 transit hops — addressed by the path-selection stage below.
+
+## Stage-3++ — onion path selection, landed & proven (2026-06-16)
+
+Onion sealing supports any path length, but stage-3+ used the minimal
+`[anchor, target]` path, where the anchor is adjacent to the target and so
+learns it. Path selection builds a *longer* path from the gossip topology so a
+non-adjacent intermediate never learns the destination. Implemented in
+`FederationManager.selectOnionPath` (the path-selection test in
+`tests/federation-gossip.test.ts`):
+
+- **Topology from the address book.** Each record already carries `endpoint`
+  (dialable/public) and `via` (anchors it links to) — enough to route. The
+  anchor is an onion-capable relay in the target's `via`; intermediates are
+  public, onion-capable relays (dialable, so each prior hop can reach them).
+- **Path = `[intermediate…, anchor, target]`.** `FEDERATION_ONION_HOPS`
+  (default 1, clamped 0–4) random intermediates are inserted before the anchor;
+  `sealOnion` wraps a layer per hop. Each hop peels only its layer, so a
+  non-adjacent intermediate sees only the *next* hop, never the destination.
+  Degrades gracefully: with no candidate intermediates it's the minimal
+  `[anchor, target]` path (stage-3+ behaviour, unchanged).
+- The proof: a 4-relay topology where A inserts intermediate M before anchor T
+  to reach NAT-bound B. The packet arrives at B, but **M peels + forwards an
+  onion while its `delivered`/`stored` counters stay zero** — it relayed an
+  opaque layer and is not the destination — as does the anchor T; only B
+  delivers. A could have reached T directly, so M is a deliberate privacy hop,
+  not a reachability need.
+
+**Also (stage-2 hardening): periodic anti-entropy gossip.** The overlay
+previously gossiped only on link-establish and on-change — fragile if a single
+propagation was delayed or dropped (late link, load). A periodic backstop
+(`FEDERATION_GOSSIP_INTERVAL_MS`, default 10s) re-pushes the address book to
+established peers so the overlay self-heals and converges deterministically;
+the LWW merge means a stable book re-push is a cheap no-op (no storm). This is
+standard gossip/anti-entropy design and removed the only remaining source of
+convergence flakiness.
+
+The remaining hard case is unchanged: *both-ends-NAT'd with no common public
+anchor* (needs a shared rendezvous); and at one transit hop the anchor still
+learns the destination (intrinsic — it's adjacent).
 
 ## Privacy analysis (why this is strictly better than both alternatives)
 
