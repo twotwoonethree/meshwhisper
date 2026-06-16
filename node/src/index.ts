@@ -1164,6 +1164,8 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       federation?.stats.addrRecordsLearnedTotal ?? 0);
     emit('meshwhisper_federation_discovered_dials_total', 'On-demand dials to gossip-learned relay endpoints (ADR-010 stage-2)', 'counter',
       federation?.stats.discoveredDialsTotal ?? 0);
+    emit('meshwhisper_federation_learned_peers_evicted_total', 'Gossip-learned peers evicted for idleness (ADR-010 stage-2)', 'counter',
+      federation?.stats.learnedPeersEvictedTotal ?? 0);
     emit('meshwhisper_federation_transit_forwards_sent_total', 'Routed frames sent toward a NAT-bound relay via a transit anchor (ADR-010 stage-3)', 'counter',
       federation?.stats.transitForwardsSentTotal ?? 0);
     emit('meshwhisper_federation_transit_frames_received_total', 'Routed frames received and re-dispatched as a transit relay (ADR-010 stage-3)', 'counter',

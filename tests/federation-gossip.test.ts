@@ -572,3 +572,129 @@ describe('Federation both-ends-NAT rendezvous (ADR-010 stage-3+++)', () => {
     bob.close();
   }, 60000);
 });
+
+// ============================================================
+// ADR-010 stage-2 housekeeping — idle learned-peer eviction
+//
+// A relay that dials a peer on demand (because it learned the endpoint via
+// gossip) shouldn't keep that connection forever. With no routing traffic for
+// FEDERATION_LEARNED_PEER_IDLE_MS, the learned peer is evicted (and not
+// reconnected). Configured peers are never evicted.
+// ============================================================
+
+describe('Federation learned-peer eviction (ADR-010 stage-2)', () => {
+  const PC = 19970, PB = 19971, PA = 19972;
+  let rC: childProcess.ChildProcess; let rB: childProcess.ChildProcess; let rA: childProcess.ChildProcess;
+  let dC: string; let dB: string; let dA: string;
+  let pubB: string;
+
+  beforeAll(async () => {
+    dC = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-ev-c-'));
+    dB = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-ev-b-'));
+    dA = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-ev-a-'));
+    const pubC = generateFederationKeyFile(path.join(dC, 'fed-key.json'));
+    pubB = generateFederationKeyFile(path.join(dB, 'fed-key.json'));
+    generateFederationKeyFile(path.join(dA, 'fed-key.json'));
+
+    fs.writeFileSync(path.join(dC, 'fed-peers.json'), JSON.stringify({ peers: [] }));
+    fs.writeFileSync(path.join(dB, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubC, url: `ws://127.0.0.1:${PC}` }] }));
+    fs.writeFileSync(path.join(dA, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubC, url: `ws://127.0.0.1:${PC}` }] }));
+
+    const base = (dir: string, port: number) => ({
+      FEDERATION_MODE: 'open',
+      FEDERATION_KEY_FILE: path.join(dir, 'fed-key.json'),
+      FEDERATION_PEERS_FILE: path.join(dir, 'fed-peers.json'),
+      FEDERATION_GOSSIP_INTERVAL_MS: '1000',
+      FEDERATION_ADVERTISE_URL: `ws://127.0.0.1:${port}`,
+    });
+    rC = await startRelay(PC, dC, base(dC, PC));
+    rB = await startRelay(PB, dB, base(dB, PB));
+    // A evicts a learned peer after just 1.5s idle (sweep runs each gossip tick).
+    rA = await startRelay(PA, dA, { ...base(dA, PA), FEDERATION_LEARNED_PEER_IDLE_MS: '1500' });
+  }, 60000);
+
+  afterAll(async () => {
+    await stopRelays([rC, rB, rA]);
+    for (const d of [dC, dB, dA]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
+  });
+
+  it('evicts a gossip-learned peer after it goes idle (configured peers untouched)', async () => {
+    await waitForMetric(PA, 'meshwhisper_federation_addr_records_known', 3, 40000, 'A learns B via gossip');
+
+    // Route a packet A→B: A dials B on demand (a learned peer) and delivers.
+    const destHash = nodeCrypto.randomBytes(8).toString('hex');
+    const bob = await connectClient(PB, [destHash]);
+    const got = new Promise<void>((resolve) => bob.on('message', (_r: Buffer, isBin: boolean) => { if (isBin) resolve(); }));
+    const alice = await connectClient(PA, []);
+    alice.send(JSON.stringify({ type: 'route', destHash, homeRelay: pubB }));
+    alice.send(buildPacket(destHash, new Uint8Array([1])), { binary: true });
+    await Promise.race([got, new Promise<void>((_, rej) => setTimeout(() => rej(new Error('B never received the packet')), 10000))]);
+
+    // A now holds a learned connection to B (it dialed it). It must connect to
+    // both C (configured) and B (learned) right now.
+    await waitForMetric(PA, 'meshwhisper_federation_discovered_dials_total', 1, 5000, 'A dialed B on demand');
+
+    // After ~1.5s idle with no further traffic to B, A evicts the learned peer.
+    await waitForMetric(PA, 'meshwhisper_federation_learned_peers_evicted_total', 1, 10000, 'A evicts idle learned B');
+
+    // C (configured) is still connected — only the learned peer was evicted.
+    const health = await fetch(`http://127.0.0.1:${PA}/health`).then((r) => r.json()) as Record<string, number>;
+    expect(health.federationPeersConnected).toBeGreaterThanOrEqual(1);
+
+    alice.close();
+    bob.close();
+  }, 40000);
+});
+
+// ============================================================
+// ADR-010 stage-2 housekeeping — gossip pagination
+//
+// A relay's address book can exceed one frame; the gossip must paginate across
+// frames rather than silently truncating. Forced here with a batch cap of 1
+// record per frame: a leaf still learns the full book (self + hub + other leaf
+// = 3 records), which requires multiple frames.
+// ============================================================
+
+describe('Federation gossip pagination (ADR-010 stage-2)', () => {
+  const PH = 19980, PL1 = 19981, PL2 = 19982;
+  let rH: childProcess.ChildProcess; let rL1: childProcess.ChildProcess; let rL2: childProcess.ChildProcess;
+  let dH: string; let dL1: string; let dL2: string;
+
+  beforeAll(async () => {
+    dH = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-pg-h-'));
+    dL1 = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-pg-l1-'));
+    dL2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-pg-l2-'));
+    const pubH = generateFederationKeyFile(path.join(dH, 'fed-key.json'));
+    generateFederationKeyFile(path.join(dL1, 'fed-key.json'));
+    generateFederationKeyFile(path.join(dL2, 'fed-key.json'));
+
+    fs.writeFileSync(path.join(dH, 'fed-peers.json'), JSON.stringify({ peers: [] }));
+    fs.writeFileSync(path.join(dL1, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubH, url: `ws://127.0.0.1:${PH}` }] }));
+    fs.writeFileSync(path.join(dL2, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubH, url: `ws://127.0.0.1:${PH}` }] }));
+
+    // Batch cap of ONE record per gossip frame forces pagination.
+    const base = (dir: string, port: number) => ({
+      FEDERATION_MODE: 'open',
+      FEDERATION_KEY_FILE: path.join(dir, 'fed-key.json'),
+      FEDERATION_PEERS_FILE: path.join(dir, 'fed-peers.json'),
+      FEDERATION_GOSSIP_INTERVAL_MS: '1500',
+      FEDERATION_GOSSIP_BATCH_MAX: '1',
+      FEDERATION_ADVERTISE_URL: `ws://127.0.0.1:${port}`,
+    });
+    rH = await startRelay(PH, dH, base(dH, PH));
+    rL1 = await startRelay(PL1, dL1, base(dL1, PL1));
+    rL2 = await startRelay(PL2, dL2, base(dL2, PL2));
+  }, 60000);
+
+  afterAll(async () => {
+    await stopRelays([rH, rL1, rL2]);
+    for (const d of [dH, dL1, dL2]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
+  });
+
+  it('paginates a multi-record book across frames so all records propagate', async () => {
+    // L1 must learn all 3 records (itself + hub + the other leaf). With a 1-record
+    // frame cap this is only possible if gossip paginates across multiple frames.
+    await waitForMetric(PL1, 'meshwhisper_federation_addr_records_known', 3, 40000, 'L1 learns the full book via paginated gossip');
+    await waitForMetric(PL2, 'meshwhisper_federation_addr_records_known', 3, 40000, 'L2 learns the full book via paginated gossip');
+  }, 50000);
+});

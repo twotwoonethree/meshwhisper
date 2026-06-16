@@ -345,8 +345,27 @@ is the rendezvous both A's side and B's anchor share.
 **What's genuinely left** (no longer "needs a rendezvous" — that's built): a true
 *network partition* with no common backbone relay between the two sides is
 unsolvable by routing alone (it needs out-of-band introduction of a shared peer);
-at one transit hop the anchor still learns the destination (intrinsic — it's
-adjacent); and idle learned-peer eviction + gossip pagination remain housekeeping.
+and at one transit hop the anchor still learns the destination (intrinsic — it's
+adjacent).
+
+### Housekeeping — done (2026-06-16)
+
+- **Idle learned-peer eviction.** On-demand-dialed (gossip-learned) peers are
+  marked `learned` and carry a `lastUsedAt` that advances only on *routing*
+  frames (not heartbeats/gossip). A periodic sweep (on the gossip timer) evicts
+  any learned peer idle past `FEDERATION_LEARNED_PEER_IDLE_MS` (default 5 min) —
+  closing it and suppressing reconnect — so on-demand connections don't
+  accumulate. Configured peers are never evicted. Counter:
+  `meshwhisper_federation_learned_peers_evicted_total`.
+- **Gossip pagination.** `sendAddrGossip` now chunks the address book across as
+  many frames as needed (bounded by frame size and `FEDERATION_GOSSIP_BATCH_MAX`)
+  instead of sending one frame and silently truncating, so a book larger than a
+  single frame fully propagates.
+
+Both are covered by tests (`tests/federation-gossip.test.ts`): a learned peer is
+dialed, goes idle, and is evicted while the configured peer stays; and with a
+1-record-per-frame cap a leaf still learns its full 3-record book (only possible
+if gossip paginates).
 
 ## Privacy analysis (why this is strictly better than both alternatives)
 

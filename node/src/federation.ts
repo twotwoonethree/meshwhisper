@@ -49,6 +49,12 @@ const MAX_TRANSIT_HOPS = parseInt(process.env.FEDERATION_MAX_TRANSIT_HOPS ?? '3'
 // timer so the overlay still converges if any single propagation was delayed or
 // missed (late link establishment, a dropped re-gossip under load). Tunable.
 const GOSSIP_INTERVAL_MS = parseInt(process.env.FEDERATION_GOSSIP_INTERVAL_MS ?? '10000', 10);
+// ADR-010 stage-2: evict a gossip-learned (on-demand-dialed) peer after this
+// long with no routing traffic, so connections don't accumulate forever.
+const LEARNED_PEER_IDLE_MS = parseInt(process.env.FEDERATION_LEARNED_PEER_IDLE_MS ?? '300000', 10); // 5 min
+// ADR-010 stage-2: max address records per gossip frame. Default fits a frame;
+// lower it to force pagination (also a knob for MTU/bandwidth control).
+const GOSSIP_BATCH_MAX = parseInt(process.env.FEDERATION_GOSSIP_BATCH_MAX ?? '1000000', 10);
 
 const MAX_HOPS = parseInt(process.env.FEDERATION_MAX_HOPS ?? '3', 10);
 const MAX_FRAME_BODY = 8192;
@@ -305,6 +311,16 @@ interface PeerState {
    *  file). Removed from the peer map on disconnect so the open-mode cap
    *  frees up; we hold no reconnect responsibility for them. */
   dynamic: boolean;
+  /** ADR-010 stage-2: true for peers we dialed on demand because we learned
+   *  their endpoint via gossip (not configured). Evicted when idle (no routing
+   *  traffic) so connections don't accumulate forever. */
+  learned: boolean;
+  /** ADR-010 stage-2: last time we sent/received a routing frame (forward/
+   *  routed/onion) over this peer — drives idle eviction of learned peers.
+   *  Excludes heartbeats and gossip, which would otherwise keep it fresh. */
+  lastUsedAt: number;
+  /** Set when a learned peer is evicted for idleness, to suppress reconnect. */
+  evicted?: boolean;
   /** Per-peer PacketForward rate limiting (sliding 60s window). */
   frameWindow: { count: number; windowStart: number };
   /** ADR-010 stage-2/3: forwards queued while an on-demand dial to a learned
@@ -357,6 +373,8 @@ export interface FederationStats {
   onionFramesReceivedTotal: number;
   /** ADR-010 stage-3+: onion frames whose innermost layer we delivered locally. */
   onionDeliveredTotal: number;
+  /** ADR-010 stage-2: gossip-learned peers evicted for idleness. */
+  learnedPeersEvictedTotal: number;
 }
 
 // ---- Manager ----
@@ -414,6 +432,7 @@ export class FederationManager {
     onionForwardsSentTotal: 0,
     onionFramesReceivedTotal: 0,
     onionDeliveredTotal: 0,
+    learnedPeersEvictedTotal: 0,
   };
 
   constructor(opts: {
@@ -466,7 +485,7 @@ export class FederationManager {
     });
   }
 
-  private newPeerState(config: PeerConfig, dynamic: boolean): PeerState {
+  private newPeerState(config: PeerConfig, dynamic: boolean, learned = false): PeerState {
     return {
       config,
       ws: null,
@@ -476,6 +495,8 @@ export class FederationManager {
       heartbeatTimer: null,
       lastFrameAt: 0,
       dynamic,
+      learned,
+      lastUsedAt: Date.now(),
       frameWindow: { count: 0, windowStart: 0 },
     };
   }
@@ -505,10 +526,10 @@ export class FederationManager {
     for (const state of this.peers.values()) {
       if (state.config.url) this.dial(state);
     }
-    // Periodic anti-entropy backstop (see GOSSIP_INTERVAL_MS): re-push our book
-    // to every established peer so the overlay converges even if an event-driven
-    // gossip was delayed or missed.
-    this.gossipTimer = setInterval(() => this.periodicGossip(), GOSSIP_INTERVAL_MS);
+    // Periodic maintenance: anti-entropy gossip backstop (re-push our book so the
+    // overlay converges even if an event-driven gossip was delayed/missed) and
+    // idle-eviction of gossip-learned peers.
+    this.gossipTimer = setInterval(() => { this.periodicGossip(); this.evictLearnedIdle(); }, GOSSIP_INTERVAL_MS);
     if (typeof this.gossipTimer.unref === 'function') this.gossipTimer.unref();
   }
 
@@ -520,6 +541,23 @@ export class FederationManager {
         this.sendAddrGossip(peer, records);
       }
     }
+  }
+
+  /** Evict gossip-learned peers with no routing traffic for LEARNED_PEER_IDLE_MS,
+   *  so on-demand connections don't accumulate. Configured peers are untouched. */
+  private evictLearnedIdle(): void {
+    const now = Date.now();
+    for (const [pubkey, state] of this.peers) {
+      if (!state.learned || state.evicted) continue;
+      if (now - state.lastUsedAt <= LEARNED_PEER_IDLE_MS) continue;
+      state.evicted = true; // suppress reconnect
+      if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
+      if (state.heartbeatTimer) { clearInterval(state.heartbeatTimer); state.heartbeatTimer = null; }
+      try { state.ws?.close(); } catch { /* already closed */ }
+      this.peers.delete(pubkey);
+      this.stats.learnedPeersEvictedTotal++;
+    }
+    this.stats.peersConnected = this.connectedPeerCount();
   }
 
   stop(): void {
@@ -730,7 +768,7 @@ export class FederationManager {
   private sendOnionTo(nextHex: string, onionBlob: Buffer): boolean {
     const st = this.peers.get(nextHex);
     if (st?.established && st.ws && st.ws.readyState === WebSocket.OPEN) {
-      try { st.ws.send(encodeFrame(FRAME_PACKET_ONION, onionBlob), { binary: true }); return true; }
+      try { st.ws.send(encodeFrame(FRAME_PACKET_ONION, onionBlob), { binary: true }); st.lastUsedAt = Date.now(); return true; }
       catch { return false; }
     }
     if (this.noDial) return false; // restricted egress — established links only
@@ -747,11 +785,14 @@ export class FederationManager {
   private queueAndDial(pubkeyHex: string, endpoint: string, entry: PendingForward): void {
     let st = this.peers.get(pubkeyHex);
     if (!st) {
-      st = this.newPeerState({ pubkey: pubkeyHex, url: endpoint }, false);
+      // Dialed because we learned the endpoint via gossip — mark `learned` so it
+      // is evicted when idle (configured peers persist; learned ones shouldn't).
+      st = this.newPeerState({ pubkey: pubkeyHex, url: endpoint }, false, true);
       this.peers.set(pubkeyHex, st);
     } else if (!st.config.url) {
       st.config = { ...st.config, url: endpoint };
     }
+    st.lastUsedAt = Date.now();
     (st.pendingForwards ??= []).push(entry);
     if (st.pendingForwards.length > MAX_PENDING_FORWARDS) st.pendingForwards.shift();
     if (!st.ws && !st.reconnectTimer) {
@@ -770,6 +811,7 @@ export class FederationManager {
     try {
       state.ws.send(encodeFrame(FRAME_PACKET_ROUTED, body), { binary: true });
       this.stats.transitForwardsSentTotal++;
+      state.lastUsedAt = Date.now();
       return true;
     } catch {
       return false;
@@ -790,6 +832,7 @@ export class FederationManager {
       state.ws.send(frame, { binary: true });
       this.stats.forwardsSentTotal++;
       this.stats.routedForwardsSentTotal++;
+      state.lastUsedAt = Date.now();
       return true;
     } catch {
       return false;
@@ -832,7 +875,7 @@ export class FederationManager {
   }
 
   private scheduleReconnect(state: PeerState): void {
-    if (this.stopped || !state.config.url || state.reconnectTimer) return;
+    if (this.stopped || state.evicted || !state.config.url || state.reconnectTimer) return;
     const delay = RECONNECT_BACKOFF_MS[Math.min(state.reconnectAttempt, RECONNECT_BACKOFF_MS.length - 1)];
     state.reconnectAttempt++;
     state.reconnectTimer = setTimeout(() => {
@@ -1002,19 +1045,30 @@ export class FederationManager {
     this.flushPending(state);
   }
 
-  /** Send a batch of address records to a peer (as many as fit one frame). */
+  /**
+   * Gossip an address book to a peer, paginated across as many frames as needed
+   * so NO records are dropped (the prior single-frame cap silently truncated
+   * large books). Each frame is bounded by the frame body size and GOSSIP_BATCH_MAX.
+   */
   private sendAddrGossip(state: PeerState, records: AddrRecord[]): void {
     if (records.length === 0 || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-    // Greedily pack records until the JSON would exceed a frame body.
-    const fit: AddrRecord[] = [];
+    const flush = (batch: AddrRecord[]): void => {
+      if (batch.length === 0) return;
+      const body = Buffer.from(JSON.stringify(batch), 'utf8');
+      if (body.length > MAX_FRAME_BODY) return; // can't happen for a single sane record
+      try { state.ws!.send(encodeFrame(FRAME_ADDR_GOSSIP, body), { binary: true }); } catch { /* reaped */ }
+    };
+    let batch: AddrRecord[] = [];
     for (const r of records) {
-      fit.push(r);
-      if (Buffer.byteLength(JSON.stringify(fit)) > MAX_FRAME_BODY - 16) { fit.pop(); break; }
+      batch.push(r);
+      if (batch.length > GOSSIP_BATCH_MAX || Buffer.byteLength(JSON.stringify(batch)) > MAX_FRAME_BODY - 16) {
+        batch.pop();
+        if (batch.length === 0) continue; // a single record exceeds the limit — skip it
+        flush(batch);
+        batch = [r]; // start the next frame with the record that didn't fit
+      }
     }
-    if (fit.length === 0) return;
-    try {
-      state.ws.send(encodeFrame(FRAME_ADDR_GOSSIP, Buffer.from(JSON.stringify(fit), 'utf8')), { binary: true });
-    } catch { /* reaped on close */ }
+    flush(batch);
   }
 
   /** Flush forwards queued while an on-demand dial completed. */
@@ -1059,6 +1113,7 @@ export class FederationManager {
     const packet = frame.body.subarray(17);
 
     this.stats.forwardsReceivedTotal++;
+    fromState.lastUsedAt = Date.now();
 
     if (this.cache.checkAndInsert(packetIdHex)) {
       this.stats.dropsDuplicateTotal++;
@@ -1109,6 +1164,7 @@ export class FederationManager {
     if (body.length < 1 + 32 + 31) return; // hops + target + minimum packet header
     if (this.overRateLimit(fromState)) return;
     this.stats.transitFramesReceivedTotal++;
+    fromState.lastUsedAt = Date.now();
     const hops = body.readUInt8(0);
     if (hops >= MAX_TRANSIT_HOPS) { this.stats.dropsTtlTotal++; return; }
     const targetHex = body.subarray(1, 33).toString('hex');
@@ -1127,6 +1183,7 @@ export class FederationManager {
   private handleOnion(body: Buffer, fromState: PeerState): void {
     if (this.overRateLimit(fromState)) return;
     this.stats.onionFramesReceivedTotal++;
+    fromState.lastUsedAt = Date.now();
     const opened = openOnion(this.key.onionPrivatePkcs8Base64, body);
     if (!opened) return; // not addressed to us / malformed — drop
     if (opened.type === 'deliver') {
