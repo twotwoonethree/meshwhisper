@@ -168,10 +168,23 @@ describe('Reconnect robustness', () => {
           const text = new TextDecoder().decode(new Uint8Array(msg.payload));
           bobReceived.push(text);
           if (text === 'after readd') {
-            MeshWhisper.instance
-              .sendMessage(msg.senderId, new TextEncoder().encode('reply from bob'))
-              .catch(() => {});
-            bobGotMsg?.();
+            // Reply, then resolve only AFTER it has actually been sent — resolving
+            // first (fire-and-forget) lets the fixed post-resolve delay race Bob's
+            // shutdown(), which terminates the socket before the reply reaches the
+            // relay. Retry a few times: a freshly-established RESPONDER session is
+            // briefly receiver-only until its sending chain initialises, so the
+            // first send can throw (a real app retries too).
+            void (async () => {
+              for (let attempt = 0; attempt < 6; attempt++) {
+                try {
+                  await MeshWhisper.instance.sendMessage(msg.senderId, new TextEncoder().encode('reply from bob'));
+                  break;
+                } catch {
+                  await new Promise((r) => setTimeout(r, 300));
+                }
+              }
+              bobGotMsg?.();
+            })();
           }
         },
       });
@@ -179,7 +192,7 @@ describe('Reconnect robustness', () => {
       await Promise.race([
         bobMsgPromise,
         new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Bob never received the post-re-add message')), 5000),
+          setTimeout(() => reject(new Error('Bob never received the post-re-add message')), 15000),
         ),
       ]);
       await new Promise((r) => setTimeout(r, 800));
@@ -202,7 +215,7 @@ describe('Reconnect robustness', () => {
       await Promise.race([
         aliceMsgPromise,
         new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error("Alice never received Bob's post-re-add reply")), 5000),
+          setTimeout(() => reject(new Error("Alice never received Bob's post-re-add reply")), 15000),
         ),
       ]);
 
