@@ -285,6 +285,21 @@ Blocked pubkeys are rejected at handshake regardless of mode. Evicting an alread
 | `FEDERATION_RATE_LIMIT` | `6000` | PacketForward frames accepted per peer per minute (~100/sec); excess silently dropped |
 | `FEDERATION_MAX_HOPS` | `3` | Hop-count cap on forwarded packets |
 
+#### DNS-free relay location ([ADR-010](adr/010-dns-free-relay-location.md), all opt-in)
+
+Unset, the node routes exactly as before (flood + configured URLs). Set these to participate in key-addressed routing, NAT traversal and onion-routed transit:
+
+| Variable | Default | Description |
+|---|---|---|
+| `FEDERATION_ADVERTISE_URL` | *(unset)* | This node's own reachable `ws(s)://` endpoint. When set, it is signed + gossiped so peers can locate this relay **by key, not DNS**, and dial it on demand. A NAT'd node omits it and is reached via its `via` anchors instead |
+| `FEDERATION_ONION_TRANSIT` | `off` | `1`/`true` wraps transit hops in per-hop onion encryption — a transit relay sees only "deliver to relay X", never the packet or destHash |
+| `FEDERATION_ONION_HOPS` | `1` | Extra intermediate relay hops inserted before the anchor in an onion path (clamped 0–4), so a non-adjacent intermediate never learns the destination |
+| `FEDERATION_TRANSIT_ONLY` | `off` | Restricted-egress mode: never dial on demand, route only over the configured uplink. Forces rendezvous/bridge routing for both-ends-NAT topologies |
+| `FEDERATION_GOSSIP_INTERVAL_MS` | `10000` | Periodic anti-entropy: re-push the address book to peers so the overlay self-heals after a dropped gossip |
+| `FEDERATION_LEARNED_PEER_IDLE_MS` | `300000` | Evict a gossip-learned (on-demand-dialed) peer after this long with no routing traffic, so connections don't accumulate. Configured peers are never evicted |
+| `FEDERATION_GOSSIP_BATCH_MAX` | *(fits a frame)* | Max address records per gossip frame; gossip paginates across frames so a large book fully propagates |
+| `FEDERATION_MAX_TRANSIT_HOPS` | `3` | Cap on transit/bridge hops, bounding routed-packet loops/amplification |
+
 ### Behaviour notes
 
 - Federation shares the client-relay port — peers connect with the `meshwhisper-federation.v1` WebSocket subprotocol; no extra port to open.
