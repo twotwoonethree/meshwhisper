@@ -1168,6 +1168,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       federation?.stats.transitForwardsSentTotal ?? 0);
     emit('meshwhisper_federation_transit_frames_received_total', 'Routed frames received and re-dispatched as a transit relay (ADR-010 stage-3)', 'counter',
       federation?.stats.transitFramesReceivedTotal ?? 0);
+    emit('meshwhisper_federation_onion_forwards_sent_total', 'Onion frames originated toward a destination (ADR-010 stage-3+)', 'counter',
+      federation?.stats.onionForwardsSentTotal ?? 0);
+    emit('meshwhisper_federation_onion_frames_received_total', 'Onion frames peeled one layer and re-dispatched/delivered (ADR-010 stage-3+)', 'counter',
+      federation?.stats.onionFramesReceivedTotal ?? 0);
+    emit('meshwhisper_federation_onion_delivered_total', 'Onion frames whose innermost layer was delivered locally (ADR-010 stage-3+)', 'counter',
+      federation?.stats.onionDeliveredTotal ?? 0);
     emit('meshwhisper_federation_forwards_received_total', 'PacketForward frames received from peers', 'counter',
       federation?.stats.forwardsReceivedTotal ?? 0);
     emit('meshwhisper_federation_delivered_locally_total', 'Federation packets delivered to a connected local client', 'counter',
@@ -1674,11 +1680,15 @@ const FEDERATION_RATE_LIMIT = parseInt(process.env.FEDERATION_RATE_LIMIT ?? '600
 // signed + gossiped so peers can locate us by key (DNS-free), and lets us dial
 // gossip-learned relays on demand. Omit to participate passively.
 const FEDERATION_ADVERTISE_URL = process.env.FEDERATION_ADVERTISE_URL;
+// ADR-010 stage-3+: onion-wrap transit hops so a transit relay never sees the
+// packet/destHash, only the next hop. Off by default.
+const FEDERATION_ONION_TRANSIT = /^(1|true|on)$/i.test(process.env.FEDERATION_ONION_TRANSIT ?? '');
 
 const federation: FederationManager | null = federationMode !== 'off'
   ? new FederationManager({
       key: loadOrCreateFederationKey(FEDERATION_KEY_FILE),
       peers: federationPeersConfig,
+      ...(FEDERATION_ONION_TRANSIT ? { onionTransit: true } : {}),
       mode: federationMode,
       blockedPubkeys: loadBlocklist(FEDERATION_BLOCKLIST_FILE),
       maxPeers: FEDERATION_MAX_PEERS,

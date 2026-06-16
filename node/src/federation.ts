@@ -22,6 +22,7 @@ import * as nodeCrypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { IncomingMessage } from 'node:http';
+import { generateOnionKeypair, sealOnion, openOnion } from './onion.js';
 
 export const FEDERATION_SUBPROTOCOL = 'meshwhisper-federation.v1';
 
@@ -32,10 +33,11 @@ const FRAME_PACKET_FORWARD = 0x01;
 const FRAME_HEARTBEAT = 0x02;
 const FRAME_ADDR_GOSSIP = 0x03; // ADR-010 stage-2: signed relay address records
 const FRAME_PACKET_ROUTED = 0x04; // ADR-010 stage-3: "deliver to relay X" (one transit hop)
+const FRAME_PACKET_ONION = 0x05;  // ADR-010 stage-3+: a layered onion (transit-hop privacy)
 
 // ADR-010 stage-2 bounds. Address records are public relay infrastructure,
 // so the only risk is resource exhaustion — keep the book and frames bounded.
-const ADDR_PROTO = 'meshwhisper-addr.v2'; // v2 adds the optional `via` transit anchors
+const ADDR_PROTO = 'meshwhisper-addr.v3'; // v3 adds the optional `onionKey` (X25519)
 const MAX_ADDR_BOOK = 4096;          // learned relay endpoints we retain
 const MAX_PENDING_FORWARDS = 64;     // packets queued while an on-demand dial completes
 const ADDR_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // ignore records older than a week
@@ -64,39 +66,51 @@ const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 export interface FederationKey {
   publicKeyHex: string;
   privateKey: nodeCrypto.KeyObject;
+  /** ADR-010 stage-3+: X25519 onion keypair for peeling transit-onion layers. */
+  onionPublicKeyHex: string;
+  onionPrivatePkcs8Base64: string;
+}
+
+interface StoredFederationKey {
+  publicKeyHex: string;
+  privateKeyPkcs8Base64: string;
+  onionPublicKeyHex?: string;
+  onionPrivatePkcs8Base64?: string;
 }
 
 /**
  * Load the node's federation keypair from `keyPath`, generating and
  * persisting a fresh one if the file doesn't exist. Stored shape:
- * { publicKeyHex, privateKeyPkcs8Base64 }.
+ * { publicKeyHex, privateKeyPkcs8Base64, onionPublicKeyHex, onionPrivatePkcs8Base64 }.
+ * Existing files without onion keys are migrated in place (keys added, signed
+ * identity preserved).
  */
 export function loadOrCreateFederationKey(keyPath: string): FederationKey {
+  let stored: StoredFederationKey;
   if (fs.existsSync(keyPath)) {
-    const raw = JSON.parse(fs.readFileSync(keyPath, 'utf8')) as {
-      publicKeyHex: string;
-      privateKeyPkcs8Base64: string;
-    };
-    const privateKey = nodeCrypto.createPrivateKey({
-      key: Buffer.from(raw.privateKeyPkcs8Base64, 'base64'),
-      format: 'der',
-      type: 'pkcs8',
-    });
-    return { publicKeyHex: raw.publicKeyHex, privateKey };
+    stored = JSON.parse(fs.readFileSync(keyPath, 'utf8')) as StoredFederationKey;
+  } else {
+    const { publicKey, privateKey } = nodeCrypto.generateKeyPairSync('ed25519');
+    const spki = publicKey.export({ format: 'der', type: 'spki' }) as Buffer;
+    const pkcs8 = privateKey.export({ format: 'der', type: 'pkcs8' }) as Buffer;
+    stored = { publicKeyHex: spki.subarray(spki.length - 32).toString('hex'), privateKeyPkcs8Base64: pkcs8.toString('base64') };
   }
 
-  const { publicKey, privateKey } = nodeCrypto.generateKeyPairSync('ed25519');
-  const spki = publicKey.export({ format: 'der', type: 'spki' }) as Buffer;
-  const publicKeyHex = spki.subarray(spki.length - 32).toString('hex');
-  const pkcs8 = privateKey.export({ format: 'der', type: 'pkcs8' }) as Buffer;
+  // Add the onion keypair if missing (fresh key, or migrating a stage-1/2 file).
+  if (!stored.onionPublicKeyHex || !stored.onionPrivatePkcs8Base64) {
+    const onion = generateOnionKeypair();
+    stored.onionPublicKeyHex = onion.publicKeyHex;
+    stored.onionPrivatePkcs8Base64 = onion.privatePkcs8Base64;
+    fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+    fs.writeFileSync(keyPath, JSON.stringify(stored, null, 2), { mode: 0o600 });
+  }
 
-  fs.mkdirSync(path.dirname(keyPath), { recursive: true });
-  fs.writeFileSync(keyPath, JSON.stringify({
-    publicKeyHex,
-    privateKeyPkcs8Base64: pkcs8.toString('base64'),
-  }, null, 2), { mode: 0o600 });
-
-  return { publicKeyHex, privateKey };
+  return {
+    publicKeyHex: stored.publicKeyHex,
+    privateKey: nodeCrypto.createPrivateKey({ key: Buffer.from(stored.privateKeyPkcs8Base64, 'base64'), format: 'der', type: 'pkcs8' }),
+    onionPublicKeyHex: stored.onionPublicKeyHex,
+    onionPrivatePkcs8Base64: stored.onionPrivatePkcs8Base64,
+  };
 }
 
 // ---- Peers config ----
@@ -120,13 +134,14 @@ export interface AddrRecord {
   endpoint?: string; // ws:// URL the relay is directly reachable at — absent if NAT'd
   via?: string[];    // ADR-010 stage-3: transit-anchor pubkeys this relay holds a
                      // persistent outbound link to; how to reach it when endpoint-less
+  onionKey?: string; // ADR-010 stage-3+: hex X25519 onion key — seal transit layers to it
   ts: number;        // ms epoch — LWW tiebreak
   sig: string;       // hex ed25519 signature over the canonical bytes
 }
 
-function buildAddrCanonical(pubkeyHex: string, endpoint: string, ts: number, via: string[] = []): Buffer {
+function buildAddrCanonical(pubkeyHex: string, endpoint: string, ts: number, via: string[] = [], onionKey = ''): Buffer {
   // `via` is sorted so signer and verifier agree regardless of array order.
-  return Buffer.from([ADDR_PROTO, pubkeyHex, endpoint, String(ts), [...via].sort().join(',')].join('\n'), 'utf8');
+  return Buffer.from([ADDR_PROTO, pubkeyHex, endpoint, String(ts), [...via].sort().join(','), onionKey].join('\n'), 'utf8');
 }
 
 /** Load { peers: [...] } from `peersPath`. Missing file = no peers = federation dormant. */
@@ -298,6 +313,8 @@ interface PendingForward {
   packet: Buffer;
   /** When set, send a routed (transit) frame for this final target via this peer. */
   routedTarget?: string;
+  /** When set, send this pre-built onion blob to this peer (ADR-010 stage-3+). */
+  onionBlob?: Buffer;
   hops: number;
 }
 
@@ -329,6 +346,12 @@ export interface FederationStats {
   /** ADR-010 stage-3: routed (transit) frames we received and re-dispatched as
    *  the transit relay. */
   transitFramesReceivedTotal: number;
+  /** ADR-010 stage-3+: onion frames we originated toward a destination. */
+  onionForwardsSentTotal: number;
+  /** ADR-010 stage-3+: onion frames we peeled one layer of and re-dispatched. */
+  onionFramesReceivedTotal: number;
+  /** ADR-010 stage-3+: onion frames whose innermost layer we delivered locally. */
+  onionDeliveredTotal: number;
 }
 
 // ---- Manager ----
@@ -350,6 +373,9 @@ export class FederationManager {
   // gossip address book mapping relay pubkey → newest known signed record.
   private readonly advertiseUrl: string | null;
   private readonly addrBook = new Map<string, AddrRecord>();
+  // ADR-010 stage-3+: when true, transit through an anchor is wrapped in an
+  // onion so the anchor sees only "deliver to B", never the packet/destHash.
+  private readonly onionTransit: boolean;
 
   readonly stats: FederationStats = {
     peersConfigured: 0,
@@ -370,6 +396,9 @@ export class FederationManager {
     discoveredDialsTotal: 0,
     transitForwardsSentTotal: 0,
     transitFramesReceivedTotal: 0,
+    onionForwardsSentTotal: 0,
+    onionFramesReceivedTotal: 0,
+    onionDeliveredTotal: 0,
   };
 
   constructor(opts: {
@@ -389,6 +418,9 @@ export class FederationManager {
      *  it is signed + gossiped so peers can route to us by key, and lets us
      *  dial gossip-learned relays on demand. Omit to stay gossip-passive. */
     advertiseUrl?: string;
+    /** ADR-010 stage-3+: onion-wrap transit hops so the transit relay never
+     *  sees the packet/destHash, only the next hop. Default off. */
+    onionTransit?: boolean;
   }) {
     this.key = opts.key;
     this.classifyLocal = opts.classifyLocal;
@@ -397,6 +429,7 @@ export class FederationManager {
     this.maxPeers = opts.maxPeers ?? 64;
     this.rateLimitPerMin = opts.rateLimitPerMin ?? 6000; // ≈100 frames/sec
     this.advertiseUrl = opts.advertiseUrl ?? null;
+    this.onionTransit = opts.onionTransit ?? false;
     this.allowedPubkeys = new Set(opts.peers.map((p) => p.pubkey));
     for (const p of opts.peers) {
       this.peers.set(p.pubkey, this.newPeerState(p, false));
@@ -434,11 +467,13 @@ export class FederationManager {
     if (this.advertiseUrl || via.length > 0) {
       const ts = Date.now();
       const endpoint = this.advertiseUrl ?? '';
-      const sig = nodeCrypto.sign(null, buildAddrCanonical(this.key.publicKeyHex, endpoint, ts, via), this.key.privateKey);
+      const onionKey = this.key.onionPublicKeyHex;
+      const sig = nodeCrypto.sign(null, buildAddrCanonical(this.key.publicKeyHex, endpoint, ts, via, onionKey), this.key.privateKey);
       this.addrBook.set(this.key.publicKeyHex, {
         pubkey: this.key.publicKeyHex,
         ...(this.advertiseUrl ? { endpoint: this.advertiseUrl } : {}),
         ...(via.length > 0 ? { via } : {}),
+        onionKey,
         ts, sig: sig.toString('hex'),
       });
       this.stats.addrRecordsKnown = this.addrBook.size;
@@ -520,25 +555,54 @@ export class FederationManager {
     }
 
     // 3. NAT'd / endpoint-less — route through a transit anchor (stage 3). The
-    // anchor is a relay the target holds a persistent outbound link to; we ask
-    // it to forwardToRelay onward, which bottoms out at a plain forward to the
-    // target over that link.
+    // anchor is a relay the target holds a persistent outbound link to.
     for (const transitHex of addr.via ?? []) {
       if (transitHex === this.key.publicKeyHex) continue;
+      const tAddr = this.addrBook.get(transitHex);
+
+      // 3a. Onion transit (stage 3+): wrap the packet in a layer for the anchor
+      // and an inner layer for the target. The anchor peels only its layer —
+      // it learns "deliver to B" but never sees the packet or the destHash.
+      if (this.onionTransit && addr.onionKey && tAddr?.onionKey) {
+        const onion = sealOnion(
+          [{ pubkey: transitHex, onionKey: tAddr.onionKey }, { pubkey: targetPubkeyHex, onionKey: addr.onionKey }],
+          Buffer.from(packet),
+        );
+        if (onion.byteLength <= MAX_FRAME_BODY && this.sendOnionTo(transitHex, onion)) {
+          this.stats.onionForwardsSentTotal++;
+          return true;
+        }
+        continue;
+      }
+
+      // 3b. Cleartext routed transit (stage 3): ask the anchor to forwardToRelay
+      // onward, which bottoms out at a plain forward over its link to the target.
       const tState = this.peers.get(transitHex);
       if (tState?.established && tState.ws && tState.ws.readyState === WebSocket.OPEN) {
         if (this.sendRouted(tState, targetPubkeyHex, packet, hops + 1)) return true;
         continue;
       }
-      // Transit anchor not connected but publicly dialable — dial it, then send
-      // the routed frame once the link is up.
-      const tAddr = this.addrBook.get(transitHex);
       if (tAddr?.endpoint) {
         this.queueAndDial(transitHex, tAddr.endpoint, { packet: Buffer.from(packet), routedTarget: targetPubkeyHex, hops: hops + 1 });
         return true;
       }
     }
     return false; // no reachable path — caller floods
+  }
+
+  /** Send a pre-built onion to its first hop — connected peer now, else dial. */
+  private sendOnionTo(nextHex: string, onionBlob: Buffer): boolean {
+    const st = this.peers.get(nextHex);
+    if (st?.established && st.ws && st.ws.readyState === WebSocket.OPEN) {
+      try { st.ws.send(encodeFrame(FRAME_PACKET_ONION, onionBlob), { binary: true }); return true; }
+      catch { return false; }
+    }
+    const addr = this.addrBook.get(nextHex);
+    if (addr?.endpoint) {
+      this.queueAndDial(nextHex, addr.endpoint, { packet: Buffer.alloc(0), onionBlob, hops: 0 });
+      return true;
+    }
+    return false;
   }
 
   /** Ensure a peer state exists with a dial URL, queue a pending forward, and
@@ -822,8 +886,13 @@ export class FederationManager {
     if (!queued || queued.length === 0) return;
     state.pendingForwards = [];
     for (const e of queued) {
-      if (e.routedTarget) this.sendRouted(state, e.routedTarget, e.packet, e.hops);
-      else this.sendForwardFrame(state, e.packet);
+      if (e.onionBlob) {
+        try { state.ws?.send(encodeFrame(FRAME_PACKET_ONION, e.onionBlob), { binary: true }); } catch { /* reaped */ }
+      } else if (e.routedTarget) {
+        this.sendRouted(state, e.routedTarget, e.packet, e.hops);
+      } else {
+        this.sendForwardFrame(state, e.packet);
+      }
     }
   }
 
@@ -839,6 +908,8 @@ export class FederationManager {
     if (frame.frameType === FRAME_ADDR_GOSSIP) { this.handleAddrGossip(frame.body, fromState); return; }
 
     if (frame.frameType === FRAME_PACKET_ROUTED) { this.handleRoutedForward(frame.body, fromState); return; }
+
+    if (frame.frameType === FRAME_PACKET_ONION) { this.handleOnion(frame.body, fromState); return; }
 
     if (frame.frameType !== FRAME_PACKET_FORWARD) return; // unknown type — ignore (forward-compat)
     if (frame.body.length < 17 + 31) return; // packetId + forwardCount + minimum packet header
@@ -909,6 +980,30 @@ export class FederationManager {
   }
 
   /**
+   * ADR-010 stage-3+: peel one onion layer with our X25519 onion key. A
+   * `forward` layer names only the next hop (the inner remains sealed to it, so
+   * we — a transit relay — never see the packet or its destHash); we send the
+   * inner onion onward. A `deliver` layer is the innermost, openable only by the
+   * destination relay, and carries the actual packet for local delivery. A layer
+   * that isn't ours fails to open and is dropped.
+   */
+  private handleOnion(body: Buffer, fromState: PeerState): void {
+    if (this.overRateLimit(fromState)) return;
+    this.stats.onionFramesReceivedTotal++;
+    const opened = openOnion(this.key.onionPrivatePkcs8Base64, body);
+    if (!opened) return; // not addressed to us / malformed — drop
+    if (opened.type === 'deliver') {
+      this.stats.onionDeliveredTotal++;
+      const outcome = this.classifyLocal(opened.inner);
+      if (outcome === 'delivered') this.stats.deliveredLocallyTotal++;
+      else if (outcome === 'stored') this.stats.storedLocallyTotal++;
+      return;
+    }
+    // forward: re-dispatch the inner onion to the next hop (no plaintext target).
+    this.sendOnionTo(opened.next, opened.inner);
+  }
+
+  /**
    * ADR-010 stage-2: ingest gossiped address records. Each is verified against
    * the claimed pubkey's signature (un-forgeable for another relay), merged
    * LWW by timestamp, and — if genuinely new/newer — re-gossiped to our other
@@ -938,6 +1033,8 @@ export class FederationManager {
         via = r.via;
       }
       if (!r.endpoint && (!via || via.length === 0)) continue; // record offers no way to reach the relay
+      // onionKey (X25519) is optional — validate when present.
+      if (r.onionKey !== undefined && (typeof r.onionKey !== 'string' || !/^[0-9a-f]{64}$/.test(r.onionKey))) continue;
       if (typeof r.ts !== 'number' || !Number.isFinite(r.ts)) continue;
       if (typeof r.sig !== 'string' || !/^[0-9a-f]{128}$/.test(r.sig)) continue;
       if (r.pubkey === this.key.publicKeyHex) continue;       // never let a peer overwrite our own record
@@ -945,7 +1042,7 @@ export class FederationManager {
 
       // Signature must verify against the claimed pubkey — this is what makes
       // the record self-certifying and un-spoofable for another relay.
-      if (!verifyWithRawPubkey(r.pubkey, buildAddrCanonical(r.pubkey, r.endpoint ?? '', r.ts, via ?? []), Buffer.from(r.sig, 'hex'))) continue;
+      if (!verifyWithRawPubkey(r.pubkey, buildAddrCanonical(r.pubkey, r.endpoint ?? '', r.ts, via ?? [], r.onionKey ?? ''), Buffer.from(r.sig, 'hex'))) continue;
 
       const existing = this.addrBook.get(r.pubkey);
       if (existing && existing.ts >= r.ts) continue;          // LWW: keep the newest
@@ -954,6 +1051,7 @@ export class FederationManager {
         pubkey: r.pubkey, ts: r.ts, sig: r.sig,
         ...(r.endpoint ? { endpoint: r.endpoint } : {}),
         ...(via ? { via } : {}),
+        ...(r.onionKey ? { onionKey: r.onionKey } : {}),
       };
       this.addrBook.set(r.pubkey, rec);
       this.stats.addrRecordsLearnedTotal++;

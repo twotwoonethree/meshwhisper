@@ -226,12 +226,60 @@ incremented, A's `discovered_dials` still **zero** (it never dialed B), and T's
 endpoint are still dialed directly (stages 1–2); all prior federation /
 cross-operator / cross-namespace / integration tests stay green.
 
-**The honest remaining gaps** (genuinely hard, deliberately out of this stage):
-*transit-hop privacy* — the routed frame names the target relay in cleartext to
-the transit anchor, so onion-layering the hops is still needed before transit is
-metadata-private; *both-ends-NAT'd with no common public anchor* is unsolved
-(needs a shared rendezvous, the residual hard case); and *idle learned-peer
-eviction* + *gossip pagination beyond one frame* remain housekeeping follow-ups.
+**The honest remaining gaps** (deliberately out of this stage): *transit-hop
+privacy* — the routed frame names the target relay in cleartext to the transit
+anchor (addressed by the onion stage below); *both-ends-NAT'd with no common
+public anchor* is unsolved (needs a shared rendezvous, the residual hard case);
+and *idle learned-peer eviction* + *gossip pagination beyond one frame* remain
+housekeeping follow-ups.
+
+## Stage-3+ — onion-routed transit, landed & proven (2026-06-16)
+
+The cleartext routed frame above names the target relay (and forwards the packet
+*with its destHash*) to the transit anchor — so the anchor learns who the packet
+is for. Onion routing closes that: each hop peels only its own layer, learning
+only the next hop, never the packet. Implemented in `node/src/onion.ts` +
+`FederationManager` (`tests/onion.test.ts` and the onion transit test in
+`tests/federation-gossip.test.ts`):
+
+- **Per-relay X25519 onion key.** Each relay holds an onion keypair (added to the
+  federation key file, migrated in place) and advertises the public half as
+  `onionKey` in its signed address record (canonical bumped to
+  `meshwhisper-addr.v3`).
+- **Layered sealed boxes.** `sealOnion(path, packet)` nests one layer per hop:
+  each layer is an anonymous sealed box (ephemeral X25519 → ECDH with the hop's
+  onion key → HKDF-SHA256 → AES-256-GCM). A `forward` layer reveals only the next
+  hop's id; the innermost `deliver` layer — openable solely by the destination —
+  carries the packet. The sender is unauthenticated to each hop (sealed-box), so
+  an intermediate can't learn the origin either.
+- **`FRAME_PACKET_ONION` + `handleOnion`.** A relay peels exactly one layer with
+  its onion key: `forward` → send the still-sealed inner onward; `deliver` →
+  `classifyLocal` the packet; un-openable (not ours) → drop. Onion depth is
+  finite and shrinks each hop, so no hop counter is needed; size-bounded by the
+  frame and rate-limited like every other frame.
+- **Opt-in transit encoding.** With `FEDERATION_ONION_TRANSIT=1`, the stage-3
+  transit tier wraps the hop in a 2-layer onion `[anchor, target]` instead of the
+  cleartext routed frame — so **the anchor now sees only "deliver to B", never
+  the packet or its destHash.** Off by default (cleartext routed); fully
+  backward-compatible.
+- **Observable.** `…_onion_forwards_sent_total`, `…_onion_frames_received_total`,
+  `…_onion_delivered_total`.
+
+Two proofs. The unit test seals a 3-hop onion and shows each hop peels exactly
+one layer, sees only its successor, and that a **middle hop's entire view
+excludes the final destination and the packet** (a stranger's key can't open a
+layer at all). The integration test re-runs the NAT topology with onion on: the
+packet reaches the NAT-bound B, while the transit relay T's `delivered`/`stored`
+counters stay **zero** — T peeled and forwarded an opaque onion and never held a
+deliverable packet — and only B's `onion_delivered` increments. The whole suite
+(386 tests) stays green.
+
+The residual privacy note: at a single transit hop the anchor is adjacent to the
+destination, so it necessarily learns B — onion's gain there is hiding the
+*destHash/packet*. Hiding the destination *relay* from an intermediate requires
+≥2 transit hops, which the sealing supports (proven in the unit test) but which
+needs topology-aware path *selection* over the gossip graph to drive
+automatically — that path-selection layer is the next step, not built here.
 
 ## Privacy analysis (why this is strictly better than both alternatives)
 
