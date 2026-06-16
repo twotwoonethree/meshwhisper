@@ -314,9 +314,39 @@ the LWW merge means a stable book re-push is a cheap no-op (no storm). This is
 standard gossip/anti-entropy design and removed the only remaining source of
 convergence flakiness.
 
-The remaining hard case is unchanged: *both-ends-NAT'd with no common public
-anchor* (needs a shared rendezvous); and at one transit hop the anchor still
-learns the destination (intrinsic — it's adjacent).
+## Stage-3+++ — both-ends-NAT rendezvous (bridge routing), landed & proven (2026-06-16)
+
+The residual hard case: the **sender's** relay has restricted egress (it can hold
+only its one configured uplink — corporate firewall, single-tunnel policy — and
+cannot dial arbitrary relays), and the **recipient's** home relay is NAT'd. The
+sender can't dial the recipient's anchor; delivery must ride existing federation
+links, bridged through a common backbone relay both sides reach. Implemented in
+`FederationManager` (the rendezvous test in `tests/federation-gossip.test.ts`):
+
+- **Restricted-egress mode** (`FEDERATION_TRANSIT_ONLY`): the relay never dials
+  on demand for forwarding — every dial site (`forwardToRelay` tiers, `sendOnionTo`)
+  is gated, so it routes only over its already-established links.
+- **Topology path-finding** (`selectOnionPath` → `findBridge`): when no anchor is
+  *directly* reachable, BFS the gossip graph — edges derived from records
+  (`endpoint` = dialable, `via` = a held link in either direction) — for a chain
+  of onion-capable relays from one we can reach to an anchor, bounded by
+  `MAX_TRANSIT_HOPS`. The onion is then sealed over `[bridge…, anchor, target]`.
+- A directly-reachable anchor still takes the simple path (with optional privacy
+  hops); the BFS bridge is the fallback that lights up only when egress is
+  restricted or the anchor is otherwise unreachable.
+
+Proof: a 4-relay topology `A → R ← T_B ← B`, where A is no-dial and B is NAT'd.
+A can't reach B's anchor T_B; it finds `[R, T_B, B]` over the topology, hands the
+onion to its uplink R (established link, **`discovered_dials` stays zero — A never
+opens a connection**), R bridges to T_B, T_B delivers to B — with R and T_B both
+peeling + forwarding opaque onions (no local delivery) and only B delivering. R
+is the rendezvous both A's side and B's anchor share.
+
+**What's genuinely left** (no longer "needs a rendezvous" — that's built): a true
+*network partition* with no common backbone relay between the two sides is
+unsolvable by routing alone (it needs out-of-band introduction of a shared peer);
+at one transit hop the anchor still learns the destination (intrinsic — it's
+adjacent); and idle learned-peer eviction + gossip pagination remain housekeeping.
 
 ## Privacy analysis (why this is strictly better than both alternatives)
 

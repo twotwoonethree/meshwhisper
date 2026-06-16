@@ -386,6 +386,11 @@ export class FederationManager {
   // the anchor when building an onion path, so a non-adjacent intermediate
   // never learns the destination relay. 0 = minimal [anchor, target] path.
   private readonly onionHops: number;
+  // ADR-010 stage-3+++: restricted-egress mode. When true, this relay never
+  // dials on demand for forwarding — it routes only over its already-established
+  // links (its configured uplink). Models a relay behind a firewall that permits
+  // just one persistent outbound connection; forces rendezvous/bridge routing.
+  private readonly noDial: boolean;
 
   readonly stats: FederationStats = {
     peersConfigured: 0,
@@ -435,6 +440,9 @@ export class FederationManager {
      *  when building an onion path (hides the destination relay from
      *  non-adjacent intermediates). Default 1; clamped to [0, 4]. */
     onionHops?: number;
+    /** ADR-010 stage-3+++: restricted egress — never dial on demand for
+     *  forwarding; route only over established links. Default false. */
+    noDial?: boolean;
   }) {
     this.key = opts.key;
     this.classifyLocal = opts.classifyLocal;
@@ -445,6 +453,7 @@ export class FederationManager {
     this.advertiseUrl = opts.advertiseUrl ?? null;
     this.onionTransit = opts.onionTransit ?? false;
     this.onionHops = Math.max(0, Math.min(4, opts.onionHops ?? 1));
+    this.noDial = opts.noDial ?? false;
     this.allowedPubkeys = new Set(opts.peers.map((p) => p.pubkey));
     for (const p of opts.peers) {
       this.peers.set(p.pubkey, this.newPeerState(p, false));
@@ -579,8 +588,9 @@ export class FederationManager {
     const addr = this.addrBook.get(targetPubkeyHex);
     if (!addr) return false; // wholly unknown — caller floods
 
-    // 2. Directly dialable endpoint — on-demand dial (stage 2).
-    if (addr.endpoint) {
+    // 2. Directly dialable endpoint — on-demand dial (stage 2). Skipped under
+    //    restricted egress (we route only over established links).
+    if (addr.endpoint && !this.noDial) {
       this.queueAndDial(targetPubkeyHex, addr.endpoint, { packet: Buffer.from(packet), hops });
       return true;
     }
@@ -612,7 +622,7 @@ export class FederationManager {
         if (this.sendRouted(tState, targetPubkeyHex, packet, hops + 1)) return true;
         continue;
       }
-      if (tAddr?.endpoint) {
+      if (tAddr?.endpoint && !this.noDial) {
         this.queueAndDial(transitHex, tAddr.endpoint, { packet: Buffer.from(packet), routedTarget: targetPubkeyHex, hops: hops + 1 });
         return true;
       }
@@ -630,25 +640,79 @@ export class FederationManager {
   private selectOnionPath(targetPubkeyHex: string): OnionHop[] | null {
     const target = this.addrBook.get(targetPubkeyHex);
     if (!target?.onionKey) return null;
+    const toHop = (r: AddrRecord): OnionHop => ({ pubkey: r.pubkey, onionKey: r.onionKey! });
 
-    // Terminal anchor: an onion-capable relay in target.via (not us).
-    let anchor: AddrRecord | undefined;
-    for (const v of target.via ?? []) {
-      const rec = this.addrBook.get(v);
-      if (rec?.onionKey && v !== this.key.publicKeyHex) { anchor = rec; break; }
+    // Onion-capable anchors that hold the target's inbound link.
+    const anchors = (target.via ?? [])
+      .map((v) => this.addrBook.get(v))
+      .filter((r): r is AddrRecord => !!r?.onionKey && r.pubkey !== this.key.publicKeyHex);
+    if (anchors.length === 0) return null;
+
+    // Case A — an anchor we can reach directly: insert optional random privacy
+    // hops, then [anchor, target]. (Hides the destination from intermediaries.)
+    const directAnchor = anchors.find((a) => this.canReachDirectly(a.pubkey));
+    if (directAnchor) {
+      const exclude = new Set([this.key.publicKeyHex, targetPubkeyHex, directAnchor.pubkey]);
+      const candidates = [...this.addrBook.values()].filter((r) => r.onionKey && this.canReachDirectly(r.pubkey) && !exclude.has(r.pubkey));
+      const path: OnionHop[] = this.pickRandom(candidates, this.onionHops).map(toHop);
+      path.push(toHop(directAnchor), { pubkey: targetPubkeyHex, onionKey: target.onionKey });
+      return path;
     }
-    if (!anchor) return null; // can't reach a NAT'd target without a usable anchor
 
-    // Intermediates: public, onion-capable relays — not us, the target, or the anchor.
-    const exclude = new Set([this.key.publicKeyHex, targetPubkeyHex, anchor.pubkey]);
-    const candidates = [...this.addrBook.values()].filter((r) => r.endpoint && r.onionKey && !exclude.has(r.pubkey));
-    const intermediates = this.pickRandom(candidates, this.onionHops);
+    // Case B — both-ends-NAT / restricted egress: we can't reach any anchor
+    // directly, so BFS the gossip topology for a bridge of relays we CAN reach,
+    // ending at an anchor. The bridge rides existing federation links to a
+    // common backbone relay (the rendezvous) that bridges to the target's anchor.
+    for (const anchor of anchors) {
+      const bridge = this.findBridge(anchor.pubkey);
+      if (bridge) {
+        const path = bridge.map((h) => toHop(this.addrBook.get(h)!));
+        path.push({ pubkey: targetPubkeyHex, onionKey: target.onionKey });
+        return path;
+      }
+    }
+    return null;
+  }
 
-    const path: OnionHop[] = [];
-    for (const r of intermediates) path.push({ pubkey: r.pubkey, onionKey: r.onionKey! });
-    path.push({ pubkey: anchor.pubkey, onionKey: anchor.onionKey! });
-    path.push({ pubkey: targetPubkeyHex, onionKey: target.onionKey });
-    return path;
+  /** Can we hand a frame to this relay right now? Connected, or (unless egress
+   *  is restricted) dialable via a known endpoint. */
+  private canReachDirectly(pubkeyHex: string): boolean {
+    if (this.peers.get(pubkeyHex)?.established) return true;
+    return !this.noDial && !!this.addrBook.get(pubkeyHex)?.endpoint;
+  }
+
+  /** Topology edge: can relay `from` forward to relay `to`? True if they share a
+   *  link (either dials the other) or `to` is publicly dialable. */
+  private canReach(fromHex: string, toHex: string): boolean {
+    const fromRec = this.addrBook.get(fromHex);
+    const toRec = this.addrBook.get(toHex);
+    if (!toRec) return false;
+    return !!toRec.endpoint || !!fromRec?.via?.includes(toHex) || !!toRec.via?.includes(fromHex);
+  }
+
+  /**
+   * ADR-010 stage-3+++: BFS the gossip topology for a chain of onion-capable
+   * relays from one we can reach directly to `anchorHex`, bounded by
+   * MAX_TRANSIT_HOPS. Returns the chain of pubkeys [reachable…, anchor], or null.
+   */
+  private findBridge(anchorHex: string): string[] | null {
+    const onionRelays = [...this.addrBook.values()].filter((r) => r.onionKey && r.pubkey !== this.key.publicKeyHex);
+    const queue: string[][] = onionRelays.filter((r) => this.canReachDirectly(r.pubkey)).map((r) => [r.pubkey]);
+    const visited = new Set<string>(queue.map((p) => p[0]));
+    while (queue.length > 0) {
+      const path = queue.shift()!;
+      const head = path[path.length - 1];
+      if (head === anchorHex) return path;
+      if (path.length >= MAX_TRANSIT_HOPS) continue;
+      for (const cand of onionRelays) {
+        if (visited.has(cand.pubkey)) continue;
+        if (this.canReach(head, cand.pubkey)) {
+          visited.add(cand.pubkey);
+          queue.push([...path, cand.pubkey]);
+        }
+      }
+    }
+    return null;
   }
 
   /** Pick up to n distinct random elements (Fisher-Yates partial draw). */
@@ -661,13 +725,15 @@ export class FederationManager {
     return out;
   }
 
-  /** Send a pre-built onion to its first hop — connected peer now, else dial. */
+  /** Send a pre-built onion to its first hop — connected peer now, else (unless
+   *  egress is restricted) dial it on demand. */
   private sendOnionTo(nextHex: string, onionBlob: Buffer): boolean {
     const st = this.peers.get(nextHex);
     if (st?.established && st.ws && st.ws.readyState === WebSocket.OPEN) {
       try { st.ws.send(encodeFrame(FRAME_PACKET_ONION, onionBlob), { binary: true }); return true; }
       catch { return false; }
     }
+    if (this.noDial) return false; // restricted egress — established links only
     const addr = this.addrBook.get(nextHex);
     if (addr?.endpoint) {
       this.queueAndDial(nextHex, addr.endpoint, { packet: Buffer.alloc(0), onionBlob, hops: 0 });

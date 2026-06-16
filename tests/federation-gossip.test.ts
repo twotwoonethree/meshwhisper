@@ -477,3 +477,98 @@ describe('Federation onion path selection (ADR-010 stage-3++)', () => {
     bob.close();
   }, 60000);
 });
+
+// ============================================================
+// ADR-010 stage-3+++ — both-ends-NAT rendezvous (bridge routing)
+//
+// The hard residual case: the SENDER's relay A has restricted egress (it can
+// hold only its one configured uplink — FEDERATION_TRANSIT_ONLY — and cannot
+// dial arbitrary relays), and the RECIPIENT's home relay B is NAT'd. A cannot
+// dial B's anchor T_B directly. Delivery must ride existing federation links,
+// bridged through a common backbone relay R that both A's side and B's anchor
+// connect to — discovered by BFS over the gossip topology.
+//
+//   A ──dials──▶ R ◀──dials── T_B ◀──dials── B     A: no-dial; B: NAT'd
+//
+// Path found: [R, T_B, B]. A hands the onion to its uplink R (established link,
+// no dial); R bridges to T_B; T_B delivers to B. A never opens a new connection.
+// ============================================================
+
+describe('Federation both-ends-NAT rendezvous (ADR-010 stage-3+++)', () => {
+  const PR = 19960, PTB = 19961, PB = 19962, PA = 19963;
+  let rR: childProcess.ChildProcess; let rTB: childProcess.ChildProcess;
+  let rB: childProcess.ChildProcess; let rA: childProcess.ChildProcess;
+  let dR: string; let dTB: string; let dB: string; let dA: string;
+  let pubB: string;
+
+  beforeAll(async () => {
+    dR = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-rv-r-'));
+    dTB = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-rv-tb-'));
+    dB = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-rv-b-'));
+    dA = fs.mkdtempSync(path.join(os.tmpdir(), 'mw-rv-a-'));
+    const pubR = generateFederationKeyFile(path.join(dR, 'fed-key.json'));
+    const pubTB = generateFederationKeyFile(path.join(dTB, 'fed-key.json'));
+    pubB = generateFederationKeyFile(path.join(dB, 'fed-key.json'));
+    generateFederationKeyFile(path.join(dA, 'fed-key.json'));
+
+    // R: backbone (no peers). T_B and A both dial R. B dials T_B.
+    fs.writeFileSync(path.join(dR, 'fed-peers.json'), JSON.stringify({ peers: [] }));
+    fs.writeFileSync(path.join(dTB, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubR, url: `ws://127.0.0.1:${PR}` }] }));
+    fs.writeFileSync(path.join(dB, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubTB, url: `ws://127.0.0.1:${PTB}` }] }));
+    fs.writeFileSync(path.join(dA, 'fed-peers.json'), JSON.stringify({ peers: [{ pubkey: pubR, url: `ws://127.0.0.1:${PR}` }] }));
+
+    const base = (dir: string) => ({
+      FEDERATION_MODE: 'open',
+      FEDERATION_KEY_FILE: path.join(dir, 'fed-key.json'),
+      FEDERATION_PEERS_FILE: path.join(dir, 'fed-peers.json'),
+      FEDERATION_GOSSIP_INTERVAL_MS: '2000',
+    });
+    // Targets before dialers: R, then T_B (dials R), then B (dials T_B), then A.
+    rR = await startRelay(PR, dR, { ...base(dR), FEDERATION_ADVERTISE_URL: `ws://127.0.0.1:${PR}` });
+    rTB = await startRelay(PTB, dTB, { ...base(dTB), FEDERATION_ADVERTISE_URL: `ws://127.0.0.1:${PTB}` });
+    rB = await startRelay(PB, dB, { ...base(dB) }); // NAT'd recipient — no endpoint
+    // A: restricted egress (no-dial) + onion transit. Routes only via its uplink R.
+    rA = await startRelay(PA, dA, { ...base(dA), FEDERATION_ONION_TRANSIT: '1', FEDERATION_TRANSIT_ONLY: '1' });
+  }, 60000);
+
+  afterAll(async () => {
+    await stopRelays([rR, rTB, rB, rA]);
+    for (const d of [dR, dTB, dB, dA]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
+  });
+
+  it('bridges a no-dial sender to a NAT-bound recipient through a common backbone relay', async () => {
+    // A must learn R, T_B and B (its own record + 3) before it can bridge.
+    await waitForMetric(PA, 'meshwhisper_federation_addr_records_known', 4, 45000, 'A learns the topology');
+
+    const destHash = nodeCrypto.randomBytes(8).toString('hex');
+    const bob = await connectClient(PB, [destHash]);
+    const gotPacket = new Promise<Buffer>((resolve) => {
+      bob.on('message', (raw: Buffer, isBinary: boolean) => { if (isBinary) resolve(raw); });
+    });
+
+    const alice = await connectClient(PA, []);
+    alice.send(JSON.stringify({ type: 'route', destHash, homeRelay: pubB }));
+    const packet = buildPacket(destHash, new Uint8Array([4, 2, 4, 2, 4, 2]));
+    alice.send(packet, { binary: true });
+
+    const received = await Promise.race([
+      gotPacket,
+      new Promise<Buffer>((_, reject) => setTimeout(() => reject(new Error('packet never bridged to the NAT-bound recipient')), 20000)),
+    ]);
+    expect(Buffer.compare(received, packet)).toBe(0);
+
+    // A originated the onion using ONLY its established uplink — it never dialed.
+    expect(await scrapeMetric(PA, 'meshwhisper_federation_onion_forwards_sent_total')).toBeGreaterThan(0);
+    expect(await scrapeMetric(PA, 'meshwhisper_federation_discovered_dials_total')).toBe(0);
+
+    // The backbone relay R bridged (peeled + forwarded an opaque onion), as did
+    // the anchor T_B — neither delivered/stored. Only B delivered.
+    expect(await scrapeMetric(PR, 'meshwhisper_federation_onion_frames_received_total')).toBeGreaterThan(0);
+    expect(await scrapeMetric(PR, 'meshwhisper_federation_delivered_locally_total')).toBe(0);
+    expect(await scrapeMetric(PTB, 'meshwhisper_federation_onion_frames_received_total')).toBeGreaterThan(0);
+    expect(await scrapeMetric(PB, 'meshwhisper_federation_onion_delivered_total')).toBeGreaterThan(0);
+
+    alice.close();
+    bob.close();
+  }, 60000);
+});

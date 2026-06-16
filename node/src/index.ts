@@ -1687,6 +1687,9 @@ const FEDERATION_ONION_TRANSIT = /^(1|true|on)$/i.test(process.env.FEDERATION_ON
 // destination relay from non-adjacent intermediates). Default applied in the manager.
 const FEDERATION_ONION_HOPS = /^\d+$/.test(process.env.FEDERATION_ONION_HOPS ?? '')
   ? parseInt(process.env.FEDERATION_ONION_HOPS as string, 10) : undefined;
+// ADR-010 stage-3+++: restricted egress — never dial on demand for forwarding,
+// route only over the configured uplink (forces rendezvous/bridge routing).
+const FEDERATION_TRANSIT_ONLY = /^(1|true|on)$/i.test(process.env.FEDERATION_TRANSIT_ONLY ?? '');
 
 const federation: FederationManager | null = federationMode !== 'off'
   ? new FederationManager({
@@ -1694,6 +1697,7 @@ const federation: FederationManager | null = federationMode !== 'off'
       peers: federationPeersConfig,
       ...(FEDERATION_ONION_TRANSIT ? { onionTransit: true } : {}),
       ...(FEDERATION_ONION_HOPS !== undefined ? { onionHops: FEDERATION_ONION_HOPS } : {}),
+      ...(FEDERATION_TRANSIT_ONLY ? { noDial: true } : {}),
       mode: federationMode,
       blockedPubkeys: loadBlocklist(FEDERATION_BLOCKLIST_FILE),
       maxPeers: FEDERATION_MAX_PEERS,
