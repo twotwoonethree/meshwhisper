@@ -332,9 +332,9 @@ Applications sharing relay infrastructure are isolated from each other cryptogra
   (l1) -- node[font=\tiny, text=mwgreen, above, sloped]{P2P} (p3);
 
 % Annotations
-\node[font=\footnotesize, text=mwgray, align=center, below=3mm of p2]
+\node[font=\footnotesize, text=mwgray, align=center, below=6mm of p1]
   {outbound WebSocket\\(phones on cellular)};
-\node[font=\footnotesize, text=mwgreen, align=center, below=3mm of l1]
+\node[font=\footnotesize, text=mwgreen, align=center, below=6mm of l1]
   {connectable peer\\(accepts inbound)};
 
 \end{tikzpicture}
@@ -383,7 +383,7 @@ At higher density still, paths route through several intermediate nodes, none of
 \vspace{10pt}
 
 % ── Figure 3: Privacy at low vs high density ──────────────────────────────────
-\begin{figure}[h]
+\begin{figure}[ht]
 \centering
 
 % ---- Low density ----
@@ -404,11 +404,10 @@ At higher density still, paths route through several intermediate nodes, none of
 ]
 
 % LOW DENSITY
-\node[font=\small\bfseries, text=mwblue] at (0, 1.6) {Low Density};
-
 \node[device] (aliceL) at (-3.2, 0) {Alice};
 \node[mwnode] (nodeL) at (0, 0) {Node X};
 \node[device] (bobL) at (3.2, 0) {Bob};
+\node[font=\small\bfseries, text=mwblue, above=5mm of nodeL] {Low Density};
 
 \draw[thick, mwaccent, -{Stealth[length=2mm]}]
   (aliceL) -- node[above, font=\footnotesize\ttfamily, text=mwgray]{\texttt{0xA3F2…}} (nodeL);
@@ -419,13 +418,13 @@ At higher density still, paths route through several intermediate nodes, none of
   {\textcolor{mwred}{\textbf{Node X sees:}} Alice's IP + Bob's IP\\push tokens for both · traffic timing};
 
 % LOW DENSITY privacy bar
-\node[font=\footnotesize, text=mwgray] at (0, -1.9) {Privacy level:};
-\fill[mwred!80] (-1.4, -2.3) rectangle (1.4, -2.0);
-\node[font=\footnotesize\bfseries, text=white] at (0, -2.15) {WEAK};
+\node[font=\footnotesize, text=mwgray] at (0, -2.5) {Privacy level:};
+\fill[mwred!80] (-1.4, -2.95) rectangle (1.4, -2.7);
+\node[font=\footnotesize\bfseries, text=white] at (0, -2.825) {WEAK};
 
 \end{tikzpicture}
 
-\vspace{8mm}
+\vspace{4mm}
 
 % HIGH DENSITY
 \begin{tikzpicture}[
@@ -442,13 +441,12 @@ At higher density still, paths route through several intermediate nodes, none of
   }
 ]
 
-\node[font=\small\bfseries, text=mwblue] at (0, 1.6) {High Density};
-
 \node[device] (aliceH) at (-5.5, 0) {Alice};
 \node[mwnode] (nodeA) at (-3.0, 0) {Node A};
 \node[mwnode] (nodeB) at (0, 0) {Node B};
 \node[mwnode] (nodeC) at (3.0, 0) {Node C};
 \node[device] (bobH) at (5.5, 0) {Bob};
+\node[font=\small\bfseries, text=mwblue, above=5mm of nodeB] {High Density};
 
 \draw[thick, mwaccent, -{Stealth[length=2mm]}]
   (aliceH) -- node[above, font=\tiny\ttfamily, text=mwgray]{\texttt{0xA3F2…}} (nodeA);
@@ -465,9 +463,9 @@ At higher density still, paths route through several intermediate nodes, none of
   {Sees Bob\\not Alice};
 
 % HIGH DENSITY privacy bar
-\node[font=\footnotesize, text=mwgray] at (0, -1.9) {Privacy level:};
-\fill[mwgreen!80] (-1.4, -2.3) rectangle (1.4, -2.0);
-\node[font=\footnotesize\bfseries, text=white] at (0, -2.15) {STRONG};
+\node[font=\footnotesize, text=mwgray] at (0, -2.5) {Privacy level:};
+\fill[mwgreen!80] (-1.4, -2.95) rectangle (1.4, -2.7);
+\node[font=\footnotesize\bfseries, text=white] at (0, -2.825) {STRONG};
 
 \end{tikzpicture}
 
