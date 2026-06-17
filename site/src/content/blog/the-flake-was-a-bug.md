@@ -6,6 +6,8 @@ pubDate: 2026-06-16T15:00:00Z
 
 *New to MeshWhisper? [Start here](/blog/what-is-meshwhisper/). This one's an engineering post — a bug hunt with a moral.*
 
+The last few posts were architecture with a capital A: [the email model](/blog/messaging-like-email/), [routing without DNS](/blog/dns-free-relay-location/), onion-wrapped transit across the mesh. So here's a palate cleanser, and a reminder that grand designs sit on top of small code that has to actually be right: the entire week's most consequential fix was a single line that says *no*. It started, as these things do, with a flaky test.
+
 There's a particular kind of test failure that everyone has learned to ignore: the one that passes nineteen times and fails the twentieth, always under load, always at a timeout. The reflex is to bump the timeout and move on. Most of the time that's correct, because most of the time the test is just impatient.
 
 We had one of these. A reconnect test models the canonical bad day: Alice adds Bob, deletes him, re-adds him, and they keep chatting. It failed roughly one run in eight — but only when the machine was busy — always on the last line: *"Alice never received Bob's reply."* The honest thing was to find out whether the test was impatient or right before silencing it. It was right.

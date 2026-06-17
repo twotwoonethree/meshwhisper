@@ -4,9 +4,11 @@ description: "MeshWhisper relays now locate and reach each other by cryptographi
 pubDate: 2026-06-16T13:00:00Z
 ---
 
-*New to MeshWhisper? [Start here](/blog/what-is-meshwhisper/) — short version: E2EE messaging for any app, through a relay that can't read a word of it. This post is about how relays now find each other, and why DNS isn't invited.*
+*New to MeshWhisper? [Start here](/blog/what-is-meshwhisper/) — short version: E2EE messaging for any app, through a relay that can't read a word of it. This is the direct sequel to ["Messaging should work like email"](/blog/messaging-like-email/), which ended on a confession: we'd built the email model and left DNS sitting in the routing layer. This post takes it out.*
 
-A federated network has a quiet dependency it rarely admits to: to forward a packet toward someone, a relay has to *find* the relay that homes them. Until now MeshWhisper did that the cheap way — it **flooded**. A packet with no local recipient went to every peer, hop-limited, until it either found a home or died of TTL. And to reach a peer at all, you needed its `wss://` URL. A URL is a domain. A domain is DNS.
+The [last post](/blog/messaging-like-email/) ended on an embarrassment. We'd built anyone-to-anyone encrypted messaging across apps and operators — the email model, minus the surveillance — and then left in the one piece of email we'd spent the whole project swearing off: to deliver across the federation, a relay had to *find* the relay homing the recipient, and it found it by domain name. DNS. The seizable choke point, hiding in plain sight in the routing layer.
+
+A federated network has that quiet dependency whether it admits to it or not: to forward a packet toward someone, a relay has to *find* the relay that homes them. Until now MeshWhisper did that the cheap way — it **flooded**. A packet with no local recipient went to every peer, hop-limited, until it either found a home or died of TTL. And to reach a peer at all, you needed its `wss://` URL. A URL is a domain. A domain is DNS.
 
 DNS is the most boring single point of failure imaginable, and the most effective. Registrars get coerced, names get seized, a `.well-known` lookup is a tap waiting to happen. The [whole pitch](/blog/what-is-meshwhisper/) of MeshWhisper is that there's no central thing to lean on — and we'd left a central thing in the routing layer the entire time. This release takes it out.
 

@@ -26,7 +26,7 @@ Everything you'd expect from a messenger, because your users expect it and your 
 
 ## Multi-device and recovery — shipped, edges still being filed
 
-Link a laptop to a phone by scanning a QR code; messages fan out to all of an account's devices, and devices announce and revoke each other with signed announcements. An **encrypted archive** (which the relay stores and cannot read) brings contacts and history to a fresh device, and peers can replay conversation history to each other — with consent — when someone's device meets a swimming pool. Known gap, stated plainly: a message you send from one of your devices doesn't yet appear on your others. It's on the public backlog.
+Link a laptop to a phone by scanning a QR code; messages fan out to all of an account's devices, and devices announce and revoke each other with signed announcements. An **encrypted archive** (which the relay stores and cannot read) brings contacts and history to a fresh device, and peers can replay conversation history to each other — with consent — when someone's device meets a swimming pool. Mirroring your *own* sent messages across your *own* devices is the newest piece of this and the youngest — shipped at the SDK layer, still settling in the reference apps.
 
 ## The network layer — shipped, awaiting company
 
