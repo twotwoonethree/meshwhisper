@@ -45,6 +45,7 @@ interface MeshWhisperConfig {
   onMessage?: (message: Message) => void;
   onPresence?: (peerId: string, status: PresenceStatus) => void;
   onMessageStatus?: (messageId: string, status: MessageStatus) => void;
+  onGroupReceipt?: (groupId: string, messageId: string, peerId: string, status: 'delivered' | 'read') => void;
   onTyping?: (peerId: string, isTyping: boolean) => void;
   onContactRequest?: (peerId: string, introducedBy: string, username?: string) => void | Promise<void>;
   onGroupInvite?: (groupId: string, groupName: string, invitedBy: string, members: string[]) => void | Promise<void>;
@@ -73,7 +74,8 @@ interface MeshWhisperConfig {
 | `messageRetention` | No | `'unbounded'` | Per-conversation history cap. `'unbounded'` keeps everything (default, suitable for customer-service / compliance). `{ kind: 'count', max }` keeps the N most recent. `{ kind: 'ageMs', max }` drops messages older than `max` ms. Eviction runs on write and at boot. |
 | `onMessage` | No | — | Called when a message is received. |
 | `onPresence` | No | — | Called when a peer's online status changes. |
-| `onMessageStatus` | No | — | Called when an outbound message's delivery status changes (`sent` → `delivered` → `read`). |
+| `onMessageStatus` | No | — | Called when an outbound **DM** message's delivery status changes (`sent` → `delivered` → `read`). |
+| `onGroupReceipt` | No | — | Called when a **group** message you sent is delivered to / read by a member. `peerId` is the member reporting; status is `'delivered'` or `'read'`. A group message has per-member status, so it uses this instead of `onMessageStatus`. See [Group receipts](#meshwhispermarkgroupreadgroupid-messageid). |
 | `onTyping` | No | — | Called when a peer starts or stops typing. `isTyping` is `true` for start, `false` for stop. Ephemeral — not stored or reliable. |
 | `onContactRequest` | No | — | Called when a new peer wants to talk to you. Fires in two cases: (1) a mutual contact introduces a new peer (`introducedBy` is the introducer's peer ID, `username` may be set); (2) a stranger initiates a direct handshake (`introducedBy === peerId`, `username` may be undefined until the peer's app sends a follow-up identifying themselves). Call `addContactByKey(peerId)` from this handler to confirm the contact, or ignore it to decline. |
 | `onGroupInvite` | No | — | Called when another peer invites you to a group. Call `acceptGroupInvite(groupId)` to accept. |
@@ -270,23 +272,43 @@ Triggers `onMessageStatus` on the sender's device with `status: 'read'`.
 
 ### `MeshWhisper.markReadLocal(messageId, conversationId)`
 
-Persists `'read'` status locally **without** sending a receipt to the sender. Use for group messages (where the SDK has no single peer to receipt to) or any case where you want the unread badge to clear on reload without notifying anyone.
+Persists `'read'` status locally **without** sending a receipt to anyone. Use when you want the unread badge to clear on reload without notifying the sender. For group messages where you *do* want to notify, use [`markGroupRead`](#meshwhispermarkgroupreadgroupid-messageid) instead.
 
 ```ts
 await MeshWhisper.markReadLocal(messageId: string, conversationId: string): Promise<void>
 ```
 
-Without this, `getConversations()` recomputes `unreadCount` from `messages/*` with `status !== 'read'` on every boot — so the unread badge resurfaces after a reload unless one of `markRead` or `markReadLocal` has persisted the read status to storage.
+Without this, `getConversations()` recomputes `unreadCount` from `messages/*` with `status !== 'read'` on every boot — so the unread badge resurfaces after a reload unless one of `markRead` / `markReadLocal` / `markGroupRead` has persisted the read status to storage.
+
+### `MeshWhisper.markGroupRead(groupId, messageId)`
+
+Mark a received **group** message as read and send a read receipt to the member who sent it. Unlike `markReadLocal` (silent), this lets the sender's per-member receipt map record that you read the message, surfaced to them via `onGroupReceipt`.
+
+```ts
+await MeshWhisper.markGroupRead(groupId: string, messageId: string): Promise<void>
+```
+
+A `'delivered'` group receipt is sent automatically when you receive a group message — only `'read'` is explicit, via this call. The receipt goes to the original sender only (not fanned to the whole group). The sender accumulates per-member status in `StoredMessage.groupReceipts` (a `Record<peerId, 'delivered' | 'read'>`, monotonic — a late `delivered` never overwrites `read`).
 
 ### `onMessageStatus` (config callback)
 
-Called when an outbound message's delivery status changes.
+Called when an outbound **DM** message's delivery status changes.
 
 ```ts
 onMessageStatus: (messageId: string, status: 'sent' | 'delivered' | 'read' | 'failed') => void
 ```
 
-Status flow: `sending` → `sent` → `delivered` (automatic on decrypt by recipient) → `read` (on `markRead()` call).
+Status flow: `sending` → `sent` → `delivered` (automatic on decrypt by recipient) → `read` (on the recipient's `markRead()` call).
+
+### `onGroupReceipt` (config callback)
+
+The group equivalent of `onMessageStatus`. Called on the **sender's** device when a member delivers or reads a group message you sent.
+
+```ts
+onGroupReceipt: (groupId: string, messageId: string, peerId: string, status: 'delivered' | 'read') => void
+```
+
+`peerId` is the member reporting the receipt. A group message has many recipients, each acking independently, so status is tracked per member rather than as a single value.
 
 ### `MeshWhisper.toggleReaction(conversationId, messageId, emoji)`
 
@@ -961,10 +983,29 @@ The peer ID is stable as long as the storage backend persists. On a browser with
 
 ## Presence
 
+Presence is **passive plus opt-in active**. Any decrypted traffic from a peer — a message, a receipt, a reaction, a typing indicator — marks that peer seen; the status is keyed by the real (decrypted) peer, so it works through a relay (it is *not* the relay's own liveness). For a peer that is connected but idle, use `announcePresence` to advertise liveness without sending a real message.
+
 ### `MeshWhisper.getPresence(peerId)`
+
+Current presence for a peer, computed from how long ago they were last seen.
 
 ```ts
 const status = MeshWhisper.getPresence(peerId: string): 'online' | 'recently_seen' | 'offline' | 'unknown'
+```
+
+- `online` — seen within the last 5 minutes
+- `recently_seen` — seen within the last hour
+- `offline` — last seen over an hour ago
+- `unknown` — never seen
+
+This is the value to **poll** for routing decisions (e.g. "is an agent available to take this conversation?").
+
+### `MeshWhisper.announcePresence(peerIds)`
+
+Advertise that you're online to specific peers without sending a message. Each recipient records you as online and echoes back, so both sides learn the other is live. Fire-and-forget; unlike a session ping, an unanswered announce never triggers a re-handshake. Call on an interval (e.g. a support agent signalling availability) so an idle-but-connected peer still reads as `online`.
+
+```ts
+MeshWhisper.announcePresence(peerIds: string[]): void
 ```
 
 ### `onPresence` (config callback)
@@ -972,6 +1013,8 @@ const status = MeshWhisper.getPresence(peerId: string): 'online' | 'recently_see
 ```ts
 onPresence: (peerId: string, status: PresenceStatus) => void
 ```
+
+Fires on a transition **to** `online` (the first activity seen from a peer). It is **not** fired for the decay back to `recently_seen` / `offline` — there is no offline timer — so to reflect a peer *going* idle, poll `getPresence` rather than relying on this callback.
 
 ---
 

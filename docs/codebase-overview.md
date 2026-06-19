@@ -130,9 +130,9 @@ The intended use case is a developer who wants to add messaging to their existin
 - `MeshWhisper.getMessages(peerId, options)` — message history from storage
 - `MeshWhisper.getConversations()` — all conversations sorted by recency
 - `MeshWhisper.deleteMessage(messageId, conversationId)` — delete stored message
-- `MeshWhisper.markRead(messageId, peerId)` — read receipts
+- `MeshWhisper.markRead(messageId, peerId)` — DM read receipts; `markGroupRead(groupId, messageId)` — group read receipts (`onGroupReceipt` callback, per-member)
 - `MeshWhisper.getLocalPeerId()` — stable peer ID (hex Ed25519 public key)
-- `MeshWhisper.getPresence()`, `onPresence` — presence tracking
+- `MeshWhisper.getPresence()`, `onPresence`, `announcePresence(peerIds)` — real end-peer presence tracking
 - `MeshWhisper.sendTypingIndicator(peerId, isTyping)` — ephemeral typing events; `onTyping` callback
 - `MeshWhisper.generateContactQR()`, `acceptContact()` — QR-based contact exchange
 - `MeshWhisper.addContactByKey(query)` — add contact by peer ID or `@username` (relay directory lookup)
@@ -164,6 +164,12 @@ The intended use case is a developer who wants to add messaging to their existin
 - READ sent when `markRead()` is called
 - Receipts travel through the Double Ratchet channel as `__mw_ctrl` JSON control messages
 - `onMessageStatus` callback fires on the sender's device
+- **Group receipts**: a group message has many recipients, so status is a per-member map (`StoredMessage.groupReceipts: Record<peerId, 'delivered' | 'read'>`) rather than a scalar. Each recipient auto-sends DELIVERED, and `markGroupRead()` sends READ, **to the original sender only** (not fanned to the group). The sender is notified via `onGroupReceipt(groupId, messageId, peerId, status)`. Monotonic — a late DELIVERED never overwrites READ.
+
+### Presence
+- Keyed by the **decrypted sender**, not the transport neighbour — so `getPresence(peerId)` reflects real peers through a relay (the relay itself is no longer tracked as an online "peer")
+- Passive: any decrypted traffic (message, control, receipt) marks the peer seen. Active: `announcePresence(peerIds)` sends a `presence_ping`/`presence_pong` round-trip so an idle-but-connected peer reads as online without a real message
+- `getPresence()` thresholds: `online` < 5 min, `recently_seen` < 1 h, else `offline` / `unknown`. `onPresence` is edge-triggered on the transition to online only (no offline-decay timer) — poll `getPresence()` for current state
 
 ### Deduplication
 - 24-hour rolling window of seen message IDs
