@@ -121,6 +121,8 @@ export interface ControlMessage {
     | 'history_replay'
     | 'session_ping'
     | 'session_pong'
+    | 'presence_ping'
+    | 'presence_pong'
     | 'device_added'
     | 'device_revoked'
     | 'device_linked'

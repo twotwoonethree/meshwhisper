@@ -642,6 +642,7 @@ export class MeshWhisper {
       },
       config.messageRetention ?? 'unbounded',
       config.onGroupReceipt ?? null,
+      (peerId) => this.markPeerSeen(peerId),
     );
 
     this.onPresenceHandler = config.onPresence ?? null;
@@ -1804,6 +1805,26 @@ export class MeshWhisper {
     return 'offline';
   }
 
+  /**
+   * Announce we're online to specific peers by sending each a lightweight
+   * presence ping. The recipient records us as online and echoes a
+   * presence_pong, so both sides learn the other is live — without exchanging
+   * a real message. Call on an interval to advertise availability (e.g. a
+   * support agent signalling it can take new conversations) so an idle but
+   * connected peer still reads as online. Fire-and-forget; unlike
+   * `pingPeer`, an unanswered ping does not trigger a re-handshake.
+   */
+  static announcePresence(peerIds: string[]): void {
+    return MeshWhisper.instance.announcePresenceInstance(peerIds);
+  }
+
+  announcePresenceInstance(peerIds: string[]): void {
+    this.assertRunning();
+    for (const peerId of peerIds) {
+      this.sendControl(peerId, { __mw_ctrl: 'presence_ping' });
+    }
+  }
+
   // ================================================================
   // Public API — Transport Events
   // ================================================================
@@ -2557,7 +2578,14 @@ export class MeshWhisper {
   private handleIncomingPacket(packet: Packet, source: string, bearer: BearerType): void {
     if (!this.running) return;
 
-    this.updatePresence(source, 'online');
+    // Transport-neighbour presence only for the mesh bearers, where `source`
+    // IS a real peer. On the 'internet' bearer `source` is the relay, not a
+    // peer — recording it would track the relay as an online "peer" (the old
+    // "presence is dead UI over a relay" confusion). Real end-peer presence on
+    // that bearer comes from markPeerSeen() after the packet decrypts.
+    if (bearer === 'platform_p2p' || bearer === 'local_net') {
+      this.updatePresence(source, 'online');
+    }
     this.reciprocityLedger.recordPeerRelayedForUs(source, packet.encryptedPayload.length);
 
     if (packet.flags === PacketFlags.CHAFF) return;
@@ -2747,6 +2775,21 @@ export class MeshWhisper {
   // ================================================================
   // Internal — Presence
   // ================================================================
+
+  /**
+   * Presence-only update: record that we just heard from a REAL peer (the
+   * decrypted sender, not the transport neighbour) and fire onPresence on a
+   * transition to online. No store-flush side effect — that belongs to
+   * updatePresence, which handles the transport-neighbour-came-online case.
+   * This is what makes getPresence(peerId) reflect actual peers in relay mode.
+   */
+  private markPeerSeen(peerId: string): void {
+    const previousStatus = this.presenceRecords.get(peerId)?.status ?? 'unknown';
+    this.presenceRecords.set(peerId, { peerId, status: 'online', lastSeen: Date.now() });
+    if (previousStatus !== 'online' && this.onPresenceHandler) {
+      this.onPresenceHandler(peerId, 'online');
+    }
+  }
 
   private updatePresence(peerId: string, status: PresenceStatus): void {
     const now = Date.now();

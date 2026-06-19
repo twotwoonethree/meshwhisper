@@ -90,6 +90,13 @@ export class MessageHandler {
      * a group message has per-member status.
      */
     private readonly onGroupReceipt: ((groupId: string, messageId: string, peerId: string, status: 'delivered' | 'read') => void) | null = null,
+    /**
+     * Fired with the REAL (decrypted) peer id whenever we successfully process
+     * anything from them — a message, a control, a receipt. The coordinator
+     * uses it to track end-peer presence. Unlike the transport `source`, this
+     * is the actual sender even in relay mode.
+     */
+    private readonly onPeerActivity: ((peerId: string) => void) | null = null,
   ) {}
 
   // ----------------------------------------------------------------
@@ -253,6 +260,7 @@ export class MessageHandler {
         ...(envelope.forwardedFrom ? { forwardedFrom: envelope.forwardedFrom } : {}),
       }).catch(() => {});
 
+      this.onPeerActivity?.(matchedPeerId);
       if (this.onMessage) {
         this.onMessage(message);
       }
@@ -338,6 +346,7 @@ export class MessageHandler {
         ...(forwardedFrom ? { forwardedFrom } : {}),
       }).catch(() => {});
 
+      this.onPeerActivity?.(groupSenderId);
       if (this.onMessage) {
         this.onMessage(message);
       }
@@ -362,7 +371,16 @@ export class MessageHandler {
   }
 
   handleControlMessage(ctrl: ControlMessage, fromPeerId: string): void {
+    // Any control from a real peer is a liveness signal.
+    this.onPeerActivity?.(fromPeerId);
     switch (ctrl.__mw_ctrl) {
+      case 'presence_ping':
+        // Liveness probe — already recorded above; echo so the sender learns
+        // we're live too. (No re-handshake side effect, unlike session_ping.)
+        this.sendControl(fromPeerId, { __mw_ctrl: 'presence_pong' });
+        break;
+      case 'presence_pong':
+        break;
       case 'delivered':
         if (ctrl.messageId) {
           if (ctrl.groupId) {
