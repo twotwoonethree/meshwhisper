@@ -9,12 +9,14 @@
 //            SENT <messageId>          we sent a group message
 //            MSG <conversationId> <messageId> <text>          inbound msg
 //            REACT <conversationId> <messageId> <emoji> <peerId> <add>  inbound reaction
+//            GRECEIPT <groupId> <messageId> <peerId> <status>  group delivery/read receipt
 //            DISAPPEAR <conversationId> <ttlMs|null> <by>     inbound TTL change
 //            STORED <conversationId> <messageId> <fields-json>  on-demand inspection
 //            ERR <detail>
 //   stdin:   ADD <@username>
 //            CREATE <name> <peerId>[ <peerId>...]
 //            GSEND <groupId> <text>
+//            GREAD <groupId> <messageId>
 //            GREACT <groupId> <messageId> <emoji>
 //            GDISAPPEAR <groupId> <ms|null>
 //            GFORWARD <fromConv> <messageId> <toConv>
@@ -52,6 +54,9 @@ const mw = await MeshWhisper.init({
   onReactionUpdated: (conversationId, messageId, peerId, emoji, add) => {
     console.log(`REACT ${conversationId} ${messageId} ${emoji} ${peerId} ${add}`);
   },
+  onGroupReceipt: (groupId, messageId, peerId, status) => {
+    console.log(`GRECEIPT ${groupId} ${messageId} ${peerId} ${status}`);
+  },
   onDisappearingMessagesChanged: (conversationId, ttlMs, by) => {
     console.log(`DISAPPEAR ${conversationId} ${ttlMs ?? 'null'} ${by}`);
   },
@@ -84,6 +89,11 @@ rl.on('line', (line) => {
         const handle = MeshWhisper.getGroup(groupId);
         if (!handle) { console.log('ERR no-group'); return; }
         await handle.send(new TextEncoder().encode(text));
+        return;
+      }
+      if (line.startsWith('GREAD ')) {
+        const [groupId, messageId] = line.slice(6).trim().split(/\s+/);
+        await MeshWhisper.markGroupRead(groupId!, messageId!);
         return;
       }
       if (line.startsWith('GREACT ')) {
@@ -129,6 +139,7 @@ rl.on('line', (line) => {
           replyTo: m.replyTo ?? null,
           forwardedFrom: m.forwardedFrom ?? null,
           expiresAt: m.expiresAt ?? null,
+          groupReceipts: m.groupReceipts ?? null,
         };
         console.log(`STORED ${conv} ${mid} ${JSON.stringify(fields)}`);
         return;

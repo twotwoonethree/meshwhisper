@@ -641,6 +641,7 @@ export class MeshWhisper {
         }
       },
       config.messageRetention ?? 'unbounded',
+      config.onGroupReceipt ?? null,
     );
 
     this.onPresenceHandler = config.onPresence ?? null;
@@ -1920,6 +1921,33 @@ export class MeshWhisper {
   async markReadLocalInstance(messageId: string, conversationId: string): Promise<void> {
     this.assertRunning();
     await this.messageHandler.updateMessageStatus(messageId, conversationId, 'read');
+  }
+
+  /**
+   * Mark a received GROUP message as read and notify the original sender with
+   * a read receipt fanned over the group channel. Unlike `markReadLocal`
+   * (which is silent), this lets the sender's `groupReceipts` map record that
+   * this member read the message — surfaced to the sender via `onGroupReceipt`.
+   * `groupId` is the group conversation id.
+   */
+  static async markGroupRead(groupId: string, messageId: string): Promise<void> {
+    return MeshWhisper.instance.markGroupReadInstance(groupId, messageId);
+  }
+
+  async markGroupReadInstance(groupId: string, messageId: string): Promise<void> {
+    this.assertRunning();
+    // Clear the local unread state on our inbound copy, like markReadLocal…
+    await this.messageHandler.updateMessageStatus(messageId, groupId, 'read');
+    // …then receipt straight to the member who sent it — the only peer that
+    // tracks this message's per-member status. Look up the sender from our
+    // stored copy; if it's gone or it's our own message, there's no one to
+    // receipt to.
+    const stored = await this.messageHandler.getMessages(groupId, { limit: 500 });
+    const msg = stored.find((m) => m.id === messageId);
+    const sender = msg?.groupSenderId ?? msg?.senderId;
+    if (sender && sender !== this.getLocalPeerId()) {
+      this.sendControl(sender, { __mw_ctrl: 'read', messageId, groupId });
+    }
   }
 
   /**

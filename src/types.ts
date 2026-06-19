@@ -426,6 +426,13 @@ export interface MeshWhisperConfig {
   /** Called when the delivery status of an outbound message changes. */
   onMessageStatus?: (messageId: string, status: import('./persistence/types.js').StoredMessage['status']) => void;
   /**
+   * Called when a group message YOU sent is delivered to / read by a member.
+   * `peerId` is the member reporting the receipt; `status` is 'delivered' or
+   * 'read'. Group messages use this (one message, many recipients, each
+   * acking independently); DMs use onMessageStatus.
+   */
+  onGroupReceipt?: (groupId: string, messageId: string, peerId: string, status: 'delivered' | 'read') => void;
+  /**
    * Transparency hook: fired once per outbound (non-control) message after it
    * is encrypted, carrying the exact bytes the relay receives. Exposes only
    * already-encrypted data (and the rotating destHash) — no key material or

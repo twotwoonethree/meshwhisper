@@ -43,6 +43,15 @@ export interface StoredMessage {
    */
   reactions?: Record<string, string[]>;
   /**
+   * Per-member delivery/read status for a group message you sent. Keyed by
+   * member peerId → the furthest status that member has reported
+   * ('delivered' | 'read'). Absent peer = no receipt yet. DMs use the scalar
+   * `status` field instead; groups need a map because one message has many
+   * recipients, each acking independently. Only the sender's outbound copy
+   * accumulates this.
+   */
+  groupReceipts?: Record<string, 'delivered' | 'read'>;
+  /**
    * Set when this message was sent as a reply to an earlier one (via
    * `SendOptions.replyTo`). `messageId` references the original in the
    * same conversation; `snippetText` is a short preview the sender

@@ -84,6 +84,12 @@ export class MessageHandler {
      * `{ kind: 'ageMs', max }` to bound local storage.
      */
     private readonly retention: import('../types.js').MessageRetention = 'unbounded',
+    /**
+     * Called when a group message WE sent is delivered to / read by a member.
+     * Mirrors onMessageStatus but carries the reporting member's peerId, since
+     * a group message has per-member status.
+     */
+    private readonly onGroupReceipt: ((groupId: string, messageId: string, peerId: string, status: 'delivered' | 'read') => void) | null = null,
   ) {}
 
   // ----------------------------------------------------------------
@@ -335,6 +341,21 @@ export class MessageHandler {
       if (this.onMessage) {
         this.onMessage(message);
       }
+
+      // Group delivery receipt: send a 'delivered' straight back to the one
+      // member who sent the message — the only peer that accumulates this
+      // message's per-member status. (Fanning to the whole group would spray
+      // it at members who hold no copy of it and may share no session with us,
+      // wasting traffic and churning sessions.) Establishes a pairwise session
+      // with the sender on demand if needed, the same way reactions reach
+      // non-creator members.
+      if (groupSenderId !== this.getLocalPeerId()) {
+        this.sendControl(groupSenderId, {
+          __mw_ctrl: 'delivered',
+          messageId: message.id,
+          groupId,
+        });
+      }
     } catch {
       // Malformed group envelope — drop
     }
@@ -344,12 +365,20 @@ export class MessageHandler {
     switch (ctrl.__mw_ctrl) {
       case 'delivered':
         if (ctrl.messageId) {
-          this.updateMessageStatus(ctrl.messageId, fromPeerId, 'delivered').catch(() => {});
+          if (ctrl.groupId) {
+            this.updateGroupReceipt(ctrl.messageId, ctrl.groupId, fromPeerId, 'delivered').catch(() => {});
+          } else {
+            this.updateMessageStatus(ctrl.messageId, fromPeerId, 'delivered').catch(() => {});
+          }
         }
         break;
       case 'read':
         if (ctrl.messageId) {
-          this.updateMessageStatus(ctrl.messageId, fromPeerId, 'read').catch(() => {});
+          if (ctrl.groupId) {
+            this.updateGroupReceipt(ctrl.messageId, ctrl.groupId, fromPeerId, 'read').catch(() => {});
+          } else {
+            this.updateMessageStatus(ctrl.messageId, fromPeerId, 'read').catch(() => {});
+          }
         }
         break;
       case 'delete':
@@ -495,6 +524,43 @@ export class MessageHandler {
     });
     if (updated && this.onMessageStatus) {
       this.onMessageStatus(messageId, status);
+    }
+  }
+
+  /**
+   * Record a per-member delivery/read receipt for a group message we sent.
+   * Like updateMessageStatus, but writes into the `groupReceipts` map keyed by
+   * the reporting member rather than the scalar `status` (a group message has
+   * many recipients, each acking independently). Only the sender's outbound
+   * copy is annotated; other members' inbound copies no-op. Monotonic — a
+   * late 'delivered' never overwrites an existing 'read'.
+   */
+  async updateGroupReceipt(
+    messageId: string,
+    groupId: string,
+    fromPeerId: string,
+    status: 'delivered' | 'read',
+  ): Promise<void> {
+    if (!this.storage) return;
+    const storage = this.storage;
+    const key = `messages/${groupId}`;
+    let updated = false;
+    await this.storageMutex.run(key, async () => {
+      const raw = await storage.get(key);
+      if (!raw) return;
+      const messages: StoredMessage[] = JSON.parse(raw);
+      const msg = messages.find((m) => m.id === messageId);
+      if (!msg || msg.direction !== 'outbound') return;
+      const receipts = msg.groupReceipts ?? {};
+      if (receipts[fromPeerId] === status) return;             // no change
+      if (receipts[fromPeerId] === 'read' && status === 'delivered') return; // don't downgrade
+      receipts[fromPeerId] = status;
+      msg.groupReceipts = receipts;
+      await storage.set(key, JSON.stringify(messages));
+      updated = true;
+    });
+    if (updated && this.onGroupReceipt) {
+      this.onGroupReceipt(groupId, messageId, fromPeerId, status);
     }
   }
 
