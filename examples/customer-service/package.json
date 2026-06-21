@@ -1,0 +1,22 @@
+{
+  "name": "@meshwhisper/example-customer-service",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reference: guest customer → presence-based routing to an available agent → supervised group with read receipts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "supervisor": "tsx src/supervisor.ts",
+    "agent": "tsx src/agent.ts",
+    "dispatcher": "tsx src/dispatcher.ts",
+    "customer": "tsx src/customer.ts"
+  },
+  "dependencies": {
+    "@meshwhisper/sdk": "file:../..",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
