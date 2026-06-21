@@ -34,10 +34,13 @@ Three things, all leaning on primitives the SDK gained for this use case:
 1. **Guest identity.** The customer (`customer.ts`) inits with *no* username — a
    generated identity. No sign-up, no account; it reaches support purely by the
    dispatcher's handle. This is the anonymous-visitor case.
-2. **Presence-based routing.** Agents call `announcePresence([dispatcher])` on a
-   heartbeat; the dispatcher polls `getPresence(agentId)` and routes only to an
-   agent that's actually online. Kill an agent and the dispatcher stops routing
-   to it — that's availability, not a static list.
+2. **Presence-based routing, with a queue.** Agents call
+   `announcePresence([dispatcher])` on a heartbeat; the dispatcher polls
+   `getPresence(agentId)` and routes only to an agent that's actually online.
+   Kill an agent and the dispatcher stops routing to it — that's availability,
+   not a static list. When *no* agent is online the customer is **queued** (FIFO,
+   told their position) and a drain loop connects them as agents come back —
+   first-come, first-served.
 3. **Group read receipts.** The escalated conversation is a *group*, so receipts
    are per-member: the agent's `onGroupReceipt` fires `✓✓` when the customer
    reads a reply, and both sides `markGroupRead()` what they've seen.
@@ -90,9 +93,10 @@ supervisor's `audit.jsonl` filling up.
 
 Each is a small, well-bounded addition — deliberately cut so the pattern stays legible:
 
-- **Queueing.** If no agent is online the customer is told to hold; a real
-  system queues them and connects when one frees up (re-run routing on the next
-  `announcePresence` from an agent).
+- **Capacity / concurrency.** The queue holds customers only while *no* agent is
+  online; an online agent is treated as able to take work, so the backlog flushes
+  to the first one back. Per-agent capacity ("one live chat at a time") needs
+  ticket states (below) to know when an agent frees up.
 - **Skill / language / tenant routing.** `pickAvailableAgent()` takes the first
   online agent; a real dispatcher scores on skill, language, load, on-call.
 - **Persistent escalation state.** `placed` is an in-memory Set; persist to
