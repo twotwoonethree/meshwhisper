@@ -68,8 +68,10 @@ async function resolveTargets(): Promise<{ agent: string; supervisor: string } |
   if (cachedAgentPeerId && cachedSupervisorPeerId) {
     return { agent: cachedAgentPeerId, supervisor: cachedSupervisorPeerId };
   }
-  const agent = await MeshWhisper.resolveUsername(AGENT_USERNAME);
-  const supervisor = await MeshWhisper.resolveUsername(SUPERVISOR_USERNAME);
+  // username → peerId resolution is addContactByKey('@name'); resolveUsername
+  // is the reverse (peerId → name) and would return undefined here.
+  const agent = await MeshWhisper.addContactByKey(`@${AGENT_USERNAME}`);
+  const supervisor = await MeshWhisper.addContactByKey(`@${SUPERVISOR_USERNAME}`);
   if (!agent || !supervisor) {
     console.warn(
       `[triage] cannot resolve targets — ` +
