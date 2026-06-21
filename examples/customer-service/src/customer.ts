@@ -43,6 +43,10 @@ const mw = await startActor({
     // Mark group replies read so the agent gets a read receipt (✓✓).
     if (msg.groupId) await MeshWhisper.markGroupRead(msg.groupId, msg.id);
 
+    // The dispatcher's handoff line is internal context for the agent/supervisor,
+    // not customer-facing — don't print it.
+    if (text.startsWith('[handoff]')) return;
+
     const who = msg.groupId ? 'support' : 'dispatch';
     process.stdout.write(`\n${who}> ${text}\nyou> `);
   },
