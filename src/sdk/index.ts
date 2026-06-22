@@ -1317,8 +1317,10 @@ export class MeshWhisper {
     // (reactions, replies, forwarding, delete) — receivers would all
     // have different ids for the same logical message. The id is sent
     // on the inner __mw_grp envelope and used by handleGroupEnvelope as
-    // the message id on the receiver's stored copy.
-    const messageId = this.messageHandler.createMessageId();
+    // the message id on the receiver's stored copy. A caller-supplied
+    // options.messageId is honored (as on DMs) so clients can correlate an
+    // optimistic UI bubble with its later group receipt.
+    const messageId = options?.messageId ?? this.messageHandler.createMessageId();
     const now = Date.now();
     const expiresAt = options?.expiry ? now + options.expiry * 1000 : undefined;
 
