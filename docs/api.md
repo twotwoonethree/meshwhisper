@@ -119,9 +119,13 @@ await MeshWhisper.send(
 ```ts
 interface SendOptions {
   urgency?: 'background' | 'normal' | 'urgent' | 'critical';  // default: 'normal'
-  expiry?: number;   // seconds from now, after which the message should be discarded
+  expiry?: number;     // seconds from now, after which the message should be discarded
+  messageId?: string;  // client-assigned message id (else one is generated)
+  // replyTo, forwardedFrom — see the dedicated sections below
 }
 ```
+
+`messageId` lets the caller assign the id instead of having one generated. It is honored on **both** direct messages and **group** sends, so a UI can correlate an optimistic bubble with its later `onMessageStatus` / `onGroupReceipt` by the id it chose. (Before this was honored on group sends, group bubbles couldn't be matched to their receipts.)
 
 **Example:**
 ```ts
